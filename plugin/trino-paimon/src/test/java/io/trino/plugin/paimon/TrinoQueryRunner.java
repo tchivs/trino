@@ -59,7 +59,7 @@ public class TrinoQueryRunner
         Map<String, String> options = ImmutableMap.<String, String>builder()
                 .put("warehouse", catalogDir.toFile().toURI().toString()).putAll(extraConnectorProperties).build();
 
-        queryRunner.installPlugin(new TestingPaimonPlugin(catalogDir.getParent()));
+        queryRunner.installPlugin(new TestingPaimonPlugin(Path.of("/")));
         queryRunner.createCatalog(PAIMON_CATALOG, PAIMON_CATALOG, options);
 
         queryRunner.execute("CREATE SCHEMA tpch");
