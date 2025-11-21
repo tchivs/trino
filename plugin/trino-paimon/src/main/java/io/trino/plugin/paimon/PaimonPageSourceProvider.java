@@ -471,9 +471,14 @@ public class PaimonPageSourceProvider
                     com.google.common.collect.ImmutableList.of(parquetPredicate), descriptorsByPath, DateTimeZone.UTC,
                     100, options);
 
-            // Build ParquetPageSource
+            // Build ParquetPageSource with schema evolution support
             com.google.common.collect.ImmutableList.Builder<Column> parquetColumnsBuilder = com.google.common.collect.ImmutableList
                     .builder();
+
+            // Track column mapping: output index -> delegate index (-1 if missing)
+            int[] columnMapping = new int[columns.size()];
+            int delegateIndex = 0;
+            boolean hasMissingColumns = false;
 
             for (int i = 0; i < columns.size(); i++) {
                 String columnName = columns.get(i);
@@ -487,7 +492,16 @@ public class PaimonPageSourceProvider
                     Optional<Field> field = constructField(type, columnIO);
                     if (field.isPresent()) {
                         parquetColumnsBuilder.add(new Column(parquetField.getName(), field.get()));
+                        columnMapping[i] = delegateIndex++;
                     }
+                    else {
+                        columnMapping[i] = -1;
+                        hasMissingColumns = true;
+                    }
+                }
+                else {
+                    columnMapping[i] = -1;
+                    hasMissingColumns = true;
                 }
             }
 
@@ -506,7 +520,14 @@ public class PaimonPageSourceProvider
                     Optional.empty(),
                     Optional.empty());
 
-            return new ParquetPageSource(parquetReader);
+            ConnectorPageSource pageSource = new ParquetPageSource(parquetReader);
+
+            // Wrap with SchemaEvolutionPageSource if there are missing columns
+            if (hasMissingColumns) {
+                pageSource = new SchemaEvolutionPageSource(pageSource, columns.size(), columnMapping, types);
+            }
+
+            return pageSource;
         }
         catch (Exception e) {
             throw new RuntimeException("Failed to create Parquet page source", e);

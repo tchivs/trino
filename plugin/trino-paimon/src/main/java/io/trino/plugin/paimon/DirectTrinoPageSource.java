@@ -28,6 +28,7 @@ public class DirectTrinoPageSource
     private final LinkedList<ConnectorPageSource> pageSourceQueue;
     private ConnectorPageSource current;
     private long completedBytes;
+    private long readTimeNanos;
 
     public DirectTrinoPageSource(LinkedList<ConnectorPageSource> pageSourceQueue)
     {
@@ -44,7 +45,7 @@ public class DirectTrinoPageSource
     @Override
     public long getReadTimeNanos()
     {
-        return current == null ? 0 : current.getReadTimeNanos();
+        return readTimeNanos + (current == null ? 0 : current.getReadTimeNanos());
     }
 
     @Override
@@ -80,6 +81,7 @@ public class DirectTrinoPageSource
         }
         try {
             completedBytes += current.getCompletedBytes();
+            readTimeNanos += current.getReadTimeNanos();
             current.close();
         }
         catch (IOException e) {
