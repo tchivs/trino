@@ -47,6 +47,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Math.toIntExact;
 import static org.apache.paimon.shade.guava30.com.google.common.base.Verify.verify;
@@ -112,8 +113,8 @@ public class PaimonRow
     @Override
     public byte getByte(int i)
     {
-        Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, singlePage.getBlock(i), 0);
-        return slice.getByte(0);
+        long value = (long) TypeUtils.readNativeValue(TINYINT, singlePage.getBlock(i), 0);
+        return (byte) value;
     }
 
     @Override
@@ -267,8 +268,8 @@ public class PaimonRow
         @Override
         public byte getByte(int pos)
         {
-            Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, block, getPosition(pos));
-            return slice.getByte(0);
+            long value = (long) TypeUtils.readNativeValue(TINYINT, block, getPosition(pos));
+            return (byte) value;
         }
 
         @Override
@@ -570,8 +571,8 @@ public class PaimonRow
         public byte getByte(int pos)
         {
             Block fieldBlock = rowBlock.getFieldBlock(pos);
-            Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, fieldBlock, position);
-            return slice.getByte(0);
+            long value = (long) TypeUtils.readNativeValue(TINYINT, fieldBlock, position);
+            return (byte) value;
         }
 
         @Override

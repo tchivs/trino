@@ -47,10 +47,12 @@ public class TestPaimonAllTypes
     @Test
     public void testTinyintType()
     {
-        // Test reading TINYINT type (write via Paimon API works, but Trino INSERT has a bug)
         assertUpdate("CREATE TABLE test_tinyint (id INTEGER, val TINYINT) WITH (bucket = '-1')");
-        // Simple insert without TINYINT values to test table creation
-        assertQuery("SELECT COUNT(*) FROM test_tinyint", "SELECT 0");
+        assertUpdate("INSERT INTO test_tinyint VALUES (1, 127), (2, -128), (3, 0), (4, null)", 4);
+        assertQuery("SELECT COUNT(*) FROM test_tinyint WHERE val = 127", "SELECT 1");
+        assertQuery("SELECT COUNT(*) FROM test_tinyint WHERE val = -128", "SELECT 1");
+        assertQuery("SELECT COUNT(*) FROM test_tinyint WHERE val = 0", "SELECT 1");
+        assertQuery("SELECT COUNT(*) FROM test_tinyint WHERE val IS NULL", "SELECT 1");
         assertUpdate("DROP TABLE test_tinyint");
     }
 
