@@ -1,0 +1,412 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.plugin.paimon.catalog;
+
+import io.trino.filesystem.TrinoFileSystem;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.paimon.ClassLoaderUtils;
+import io.trino.plugin.paimon.fileio.PaimonFileIOLoader;
+import io.trino.spi.connector.ConnectorSession;
+import jakarta.annotation.Nullable;
+import org.apache.paimon.PagedList;
+import org.apache.paimon.Snapshot;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogContext;
+import org.apache.paimon.catalog.CatalogFactory;
+import org.apache.paimon.catalog.CatalogLoader;
+import org.apache.paimon.catalog.Database;
+import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.catalog.PropertyChange;
+import org.apache.paimon.function.Function;
+import org.apache.paimon.function.FunctionChange;
+import org.apache.paimon.options.Options;
+import org.apache.paimon.partition.Partition;
+import org.apache.paimon.partition.PartitionStatistics;
+import org.apache.paimon.schema.Schema;
+import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.security.SecurityContext;
+import org.apache.paimon.table.Instant;
+import org.apache.paimon.table.Table;
+import org.apache.paimon.table.TableSnapshot;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static org.apache.paimon.utils.HadoopUtils.HADOOP_LOAD_DEFAULT_CONFIG;
+
+public class PaimonCatalog
+        implements
+        Catalog
+{
+    private final Options options;
+
+    private final TrinoFileSystemFactory paimonFileSystemFactory;
+
+    private Catalog current;
+
+    private volatile boolean inited;
+
+    public PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory)
+    {
+        this.options = options;
+        this.paimonFileSystemFactory = paimonFileSystemFactory;
+    }
+
+    public void initSession(ConnectorSession connectorSession)
+    {
+        if (!inited) {
+            synchronized (this) {
+                if (!inited) {
+                    current = ClassLoaderUtils.runWithContextClassLoader(() -> {
+                        TrinoFileSystem trinoFileSystem = paimonFileSystemFactory.create(connectorSession);
+                        Options catalogOptions = Options.fromMap(options.toMap());
+                        // Disable loading default Hadoop configuration to minimize dependencies
+                        // We use TrinoFileIOLoader which bypasses Hadoop FileSystem entirely
+                        // catalogOptions.set("hadoop-load-default-config", "false");
+                        CatalogContext catalogContext = CatalogContext.create(catalogOptions,
+                                new PaimonFileIOLoader(trinoFileSystem));
+                        if (catalogOptions.getBoolean(HADOOP_LOAD_DEFAULT_CONFIG.key(), false)) {
+                            try {
+                                SecurityContext.install(catalogContext);
+                            }
+                            catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        }
+                        return CatalogFactory.createCatalog(catalogContext);
+                    }, this.getClass().getClassLoader());
+                    inited = true;
+                }
+            }
+        }
+    }
+
+    @Override
+    public Map<String, String> options()
+    {
+        if (!inited) {
+            throw new RuntimeException("Not inited yet.");
+        }
+        return current.options();
+    }
+
+    @Override
+    public CatalogLoader catalogLoader()
+    {
+        return null;
+    }
+
+    @Override
+    public boolean caseSensitive()
+    {
+        return current.caseSensitive();
+    }
+
+    @Override
+    public List<String> listDatabases()
+    {
+        return current.listDatabases();
+    }
+
+    @Override
+    public PagedList<String> listDatabasesPaged(@Nullable Integer maxResults, @Nullable String pageToken,
+            @Nullable String databaseNamePattern)
+    {
+        return current.listDatabasesPaged(maxResults, pageToken, databaseNamePattern);
+    }
+
+    @Override
+    public void createDatabase(String name, boolean ignoreIfExists, Map<String, String> properties)
+            throws DatabaseAlreadyExistException
+    {
+        current.createDatabase(name, ignoreIfExists, properties);
+    }
+
+    @Override
+    public Database getDatabase(String name)
+            throws DatabaseNotExistException
+    {
+        return current.getDatabase(name);
+    }
+
+    @Override
+    public void dropDatabase(String name, boolean ignoreIfNotExists, boolean cascade)
+            throws DatabaseNotExistException,
+            DatabaseNotEmptyException
+    {
+        current.dropDatabase(name, ignoreIfNotExists, cascade);
+    }
+
+    @Override
+    public void alterDatabase(String name, List<PropertyChange> changes, boolean ignoreIfNotExists)
+            throws DatabaseNotExistException
+    {
+        current.alterDatabase(name, changes, ignoreIfNotExists);
+    }
+
+    @Override
+    public Table getTable(Identifier identifier)
+            throws TableNotExistException
+    {
+        return current.getTable(identifier);
+    }
+
+    @Override
+    public List<String> listTables(String databaseName)
+            throws DatabaseNotExistException
+    {
+        return current.listTables(databaseName);
+    }
+
+    @Override
+    public PagedList<String> listTablesPaged(String databaseName, Integer maxResults, String pageToken,
+            String tableNamePattern)
+            throws DatabaseNotExistException
+    {
+        return current.listTablesPaged(databaseName, maxResults, pageToken, tableNamePattern);
+    }
+
+    @Override
+    public PagedList<Table> listTableDetailsPaged(String databaseName, @Nullable Integer maxResults,
+            @Nullable String pageToken, @Nullable String tableNamePattern)
+            throws DatabaseNotExistException
+    {
+        return current.listTableDetailsPaged(databaseName, maxResults, pageToken, tableNamePattern);
+    }
+
+    @Override
+    public void dropTable(Identifier identifier, boolean ignoreIfNotExists)
+            throws TableNotExistException
+    {
+        current.dropTable(identifier, ignoreIfNotExists);
+    }
+
+    @Override
+    public void createTable(Identifier identifier, Schema schema, boolean ignoreIfExists)
+            throws TableAlreadyExistException,
+            DatabaseNotExistException
+    {
+        current.createTable(identifier, schema, ignoreIfExists);
+    }
+
+    @Override
+    public void renameTable(Identifier fromTable, Identifier toTable, boolean ignoreIfNotExists)
+            throws TableNotExistException,
+            TableAlreadyExistException
+    {
+        current.renameTable(fromTable, toTable, ignoreIfNotExists);
+    }
+
+    @Override
+    public void alterTable(Identifier identifier, List<SchemaChange> changes, boolean ignoreIfNotExists)
+            throws TableNotExistException,
+            ColumnAlreadyExistException,
+            ColumnNotExistException
+    {
+        current.alterTable(identifier, changes, ignoreIfNotExists);
+    }
+
+    @Override
+    public List<Partition> listPartitions(Identifier identifier)
+            throws TableNotExistException
+    {
+        return current.listPartitions(identifier);
+    }
+
+    @Override
+    public PagedList<Partition> listPartitionsPaged(Identifier identifier, @Nullable Integer maxResults,
+            @Nullable String pageToken, @Nullable String partitionNamePattern)
+            throws TableNotExistException
+    {
+        return current.listPartitionsPaged(identifier, maxResults, pageToken, partitionNamePattern);
+    }
+
+    @Override
+    public boolean supportsListObjectsPaged()
+    {
+        return current.supportsListObjectsPaged();
+    }
+
+    @Override
+    public boolean supportsVersionManagement()
+    {
+        return current.supportsVersionManagement();
+    }
+
+    @Override
+    public boolean commitSnapshot(Identifier identifier, @Nullable String tableUuid, Snapshot snapshot,
+            List<PartitionStatistics> statistics)
+            throws TableNotExistException
+    {
+        return current.commitSnapshot(identifier, tableUuid, snapshot, statistics);
+    }
+
+    @Override
+    public Optional<TableSnapshot> loadSnapshot(Identifier identifier)
+            throws TableNotExistException
+    {
+        return current.loadSnapshot(identifier);
+    }
+
+    @Override
+    public Optional<Snapshot> loadSnapshot(Identifier identifier, String version)
+            throws TableNotExistException
+    {
+        return current.loadSnapshot(identifier, version);
+    }
+
+    @Override
+    public PagedList<Snapshot> listSnapshotsPaged(Identifier identifier, @Nullable Integer maxResults,
+            @Nullable String pageToken)
+            throws TableNotExistException
+    {
+        return current.listSnapshotsPaged(identifier, maxResults, pageToken);
+    }
+
+    @Override
+    public void rollbackTo(Identifier identifier, Instant instant)
+            throws TableNotExistException
+    {
+        current.rollbackTo(identifier, instant);
+    }
+
+    @Override
+    public void createBranch(Identifier identifier, String branch, @Nullable String fromTag)
+            throws TableNotExistException,
+            BranchAlreadyExistException,
+            TagNotExistException
+    {
+        current.createBranch(identifier, branch, fromTag);
+    }
+
+    @Override
+    public void dropBranch(Identifier identifier, String branch)
+            throws BranchNotExistException
+    {
+        current.dropBranch(identifier, branch);
+    }
+
+    @Override
+    public void fastForward(Identifier identifier, String branch)
+            throws BranchNotExistException
+    {
+        current.fastForward(identifier, branch);
+    }
+
+    @Override
+    public List<String> listBranches(Identifier identifier)
+            throws TableNotExistException
+    {
+        return current.listBranches(identifier);
+    }
+
+    @Override
+    public void createPartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException
+    {
+        current.createPartitions(identifier, partitions);
+    }
+
+    @Override
+    public void dropPartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException
+    {
+        current.dropPartitions(identifier, partitions);
+    }
+
+    @Override
+    public void alterPartitions(Identifier identifier, List<PartitionStatistics> partitions)
+            throws TableNotExistException
+    {
+        current.alterPartitions(identifier, partitions);
+    }
+
+    @Override
+    public List<String> listFunctions(String databaseName)
+            throws DatabaseNotExistException
+    {
+        return current.listFunctions(databaseName);
+    }
+
+    @Override
+    public Function getFunction(Identifier identifier)
+            throws FunctionNotExistException
+    {
+        return current.getFunction(identifier);
+    }
+
+    @Override
+    public void createFunction(Identifier identifier, Function function, boolean ignoreIfExists)
+            throws FunctionAlreadyExistException,
+            DatabaseNotExistException
+    {
+        current.createFunction(identifier, function, ignoreIfExists);
+    }
+
+    @Override
+    public void dropFunction(Identifier identifier, boolean ignoreIfNotExists)
+            throws FunctionNotExistException
+    {
+        current.dropFunction(identifier, ignoreIfNotExists);
+    }
+
+    @Override
+    public void alterFunction(Identifier identifier, List<FunctionChange> changes, boolean ignoreIfNotExists)
+            throws FunctionNotExistException,
+            DefinitionAlreadyExistException,
+            DefinitionNotExistException
+    {
+        current.alterFunction(identifier, changes, ignoreIfNotExists);
+    }
+
+    @Override
+    public List<String> authTableQuery(Identifier identifier, @Nullable List<String> select)
+            throws TableNotExistException
+    {
+        return current.authTableQuery(identifier, select);
+    }
+
+    @Override
+    public void close()
+            throws Exception
+    {
+        if (current != null) {
+            current.close();
+        }
+    }
+
+    @Override
+    public void createDatabase(String name, boolean ignoreIfExists)
+            throws DatabaseAlreadyExistException
+    {
+        current.createDatabase(name, ignoreIfExists);
+    }
+
+    @Override
+    public void alterTable(Identifier identifier, SchemaChange change, boolean ignoreIfNotExists)
+            throws TableNotExistException,
+            ColumnAlreadyExistException,
+            ColumnNotExistException
+    {
+        current.alterTable(identifier, change, ignoreIfNotExists);
+    }
+
+    @Override
+    public void markDonePartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException
+    {
+        current.markDonePartitions(identifier, partitions);
+    }
+}
