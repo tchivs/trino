@@ -19,6 +19,7 @@ import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.TupleDomain;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
@@ -109,6 +110,17 @@ public class DynamicFilteringTrinoSplitSource
                 return false;
             }
             return delegateSplitSource.isFinished();
+        }
+    }
+
+    @Override
+    public Metrics getMetrics()
+    {
+        synchronized (this) {
+            if (delegateSplitSource != null) {
+                return delegateSplitSource.getMetrics();
+            }
+            return Metrics.EMPTY;
         }
     }
 

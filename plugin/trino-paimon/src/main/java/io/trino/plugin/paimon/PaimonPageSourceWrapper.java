@@ -15,6 +15,7 @@ package io.trino.plugin.paimon;
 
 import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.metrics.Metrics;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.deletionvectors.DeletionVector;
@@ -69,18 +70,20 @@ public class PaimonPageSourceWrapper
     }
 
     @Override
-    public Page getNextPage()
+    public SourcePage getNextSourcePage()
     {
         int startPosition = (int) source.getCompletedPositions().orElseThrow();
-        Page next = source.getNextPage();
+        SourcePage next = source.getNextSourcePage();
         if (next == null) {
-            return next;
+            return null;
         }
 
         int pageCount = next.getPositionCount();
+        Page page = next.getPage();
 
-        return deletionVector.map(deletionVector -> convertToRetained(next, deletionVector, startPosition, pageCount))
-                .orElse(next);
+        Page resultPage = deletionVector.map(dv -> convertToRetained(page, dv, startPosition, pageCount))
+                .orElse(page);
+        return SourcePage.create(resultPage);
     }
 
     @VisibleForTesting

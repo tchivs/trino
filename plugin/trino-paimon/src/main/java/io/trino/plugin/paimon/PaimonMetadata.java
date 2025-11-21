@@ -19,6 +19,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -133,14 +134,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata,
-            Optional<ConnectorTableLayout> layout, RetryMode retryMode)
-    {
-        // Deprecated method - delegate to the new version with replace parameter
-        return beginCreateTable(session, tableMetadata, layout, retryMode, false);
-    }
-
-    @Override
-    public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata,
             Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
         createTable(session, tableMetadata,
@@ -164,15 +157,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
             List<ColumnHandle> columns, RetryMode retryMode)
     {
         return (ConnectorInsertTableHandle) tableHandle;
-    }
-
-    @Override
-    public Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session,
-            ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments,
-            Collection<ComputedStatistics> computedStatistics)
-    {
-        // Deprecated method - delegate to new version with sourceTableHandles
-        return finishInsert(session, insertHandle, Collections.emptyList(), fragments, computedStatistics);
     }
 
     @Override
@@ -258,14 +242,15 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     @Override
     public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle,
-            RetryMode retryMode)
+            Map<Integer, Collection<ColumnHandle>> updateCaseColumns, RetryMode retryMode)
     {
         return new PaimonMergeTableHandle((PaimonTableHandle) tableHandle);
     }
 
     @Override
     public void finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle,
-            Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+            List<ConnectorTableHandle> sourceTableHandles, Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
     {
         commit(session, (PaimonTableHandle) mergeTableHandle.getTableHandle(), fragments);
     }
@@ -384,14 +369,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return getTableHandle(session, tableName, dynamicOptions);
     }
 
-    @Deprecated
-    @Override
-    public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName)
-    {
-        // Deprecated method - delegate to the version with table versions
-        return getTableHandle(session, tableName, Optional.empty(), Optional.empty());
-    }
-
     @Override
     public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
     {
@@ -470,14 +447,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
         catch (Catalog.DatabaseNotExistException e) {
             throw new RuntimeException(e);
         }
-    }
-
-    @Override
-    public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean ignoreExisting)
-    {
-        // Deprecated method - delegate to the new SaveMode version
-        createTable(session, tableMetadata,
-                ignoreExisting ? io.trino.spi.connector.SaveMode.IGNORE : io.trino.spi.connector.SaveMode.FAIL);
     }
 
     @Override
@@ -589,7 +558,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
 
         return tableNames.stream().collect(Collectors.toMap(Function.identity(),
-                table -> ((PaimonTableHandle) requireNonNull(getTableHandle(session, table))).columnMetadatas(catalog)));
+                table -> ((PaimonTableHandle) requireNonNull(getTableHandle(session, table, Optional.empty(), Optional.empty()))).columnMetadatas(catalog)));
     }
 
     @Override
@@ -606,12 +575,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
 
         return tableNames.stream().map(tableName -> io.trino.spi.connector.TableColumnsMetadata.forTable(tableName,
-                ((PaimonTableHandle) requireNonNull(getTableHandle(session, tableName))).columnMetadatas(catalog)))
+                ((PaimonTableHandle) requireNonNull(getTableHandle(session, tableName, Optional.empty(), Optional.empty()))).columnMetadatas(catalog)))
                 .iterator();
     }
 
     @Override
-    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column)
+    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column,
+            ColumnPosition position)
     {
         PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
@@ -685,7 +655,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) column;
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(new SchemaChange.UpdateColumnComment(new String[]{paimonColumnHandle.getColumnName()},
+        changes.add(new SchemaChange.UpdateColumnComment(new String[] {paimonColumnHandle.getColumnName()},
                 comment.orElse(null)));
         try {
             catalog.initSession(session);
@@ -1016,7 +986,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     @Override
     public void createView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition definition,
-            boolean replace)
+            Map<String, Object> viewProperties, boolean replace)
     {
         catalog.initSession(session);
         Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());

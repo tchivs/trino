@@ -100,8 +100,12 @@ public class PaimonSplitManager
         long maxRowCount = splits.stream().mapToLong(Split::rowCount).max().orElse(0L);
         double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
         PaimonSplitSource splitSource = new PaimonSplitSource(splits.stream()
-                .map(split -> PaimonSplit.fromSplit(split,
-                        Math.min(Math.max((double) split.rowCount() / maxRowCount, minimumSplitWeight), 1.0)))
+                .map(split -> {
+                    // Avoid NaN when maxRowCount is 0 (empty table or all splits have 0 rows)
+                    double weight = maxRowCount == 0 ? minimumSplitWeight :
+                            Math.min(Math.max((double) split.rowCount() / maxRowCount, minimumSplitWeight), 1.0);
+                    return PaimonSplit.fromSplit(split, weight);
+                })
                 .collect(Collectors.toList()), tableHandle.getLimit());
 
         // Wrap with ClassLoaderSafe wrapper for proper plugin isolation

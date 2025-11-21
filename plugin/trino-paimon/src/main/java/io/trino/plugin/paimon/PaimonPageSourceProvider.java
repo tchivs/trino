@@ -32,11 +32,12 @@ import io.trino.parquet.Field;
 import io.trino.parquet.ParquetDataSource;
 import io.trino.parquet.ParquetDataSourceId;
 import io.trino.parquet.ParquetReaderOptions;
+import io.trino.parquet.metadata.ParquetMetadata;
 import io.trino.parquet.predicate.TupleDomainParquetPredicate;
 import io.trino.parquet.reader.MetadataReader;
 import io.trino.parquet.reader.ParquetReader;
 import io.trino.parquet.reader.RowGroupInfo;
-import io.trino.plugin.hive.FileFormatDataSourceStats;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.hive.avro.AvroPageSource;
 import io.trino.plugin.hive.orc.OrcPageSource;
 import io.trino.plugin.hive.parquet.ParquetPageSource;
@@ -70,8 +71,6 @@ import org.apache.paimon.table.source.Split;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 import org.apache.parquet.column.ColumnDescriptor;
-import org.apache.parquet.hadoop.metadata.FileMetaData;
-import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.io.MessageColumnIO;
 import org.apache.parquet.schema.MessageType;
 import org.joda.time.DateTimeZone;
@@ -399,14 +398,11 @@ public class PaimonPageSourceProvider
                 fieldsMap.put(FieldNameUtils.toLowerCase(column.getColumnName()), column);
             }
             TupleDomainOrcPredicate.TupleDomainOrcPredicateBuilder predicateBuilder = TupleDomainOrcPredicate.builder();
-            List<OrcPageSource.ColumnAdaptation> columnAdaptations = new ArrayList<>();
             List<OrcColumn> fileReadColumns = new ArrayList<>(columns.size());
             List<Type> fileReadTypes = new ArrayList<>(columns.size());
 
             for (int i = 0; i < columns.size(); i++) {
                 if (columns.get(i) != null) {
-                    // column exists
-                    columnAdaptations.add(OrcPageSource.ColumnAdaptation.sourceColumn(fileReadColumns.size()));
                     // Use lowercase for case-insensitive lookup
                     OrcColumn orcColumn = fieldsMap.get(FieldNameUtils.toLowerCase(columns.get(i)));
                     if (orcColumn == null) {
@@ -418,16 +414,13 @@ public class PaimonPageSourceProvider
                         predicateBuilder.addColumn(orcColumn.getColumnId(), domains.get(i));
                     }
                 }
-                else {
-                    columnAdaptations.add(OrcPageSource.ColumnAdaptation.nullColumn(types.get(i)));
-                }
             }
 
             AggregatedMemoryContext memoryUsage = newSimpleAggregatedMemoryContext();
-            OrcRecordReader recordReader = reader.createRecordReader(fileReadColumns, fileReadTypes,
+            OrcRecordReader recordReader = reader.createRecordReader(fileReadColumns, fileReadTypes, false,
                     predicateBuilder.build(), DateTimeZone.UTC, memoryUsage, INITIAL_BATCH_SIZE, RuntimeException::new);
 
-            return new OrcPageSource(recordReader, columnAdaptations, orcDataSource, Optional.empty(), Optional.empty(),
+            return new OrcPageSource(recordReader, orcDataSource, Optional.empty(), Optional.empty(),
                     memoryUsage, new FileFormatDataSourceStats(), reader.getCompressionKind());
         }
         catch (Exception e) {
@@ -443,8 +436,8 @@ public class PaimonPageSourceProvider
             ParquetDataSource dataSource = createDataSource(inputFile, OptionalLong.of(fileSize), options,
                     memoryContext, new FileFormatDataSourceStats());
 
-            ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
-            FileMetaData fileMetaData = parquetMetadata.getFileMetaData();
+            ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, options.getMaxFooterReadSize(), Optional.empty());
+            io.trino.parquet.metadata.FileMetadata fileMetaData = parquetMetadata.getFileMetaData();
             MessageType fileSchema = fileMetaData.getSchema();
 
             // Build column name to Parquet field mapping (case-insensitive)
@@ -474,48 +467,46 @@ public class PaimonPageSourceProvider
 
             // Filter row groups based on predicate
             List<RowGroupInfo> rowGroups = getFilteredRowGroups(0, inputFile.length(), dataSource,
-                    parquetMetadata.getBlocks(), com.google.common.collect.ImmutableList.of(parquetTupleDomain),
+                    parquetMetadata, com.google.common.collect.ImmutableList.of(parquetTupleDomain),
                     com.google.common.collect.ImmutableList.of(parquetPredicate), descriptorsByPath, DateTimeZone.UTC,
                     100, options);
 
             // Build ParquetPageSource
-            ParquetPageSource.Builder pageSourceBuilder = ParquetPageSource.builder();
             com.google.common.collect.ImmutableList.Builder<Column> parquetColumnsBuilder = com.google.common.collect.ImmutableList
                     .builder();
-            int parquetSourceChannel = 0;
 
             for (int i = 0; i < columns.size(); i++) {
                 String columnName = columns.get(i);
                 Type type = types.get(i);
 
-                if (columnName == null || !fieldsByName.containsKey(columnName)) {
-                    // Column doesn't exist in file, return nulls
-                    pageSourceBuilder.addNullColumn(type);
-                }
-                else {
-                    org.apache.parquet.schema.Type parquetField = fieldsByName.get(columnName);
+                if (columnName != null && fieldsByName.containsKey(FieldNameUtils.toLowerCase(columnName))) {
+                    org.apache.parquet.schema.Type parquetField = fieldsByName.get(FieldNameUtils.toLowerCase(columnName));
                     org.apache.parquet.io.ColumnIO columnIO = messageColumnIO.getChild(parquetField.getName());
 
                     // Convert Parquet field to Trino Field
                     Optional<Field> field = constructField(type, columnIO);
-                    if (field.isEmpty()) {
-                        pageSourceBuilder.addNullColumn(type);
-                    }
-                    else {
+                    if (field.isPresent()) {
                         parquetColumnsBuilder.add(new Column(parquetField.getName(), field.get()));
-                        pageSourceBuilder.addSourceColumn(parquetSourceChannel);
-                        parquetSourceChannel++;
                     }
                 }
             }
 
             ParquetDataSourceId dataSourceId = dataSource.getId();
-            ParquetReader parquetReader = new ParquetReader(Optional.ofNullable(fileMetaData.getCreatedBy()),
-                    parquetColumnsBuilder.build(), rowGroups, dataSource, DateTimeZone.UTC, memoryContext, options,
-                    exception -> handleParquetException(dataSourceId, exception), Optional.of(parquetPredicate),
+            ParquetReader parquetReader = new ParquetReader(
+                    Optional.ofNullable(fileMetaData.getCreatedBy()),
+                    parquetColumnsBuilder.build(),
+                    false,  // appendRowNumberColumn
+                    rowGroups,
+                    dataSource,
+                    DateTimeZone.UTC,
+                    memoryContext,
+                    options,
+                    exception -> handleParquetException(dataSourceId, exception),
+                    Optional.empty(),
+                    Optional.empty(),
                     Optional.empty());
 
-            return pageSourceBuilder.build(parquetReader);
+            return new ParquetPageSource(parquetReader);
         }
         catch (Exception e) {
             throw new RuntimeException("Failed to create Parquet page source", e);
@@ -572,12 +563,12 @@ public class PaimonPageSourceProvider
         // Build Avro schema for requested columns
         Schema avroSchema = buildAvroSchema(columns, types);
 
-        // Create HiveAvroTypeManager with default timestamp precision
-        io.trino.plugin.hive.avro.HiveAvroTypeManager avroTypeManager = new io.trino.plugin.hive.avro.HiveAvroTypeManager(
-                io.trino.plugin.hive.HiveTimestampPrecision.DEFAULT_PRECISION);
+        // Create HiveAvroTypeBlockHandler with default timestamp precision
+        io.trino.hive.formats.avro.HiveAvroTypeBlockHandler avroTypeHandler = new io.trino.hive.formats.avro.HiveAvroTypeBlockHandler(
+                io.trino.spi.type.TimestampType.createTimestampType(3));
 
         // Create AvroPageSource
-        return new AvroPageSource(inputFile, avroSchema, avroTypeManager, 0, length);
+        return new AvroPageSource(inputFile, avroSchema, avroTypeHandler, 0, length);
     }
 
     private Schema buildAvroSchema(List<String> columns, List<Type> types)

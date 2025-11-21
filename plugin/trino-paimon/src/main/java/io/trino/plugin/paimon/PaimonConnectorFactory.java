@@ -18,31 +18,22 @@ import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
 import io.airlift.bootstrap.Bootstrap;
-import io.airlift.event.client.EventModule;
 import io.airlift.json.JsonModule;
 import io.airlift.log.Logger;
-import io.opentelemetry.api.OpenTelemetry;
-import io.opentelemetry.api.trace.Tracer;
 import io.trino.filesystem.manager.FileSystemModule;
-import io.trino.plugin.base.CatalogName;
+import io.trino.plugin.base.ConnectorContextModule;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorMetadata;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSinkProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSourceProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
 import io.trino.plugin.base.jmx.ConnectorObjectNameGeneratorModule;
 import io.trino.plugin.base.jmx.MBeanServerModule;
-import io.trino.plugin.hive.NodeVersion;
-import io.trino.spi.NodeManager;
-import io.trino.spi.PageIndexerFactory;
-import io.trino.spi.PageSorter;
 import io.trino.spi.classloader.ThreadContextClassLoader;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.function.FunctionProvider;
 import io.trino.spi.function.table.ConnectorTableFunction;
-import io.trino.spi.type.TypeManager;
 import org.apache.paimon.utils.StringUtils;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -120,21 +111,15 @@ public class PaimonConnectorFactory
 
         ClassLoader classLoader = PaimonConnectorFactory.class.getClassLoader();
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            Bootstrap app = new Bootstrap(new EventModule(), new MBeanModule(),
-                    new ConnectorObjectNameGeneratorModule("org.apache.paimon.trino", "paimon.trino"), new JsonModule(),
-                    new PaimonModule(), new MBeanServerModule(),
-                    new FileSystemModule(catalogName, context.getNodeManager(), context.getOpenTelemetry()), binder -> {
-                        binder.bind(OpenTelemetry.class).toInstance(context.getOpenTelemetry());
-                        binder.bind(Tracer.class).toInstance(context.getTracer());
-                        binder.bind(NodeVersion.class)
-                                .toInstance(new NodeVersion(context.getNodeManager().getCurrentNode().getVersion()));
-                        binder.bind(NodeManager.class).toInstance(context.getNodeManager());
-                        binder.bind(TypeManager.class).toInstance(context.getTypeManager());
-                        binder.bind(PageIndexerFactory.class).toInstance(context.getPageIndexerFactory());
-                        binder.bind(CatalogHandle.class).toInstance(context.getCatalogHandle());
-                        binder.bind(CatalogName.class).toInstance(new CatalogName(catalogName));
-                        binder.bind(PageSorter.class).toInstance(context.getPageSorter());
-                    }, module);
+            Bootstrap app = new Bootstrap(new MBeanModule(),
+                    new ConnectorObjectNameGeneratorModule("org.apache.paimon.trino", "paimon.trino"),
+                    new JsonModule(),
+                    new PaimonModule(),
+                    new MBeanServerModule(),
+                    new FileSystemModule(catalogName, context, false),
+                    new ConnectorContextModule(catalogName, context),
+                    binder -> binder.bind(ClassLoader.class).toInstance(classLoader),
+                    module);
 
             Injector injector = app.doNotInitializeLogging().setRequiredConfigurationProperties(config).initialize();
 

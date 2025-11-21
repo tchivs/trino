@@ -35,7 +35,6 @@ import org.apache.paimon.partition.Partition;
 import org.apache.paimon.partition.PartitionStatistics;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
-import org.apache.paimon.security.SecurityContext;
 import org.apache.paimon.table.Instant;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableSnapshot;
@@ -43,8 +42,6 @@ import org.apache.paimon.table.TableSnapshot;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-
-import static org.apache.paimon.utils.HadoopUtils.HADOOP_LOAD_DEFAULT_CONFIG;
 
 public class PaimonCatalog
         implements
@@ -77,14 +74,7 @@ public class PaimonCatalog
                         // catalogOptions.set("hadoop-load-default-config", "false");
                         CatalogContext catalogContext = CatalogContext.create(catalogOptions,
                                 new PaimonFileIOLoader(trinoFileSystem));
-                        if (catalogOptions.getBoolean(HADOOP_LOAD_DEFAULT_CONFIG.key(), false)) {
-                            try {
-                                SecurityContext.install(catalogContext);
-                            }
-                            catch (Exception e) {
-                                throw new RuntimeException(e);
-                            }
-                        }
+                        // Trino uses its own filesystem, so we skip Hadoop security context setup
                         return CatalogFactory.createCatalog(catalogContext);
                     }, this.getClass().getClassLoader());
                     inited = true;
@@ -172,18 +162,18 @@ public class PaimonCatalog
 
     @Override
     public PagedList<String> listTablesPaged(String databaseName, Integer maxResults, String pageToken,
-            String tableNamePattern)
+            String tableNamePattern, String tableNamePrefix)
             throws DatabaseNotExistException
     {
-        return current.listTablesPaged(databaseName, maxResults, pageToken, tableNamePattern);
+        return current.listTablesPaged(databaseName, maxResults, pageToken, tableNamePattern, tableNamePrefix);
     }
 
     @Override
     public PagedList<Table> listTableDetailsPaged(String databaseName, @Nullable Integer maxResults,
-            @Nullable String pageToken, @Nullable String tableNamePattern)
+            @Nullable String pageToken, @Nullable String tableNamePattern, @Nullable String tableNamePrefix)
             throws DatabaseNotExistException
     {
-        return current.listTableDetailsPaged(databaseName, maxResults, pageToken, tableNamePattern);
+        return current.listTableDetailsPaged(databaseName, maxResults, pageToken, tableNamePattern, tableNamePrefix);
     }
 
     @Override

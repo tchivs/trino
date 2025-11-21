@@ -56,11 +56,10 @@ public class TrinoQueryRunner
         Path dataDir = queryRunner.getCoordinator().getBaseDataDir().resolve("paimon_data");
         Path catalogDir = dataDir.getParent().resolve("catalog");
 
-        queryRunner.installPlugin(new PaimonPlugin());
-
         Map<String, String> options = ImmutableMap.<String, String>builder()
                 .put("warehouse", catalogDir.toFile().toURI().toString()).putAll(extraConnectorProperties).build();
 
+        queryRunner.installPlugin(new TestingPaimonPlugin(catalogDir.getParent()));
         queryRunner.createCatalog(PAIMON_CATALOG, PAIMON_CATALOG, options);
 
         queryRunner.execute("CREATE SCHEMA tpch");

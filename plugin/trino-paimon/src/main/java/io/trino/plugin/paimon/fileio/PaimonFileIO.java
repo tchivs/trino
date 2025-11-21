@@ -19,7 +19,7 @@ import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoInputFile;
 import io.trino.filesystem.TrinoOutputFile;
-import org.apache.paimon.catalog.CatalogContext;
+import org.apache.paimon.catalog.ICatalogContext;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.FileStatus;
 import org.apache.paimon.fs.Path;
@@ -66,7 +66,7 @@ public class PaimonFileIO
     }
 
     @Override
-    public void configure(CatalogContext catalogContext)
+    public void configure(ICatalogContext catalogContext)
     {
     }
 

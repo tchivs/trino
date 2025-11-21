@@ -24,7 +24,6 @@ import org.apache.paimon.codegen.CodeGenUtils;
 import org.apache.paimon.codegen.Projection;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.schema.TableSchema;
-import org.apache.paimon.table.sink.KeyAndBucketExtractor;
 import org.apache.paimon.types.RowKind;
 
 import java.lang.reflect.InvocationTargetException;
@@ -74,7 +73,8 @@ public class FixedBucketTableShuffleFunction
 
         PaimonRow paimonRow = new PaimonRow(page.getSingleValuePage(position), RowKind.INSERT);
         BinaryRow pk = projectionContext.get().apply(paimonRow);
-        int bucket = KeyAndBucketExtractor.bucket(KeyAndBucketExtractor.bucketKeyHashCode(pk), bucketCount);
+        int hash = pk.hashCode();
+        int bucket = (hash % bucketCount + bucketCount) % bucketCount;
         return bucket % workerCount;
     }
 }

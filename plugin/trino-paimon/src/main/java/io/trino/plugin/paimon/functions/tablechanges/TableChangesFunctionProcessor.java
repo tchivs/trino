@@ -20,6 +20,7 @@ import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.function.table.TableFunctionProcessorState;
 import io.trino.spi.function.table.TableFunctionSplitProcessor;
 
@@ -46,12 +47,12 @@ public class TableChangesFunctionProcessor
         if (pageSource.isFinished()) {
             return FINISHED;
         }
-        Page dataPage = pageSource.getNextPage();
-        if (dataPage == null) {
+        SourcePage sourcePage = pageSource.getNextSourcePage();
+        if (sourcePage == null) {
             return TableFunctionProcessorState.Processed.produced(EMPTY_PAGE);
         }
         else {
-            return TableFunctionProcessorState.Processed.produced(dataPage);
+            return TableFunctionProcessorState.Processed.produced(sourcePage.getPage());
         }
     }
 }

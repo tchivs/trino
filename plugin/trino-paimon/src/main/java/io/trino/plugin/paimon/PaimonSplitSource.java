@@ -13,8 +13,11 @@
  */
 package io.trino.plugin.paimon;
 
+import com.google.common.collect.ImmutableMap;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
+import io.trino.spi.metrics.Metrics;
 
 import java.util.ArrayList;
 import java.util.LinkedList;
@@ -29,12 +32,17 @@ public class PaimonSplitSource
 {
     private final Queue<PaimonSplit> splits;
     private final OptionalLong limit;
+    private final long totalSplitCount;
+    private final long totalRowCount;
     private long count;
+    private long processedSplitCount;
 
     public PaimonSplitSource(List<PaimonSplit> splits, OptionalLong limit)
     {
         this.splits = new LinkedList<>(splits);
         this.limit = limit;
+        this.totalSplitCount = splits.size();
+        this.totalRowCount = splits.stream().mapToLong(split -> split.decodeSplit().rowCount()).sum();
     }
 
     protected CompletableFuture<ConnectorSplitBatch> innerGetNextBatch(int maxSize)
@@ -46,6 +54,7 @@ public class PaimonSplitSource
                 break;
             }
             count += split.decodeSplit().rowCount();
+            processedSplitCount++;
             batch.add(split);
         }
         return CompletableFuture.completedFuture(new ConnectorSplitBatch(batch, isFinished()));
@@ -66,5 +75,14 @@ public class PaimonSplitSource
     public boolean isFinished()
     {
         return splits.isEmpty() || (limit.isPresent() && count >= limit.getAsLong());
+    }
+
+    @Override
+    public Metrics getMetrics()
+    {
+        return new Metrics(ImmutableMap.of(
+                "totalSplits", new LongCount(totalSplitCount),
+                "processedSplits", new LongCount(processedSplitCount),
+                "totalRows", new LongCount(totalRowCount)));
     }
 }

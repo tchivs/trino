@@ -13,8 +13,8 @@
  */
 package io.trino.plugin.paimon;
 
-import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.metrics.Metrics;
 
 import java.io.IOException;
@@ -54,16 +54,16 @@ public class DirectTrinoPageSource
     }
 
     @Override
-    public Page getNextPage()
+    public SourcePage getNextSourcePage()
     {
         try {
             if (current == null) {
                 return null;
             }
-            Page dataPage = current.getNextPage();
+            SourcePage dataPage = current.getNextSourcePage();
             if (dataPage == null) {
                 advance();
-                return getNextPage();
+                return getNextSourcePage();
             }
 
             return dataPage;

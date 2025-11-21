@@ -73,13 +73,6 @@ public record PaimonSplit(String splitSerialized, Double weight) implements Conn
 
     @Override
     @JsonIgnore
-    public Object getInfo()
-    {
-        return Collections.emptyMap();
-    }
-
-    @Override
-    @JsonIgnore
     public SplitWeight getSplitWeight()
     {
         return SplitWeight.fromProportion(weight);

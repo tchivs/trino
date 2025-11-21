@@ -26,12 +26,14 @@ import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.block.RowValueBuilder;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
@@ -73,6 +75,7 @@ import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_SECONDS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_NANOSECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static java.lang.String.format;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
@@ -150,11 +153,12 @@ public class PaimonPageSource
     }
 
     @Override
-    public Page getNextPage()
+    public SourcePage getNextSourcePage()
     {
         return ClassLoaderUtils.runWithContextClassLoader(() -> {
             try {
-                return nextPage();
+                Page page = nextPage();
+                return page == null ? null : SourcePage.create(page);
             }
             catch (IOException e) {
                 throw new UncheckedIOException(e);
@@ -270,9 +274,12 @@ public class PaimonPageSource
             writeSlice(output, type, value);
         }
         else if (javaType == LongTimestampWithTimeZone.class) {
-            checkArgument(type.equals(TIMESTAMP_TZ_MILLIS));
+            // Support all long precision timestamp with time zone types (precision > 3)
+            checkArgument(type instanceof TimestampWithTimeZoneType && !((TimestampWithTimeZoneType) type).isShort(),
+                    "Expected long timestamp with time zone type, got %s", type);
             Timestamp timestamp = (Timestamp) value;
-            type.writeObject(output, fromEpochMillisAndFraction(timestamp.getMillisecond(), 0, UTC_KEY));
+            long picosOfMilli = (long) timestamp.getNanoOfMillisecond() * PICOSECONDS_PER_NANOSECOND;
+            type.writeObject(output, fromEpochMillisAndFraction(timestamp.getMillisecond(), (int) picosOfMilli, UTC_KEY));
         }
         else if (type instanceof ArrayType || type instanceof MapType || type instanceof RowType) {
             writeBlock(output, type, logicalType, value);

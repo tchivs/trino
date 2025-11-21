@@ -25,6 +25,7 @@ import io.trino.spi.type.Int128;
 import io.trino.spi.type.TypeUtils;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.Blob;
 import org.apache.paimon.data.Decimal;
 import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
@@ -191,6 +192,12 @@ public class PaimonRow
     }
 
     @Override
+    public Blob getBlob(int i)
+    {
+        return Blob.fromData(getBinary(i));
+    }
+
+    @Override
     public Variant getVariant(int i)
     {
         if (isNullAt(i)) {
@@ -331,6 +338,12 @@ public class PaimonRow
         {
             Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, block, getPosition(pos));
             return slice.getBytes();
+        }
+
+        @Override
+        public Blob getBlob(int pos)
+        {
+            return Blob.fromData(getBinary(pos));
         }
 
         @Override
@@ -636,6 +649,12 @@ public class PaimonRow
             Block fieldBlock = rowBlock.getFieldBlock(pos);
             Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, fieldBlock, position);
             return slice.getBytes();
+        }
+
+        @Override
+        public Blob getBlob(int pos)
+        {
+            return Blob.fromData(getBinary(pos));
         }
 
         @Override

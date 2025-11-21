@@ -137,4 +137,10 @@ public class PaimonConnector
     {
         return Optional.of(functionProvider);
     }
+
+    @Override
+    public void shutdown()
+    {
+        // No resources to clean up
+    }
 }

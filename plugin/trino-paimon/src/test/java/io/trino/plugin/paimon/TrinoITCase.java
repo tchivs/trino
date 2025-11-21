@@ -166,7 +166,7 @@ public class TrinoITCase
             Map<Object, Object> map = new HashMap<>();
             map.put(fromString("1"), fromString("2"));
             writer.write(GenericRow.of(1, new GenericMap(map), GenericRow.of(2, fromString("male")),
-                    new GenericArray(new int[]{1, 2, 3})));
+                    new GenericArray(new int[] {1, 2, 3})));
             commit.commit(0, writer.prepareCommit(true, 0));
         }
 
@@ -202,7 +202,7 @@ public class TrinoITCase
                     BinaryString.fromString("varchar1"), 0, Timestamp.fromMicros(1694505288000000L),
                     Timestamp.fromMicros(1694505288001000L), Timestamp.fromMicros(1694505288001001L),
                     Timestamp.fromMicros(1694505288002001L), Decimal.fromUnscaledLong(10000, 10, 5),
-                    new byte[]{0x01, 0x02, 0x03}, new GenericArray(new int[]{1, 1, 1}), new GenericMap(Map.of(1, 1)),
+                    new byte[] {0x01, 0x02, 0x03}, new GenericArray(new int[] {1, 1, 1}), new GenericMap(Map.of(1, 1)),
                     GenericRow.of(1, 1)));
             commit.commit(0, writer.prepareCommit(true, 0));
         }
@@ -232,8 +232,8 @@ public class TrinoITCase
             writer.write(GenericRow.of(true, (byte) 1, (short) 1, 1, 1L, 1.0f, 1.0d, BinaryString.fromString("char1"),
                     BinaryString.fromString("varchar1"), 0, Timestamp.fromMicros(1694505288000000L),
                     Timestamp.fromMicros(1694505288001000L), Timestamp.fromMicros(1694505288001001L),
-                    Decimal.fromUnscaledLong(10000, 10, 5), new byte[]{0x01, 0x02, 0x03},
-                    new GenericArray(new int[]{1, 1, 1}), new GenericMap(Map.of(1, 1)), GenericRow.of(1, 1)));
+                    Decimal.fromUnscaledLong(10000, 10, 5), new byte[] {0x01, 0x02, 0x03},
+                    new GenericArray(new int[] {1, 1, 1}), new GenericMap(Map.of(1, 1)), GenericRow.of(1, 1)));
             commit.commit(0, writer.prepareCommit(true, 0));
 
             new SchemaManager(LocalFileIO.create(), tablePath7).commitChanges(SchemaChange.dropColumn("smallint"));
@@ -243,8 +243,8 @@ public class TrinoITCase
             writer.write(GenericRow.of(true, (byte) 1, 1, 1L, 1.0f, 1.0d, BinaryString.fromString("char1"),
                     BinaryString.fromString("varchar1"), 0, Timestamp.fromMicros(1694505288000000L),
                     Timestamp.fromMicros(1694505288001000L), Timestamp.fromMicros(1694505288001001L),
-                    Decimal.fromUnscaledLong(10000, 10, 5), new byte[]{0x01, 0x02, 0x03},
-                    new GenericArray(new int[]{1, 1, 1}), new GenericMap(Map.of(1, 1)), GenericRow.of(1, 1)));
+                    Decimal.fromUnscaledLong(10000, 10, 5), new byte[] {0x01, 0x02, 0x03},
+                    new GenericArray(new int[] {1, 1, 1}), new GenericMap(Map.of(1, 1)), GenericRow.of(1, 1)));
             commit.commit(1, writer.prepareCommit(true, 1));
 
             new SchemaManager(LocalFileIO.create(), tablePath7)
@@ -255,8 +255,8 @@ public class TrinoITCase
             writer.write(GenericRow.of(true, (byte) 1, 1, 1L, 1.0f, 1.0d, BinaryString.fromString("char1"),
                     BinaryString.fromString("varchar1"), 0, Timestamp.fromMicros(1694505288000000L),
                     Timestamp.fromMicros(1694505288001000L), Timestamp.fromMicros(1694505288001001L),
-                    Decimal.fromUnscaledLong(10000, 10, 5), new byte[]{0x01, 0x02, 0x03},
-                    new GenericArray(new int[]{1, 1, 1}), new GenericMap(Map.of(1, 1)), GenericRow.of(1, 1),
+                    Decimal.fromUnscaledLong(10000, 10, 5), new byte[] {0x01, 0x02, 0x03},
+                    new GenericArray(new int[] {1, 1, 1}), new GenericMap(Map.of(1, 1)), GenericRow.of(1, 1),
                     (short) 1));
             commit.commit(1, writer.prepareCommit(true, 1));
         }
@@ -359,7 +359,7 @@ public class TrinoITCase
         try {
             queryRunner = DistributedQueryRunner.builder(testSessionBuilder().setCatalog(CATALOG).setSchema(DB).build())
                     .build();
-            queryRunner.installPlugin(new PaimonPlugin());
+            queryRunner.installPlugin(new TestingPaimonPlugin(java.nio.file.Path.of("/")));
             Map<String, String> options = new HashMap<>();
             options.put("warehouse", warehouse);
             queryRunner.createCatalog(CATALOG, CATALOG, options);
