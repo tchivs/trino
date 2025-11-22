@@ -20,8 +20,6 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.MapBlock;
 import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.SqlMap;
-import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.Int128;
 import io.trino.spi.type.TypeUtils;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.data.BinaryString;
@@ -36,22 +34,14 @@ import org.apache.paimon.data.variant.Variant;
 import org.apache.paimon.types.RowKind;
 
 import java.io.Serializable;
-import java.math.BigDecimal;
-import java.math.BigInteger;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.spi.type.Decimals.MAX_SHORT_PRECISION;
 import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
-import static io.trino.spi.type.TimeType.TIME_MILLIS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
-import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_DAY;
-import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
-import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Math.toIntExact;
 import static org.apache.paimon.shade.guava30.com.google.common.base.Verify.verify;
 
@@ -133,24 +123,7 @@ public class PaimonRow
     @Override
     public int getInt(int i)
     {
-        Block block = singlePage.getBlock(i);
-        try {
-            // Try reading as INTEGER first (regular int columns)
-            long value = (long) TypeUtils.readNativeValue(INTEGER, block, 0);
-            if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
-                throw new IllegalArgumentException("Value out of range for int: " + value);
-            }
-            return (int) value;
-        }
-        catch (ClassCastException e) {
-            // Block is LongArrayBlock, could be TIME column
-            // TIME is stored as picoseconds in Trino but as int milliseconds in Paimon
-            long picoseconds = (long) TypeUtils.readNativeValue(TIME_MILLIS, block, 0);
-            if (picoseconds < 0 || picoseconds >= PICOSECONDS_PER_DAY) {
-                throw new IllegalArgumentException("Time value out of range: " + picoseconds);
-            }
-            return toIntExact(picoseconds / PICOSECONDS_PER_MILLISECOND);
-        }
+        return TypeConverters.readInt(singlePage.getBlock(i), 0);
     }
 
     @Override
@@ -180,18 +153,7 @@ public class PaimonRow
     @Override
     public Decimal getDecimal(int i, int decimalPrecision, int decimalScale)
     {
-        Object value = TypeUtils.readNativeValue(DecimalType.createDecimalType(decimalPrecision, decimalScale),
-                singlePage.getBlock(i), 0);
-        if (decimalPrecision <= MAX_SHORT_PRECISION) {
-            return Decimal.fromUnscaledLong((Long) value, decimalPrecision, decimalScale);
-        }
-        else {
-            long high = ((Int128) value).getHigh();
-            long low = ((Int128) value).getLow();
-            BigInteger bigIntegerValue = BigInteger.valueOf(high).shiftLeft(64).add(BigInteger.valueOf(low));
-            BigDecimal bigDecimalValue = new BigDecimal(bigIntegerValue, decimalScale);
-            return Decimal.fromBigDecimal(bigDecimalValue, decimalPrecision, decimalScale);
-        }
+        return TypeConverters.readDecimal(singlePage.getBlock(i), 0, decimalPrecision, decimalScale);
     }
 
     @Override
@@ -204,8 +166,7 @@ public class PaimonRow
     @Override
     public byte[] getBinary(int i)
     {
-        Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, singlePage.getBlock(i), 0);
-        return slice.getBytes();
+        return TypeConverters.readBinary(singlePage.getBlock(i), 0);
     }
 
     @Override
@@ -298,21 +259,7 @@ public class PaimonRow
         @Override
         public int getInt(int pos)
         {
-            int position = getPosition(pos);
-            try {
-                // Try reading as INTEGER first (regular int columns)
-                long value = (long) TypeUtils.readNativeValue(INTEGER, block, position);
-                return (int) value;
-            }
-            catch (ClassCastException e) {
-                // Block is LongArrayBlock, could be TIME column
-                // TIME is stored as picoseconds in Trino but as int milliseconds in Paimon
-                long picoseconds = (long) TypeUtils.readNativeValue(TIME_MILLIS, block, position);
-                if (picoseconds < 0 || picoseconds >= PICOSECONDS_PER_DAY) {
-                    throw new IllegalArgumentException("Time value out of range: " + picoseconds);
-                }
-                return toIntExact(picoseconds / PICOSECONDS_PER_MILLISECOND);
-            }
+            return TypeConverters.readInt(block, getPosition(pos));
         }
 
         @Override
@@ -342,18 +289,7 @@ public class PaimonRow
         @Override
         public Decimal getDecimal(int pos, int precision, int scale)
         {
-            Object value = TypeUtils.readNativeValue(DecimalType.createDecimalType(precision, scale), block,
-                    getPosition(pos));
-            if (precision <= MAX_SHORT_PRECISION) {
-                return Decimal.fromUnscaledLong((Long) value, precision, scale);
-            }
-            else {
-                long high = ((Int128) value).getHigh();
-                long low = ((Int128) value).getLow();
-                BigInteger bigIntegerValue = BigInteger.valueOf(high).shiftLeft(64).add(BigInteger.valueOf(low));
-                BigDecimal bigDecimalValue = new BigDecimal(bigIntegerValue, scale);
-                return Decimal.fromBigDecimal(bigDecimalValue, precision, scale);
-            }
+            return TypeConverters.readDecimal(block, getPosition(pos), precision, scale);
         }
 
         @Override
@@ -366,8 +302,7 @@ public class PaimonRow
         @Override
         public byte[] getBinary(int pos)
         {
-            Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, block, getPosition(pos));
-            return slice.getBytes();
+            return TypeConverters.readBinary(block, getPosition(pos));
         }
 
         @Override
@@ -615,21 +550,7 @@ public class PaimonRow
         @Override
         public int getInt(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            try {
-                // Try reading as INTEGER first (regular int columns)
-                long value = (long) TypeUtils.readNativeValue(INTEGER, fieldBlock, position);
-                return (int) value;
-            }
-            catch (ClassCastException e) {
-                // Block is LongArrayBlock, could be TIME column
-                // TIME is stored as picoseconds in Trino but as int milliseconds in Paimon
-                long picoseconds = (long) TypeUtils.readNativeValue(TIME_MILLIS, fieldBlock, position);
-                if (picoseconds < 0 || picoseconds >= PICOSECONDS_PER_DAY) {
-                    throw new IllegalArgumentException("Time value out of range: " + picoseconds);
-                }
-                return toIntExact(picoseconds / PICOSECONDS_PER_MILLISECOND);
-            }
+            return TypeConverters.readInt(rowBlock.getFieldBlock(pos), position);
         }
 
         @Override
@@ -662,19 +583,7 @@ public class PaimonRow
         @Override
         public Decimal getDecimal(int pos, int precision, int scale)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            Object value = TypeUtils.readNativeValue(DecimalType.createDecimalType(precision, scale), fieldBlock,
-                    position);
-            if (precision <= MAX_SHORT_PRECISION) {
-                return Decimal.fromUnscaledLong((Long) value, precision, scale);
-            }
-            else {
-                long high = ((Int128) value).getHigh();
-                long low = ((Int128) value).getLow();
-                BigInteger bigIntegerValue = BigInteger.valueOf(high).shiftLeft(64).add(BigInteger.valueOf(low));
-                BigDecimal bigDecimalValue = new BigDecimal(bigIntegerValue, scale);
-                return Decimal.fromBigDecimal(bigDecimalValue, precision, scale);
-            }
+            return TypeConverters.readDecimal(rowBlock.getFieldBlock(pos), position, precision, scale);
         }
 
         @Override
@@ -688,9 +597,7 @@ public class PaimonRow
         @Override
         public byte[] getBinary(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, fieldBlock, position);
-            return slice.getBytes();
+            return TypeConverters.readBinary(rowBlock.getFieldBlock(pos), position);
         }
 
         @Override
