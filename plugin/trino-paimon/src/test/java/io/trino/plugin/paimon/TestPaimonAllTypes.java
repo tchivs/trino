@@ -213,6 +213,18 @@ public class TestPaimonAllTypes
     }
 
     @Test
+    public void testTimeType()
+    {
+        assertUpdate("CREATE TABLE test_time (id INTEGER, val TIME(3)) WITH (bucket = '-1')");
+        assertUpdate("INSERT INTO test_time VALUES (1, TIME '10:30:45.123'), (2, TIME '00:00:00.000'), (3, TIME '23:59:59.999'), (4, null)", 4);
+        assertQuery("SELECT COUNT(*) FROM test_time WHERE val = TIME '10:30:45.123'", "SELECT 1");
+        assertQuery("SELECT COUNT(*) FROM test_time WHERE val = TIME '00:00:00.000'", "SELECT 1");
+        assertQuery("SELECT COUNT(*) FROM test_time WHERE val = TIME '23:59:59.999'", "SELECT 1");
+        assertQuery("SELECT COUNT(*) FROM test_time WHERE val IS NULL", "SELECT 1");
+        assertUpdate("DROP TABLE test_time");
+    }
+
+    @Test
     public void testMapType()
     {
         assertUpdate("CREATE TABLE test_map (id INTEGER, val MAP(VARCHAR, INTEGER)) WITH (bucket = '-1')");

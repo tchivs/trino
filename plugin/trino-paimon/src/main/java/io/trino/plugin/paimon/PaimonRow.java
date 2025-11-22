@@ -46,7 +46,10 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimeType.TIME_MILLIS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_DAY;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Math.toIntExact;
@@ -130,11 +133,24 @@ public class PaimonRow
     @Override
     public int getInt(int i)
     {
-        long value = (long) TypeUtils.readNativeValue(INTEGER, singlePage.getBlock(i), 0);
-        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("Value out of range for int: " + value);
+        Block block = singlePage.getBlock(i);
+        try {
+            // Try reading as INTEGER first (regular int columns)
+            long value = (long) TypeUtils.readNativeValue(INTEGER, block, 0);
+            if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("Value out of range for int: " + value);
+            }
+            return (int) value;
         }
-        return (int) value;
+        catch (ClassCastException e) {
+            // Block is LongArrayBlock, could be TIME column
+            // TIME is stored as picoseconds in Trino but as int milliseconds in Paimon
+            long picoseconds = (long) TypeUtils.readNativeValue(TIME_MILLIS, block, 0);
+            if (picoseconds < 0 || picoseconds >= PICOSECONDS_PER_DAY) {
+                throw new IllegalArgumentException("Time value out of range: " + picoseconds);
+            }
+            return toIntExact(picoseconds / PICOSECONDS_PER_MILLISECOND);
+        }
     }
 
     @Override
@@ -282,8 +298,21 @@ public class PaimonRow
         @Override
         public int getInt(int pos)
         {
-            long value = (long) TypeUtils.readNativeValue(INTEGER, block, getPosition(pos));
-            return (int) value;
+            int position = getPosition(pos);
+            try {
+                // Try reading as INTEGER first (regular int columns)
+                long value = (long) TypeUtils.readNativeValue(INTEGER, block, position);
+                return (int) value;
+            }
+            catch (ClassCastException e) {
+                // Block is LongArrayBlock, could be TIME column
+                // TIME is stored as picoseconds in Trino but as int milliseconds in Paimon
+                long picoseconds = (long) TypeUtils.readNativeValue(TIME_MILLIS, block, position);
+                if (picoseconds < 0 || picoseconds >= PICOSECONDS_PER_DAY) {
+                    throw new IllegalArgumentException("Time value out of range: " + picoseconds);
+                }
+                return toIntExact(picoseconds / PICOSECONDS_PER_MILLISECOND);
+            }
         }
 
         @Override
@@ -587,8 +616,20 @@ public class PaimonRow
         public int getInt(int pos)
         {
             Block fieldBlock = rowBlock.getFieldBlock(pos);
-            long value = (long) TypeUtils.readNativeValue(INTEGER, fieldBlock, position);
-            return (int) value;
+            try {
+                // Try reading as INTEGER first (regular int columns)
+                long value = (long) TypeUtils.readNativeValue(INTEGER, fieldBlock, position);
+                return (int) value;
+            }
+            catch (ClassCastException e) {
+                // Block is LongArrayBlock, could be TIME column
+                // TIME is stored as picoseconds in Trino but as int milliseconds in Paimon
+                long picoseconds = (long) TypeUtils.readNativeValue(TIME_MILLIS, fieldBlock, position);
+                if (picoseconds < 0 || picoseconds >= PICOSECONDS_PER_DAY) {
+                    throw new IllegalArgumentException("Time value out of range: " + picoseconds);
+                }
+                return toIntExact(picoseconds / PICOSECONDS_PER_MILLISECOND);
+            }
         }
 
         @Override
