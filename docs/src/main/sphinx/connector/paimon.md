@@ -41,6 +41,7 @@ hive.metastore.uri=thrift://example.net:9083
 The following table describes general catalog configuration properties for the
 connector:
 
+
 :::{list-table} Paimon configuration properties
 :widths: 35, 50, 15
 :header-rows: 1
@@ -76,16 +77,17 @@ connector:
   - Use path-style access for S3 URLs. Set to `true` for MinIO and some
     S3-compatible storage systems.
   - `false`
-* - `s3.access-key`
+* - `s3.aws-access-key`
   - AWS access key ID or MinIO access key for authentication.
   -
-* - `s3.secret-key`
+* - `s3.aws-secret-key`
   - AWS secret access key or MinIO secret key for authentication.
   -
 * - `s3.region`
-  - AWS region name (e.g., `us-east-1`). Required for AWS S3. For MinIO, can
-    be set to any valid region name.
-  -
+  - AWS region name (e.g., `us-east-1`). **Required** when using S3 or
+    S3-compatible storage (MinIO). For MinIO, can be set to any valid region
+    name.
+  - Required (no default)
 :::
 
 (paimon-file-system-configuration)=
@@ -130,11 +132,11 @@ hive.metastore.uri=thrift://example.net:9083
 fs.native-s3.enabled=true
 s3.endpoint=http://192.168.240.77:9005
 s3.path-style-access=true
-s3.access-key=admin
-s3.secret-key=your-secret-key
+s3.aws-access-key=admin
+s3.aws-secret-key=your-secret-key
 s3.region=us-east-1
 
-# Disable HDFS when using S3
+# Disable HDFS when using S3-only configuration
 fs.hadoop.enabled=false
 ```
 
@@ -143,7 +145,8 @@ For MinIO:
 - Set `fs.native-s3.enabled=true` to use Trino's native S3 file system
 - Set `s3.path-style-access=true` for path-style URLs (required for MinIO)
 - Use `http://` or `https://` protocol in the endpoint
-- Set `fs.hadoop.enabled=false` to disable HDFS when using S3
+- Set `fs.hadoop.enabled=false` to disable HDFS when using S3-only configuration
+- **`s3.region` is required** - set to any valid region name (e.g., `us-east-1`)
 :::
 
 ## Type mapping

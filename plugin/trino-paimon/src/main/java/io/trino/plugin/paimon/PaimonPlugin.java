@@ -13,10 +13,9 @@
  */
 package io.trino.plugin.paimon;
 
+import com.google.common.collect.ImmutableList;
 import io.trino.spi.Plugin;
 import io.trino.spi.connector.ConnectorFactory;
-
-import java.util.Collections;
 
 public class PaimonPlugin
         implements
@@ -25,6 +24,6 @@ public class PaimonPlugin
     @Override
     public Iterable<ConnectorFactory> getConnectorFactories()
     {
-        return Collections.singletonList(new PaimonConnectorFactory());
+        return ImmutableList.of(new PaimonConnectorFactory());
     }
 }

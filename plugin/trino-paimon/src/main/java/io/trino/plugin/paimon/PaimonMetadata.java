@@ -445,7 +445,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     .collect(toList());
         }
         catch (Catalog.DatabaseNotExistException e) {
-            throw new RuntimeException(e);
+            // Schema doesn't exist, return empty list per Trino convention
+            return Collections.emptyList();
         }
     }
 
@@ -1101,8 +1102,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return views;
         }
         catch (Catalog.DatabaseNotExistException e) {
-            throw new TrinoException(io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND,
-                    format("Schema '%s' does not exist", schemaName.get()));
+            // Schema doesn't exist, return empty map per Trino convention
+            return Map.of();
         }
         catch (Exception e) {
             throw new RuntimeException(format("Failed to list views in schema '%s'", schemaName.orElse("ALL")), e);

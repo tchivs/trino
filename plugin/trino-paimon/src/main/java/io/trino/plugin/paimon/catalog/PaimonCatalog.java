@@ -70,10 +70,15 @@ public class PaimonCatalog
                         TrinoFileSystem trinoFileSystem = paimonFileSystemFactory.create(connectorSession);
                         Options catalogOptions = Options.fromMap(options.toMap());
                         // Disable loading default Hadoop configuration to minimize dependencies
-                        // We use TrinoFileIOLoader which bypasses Hadoop FileSystem entirely
+                        // We use PaimonFileIOLoader which bypasses Hadoop FileSystem entirely
                         // catalogOptions.set("hadoop-load-default-config", "false");
+
+                        // Pass PaimonFileIOLoader as preferIO (first parameter), not fallbackIO (second parameter)
+                        // This ensures Paimon uses Trino's filesystem instead of falling back to HadoopFileIO
+                        PaimonFileIOLoader paimonFileIOLoader = new PaimonFileIOLoader(trinoFileSystem);
                         CatalogContext catalogContext = CatalogContext.create(catalogOptions,
-                                new PaimonFileIOLoader(trinoFileSystem));
+                                paimonFileIOLoader,  // preferIOLoader
+                                paimonFileIOLoader); // also as fallbackIOLoader for redundancy
                         // Trino uses its own filesystem, so we skip Hadoop security context setup
                         return CatalogFactory.createCatalog(catalogContext);
                     }, this.getClass().getClassLoader());

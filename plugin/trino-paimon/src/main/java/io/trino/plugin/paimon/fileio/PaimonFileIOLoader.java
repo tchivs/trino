@@ -32,7 +32,9 @@ public class PaimonFileIOLoader
     @Override
     public String getScheme()
     {
-        throw new UnsupportedOperationException();
+        // Return a generic scheme identifier for Trino's universal filesystem
+        // This loader supports all schemes through TrinoFileSystem
+        return "trino";
     }
 
     @Override
