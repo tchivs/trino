@@ -95,9 +95,9 @@ Paimon supports reading and writing data stored in various file systems and obje
 stores. The connector uses the underlying file system implementations and requires
 appropriate configuration:
 
-- [](/connector/hive-azure)
-- [](/connector/hive-gcs)
-- [](/connector/hive-s3)
+- [](/object-storage/file-system-azure)
+- [](/object-storage/file-system-gcs)
+- [](/object-storage/file-system-s3)
 
 ### S3 configuration example
 
