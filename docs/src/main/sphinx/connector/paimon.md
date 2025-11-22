@@ -18,7 +18,7 @@ streaming and batch processing with features like:
 
 To use the Paimon connector, you need:
 
-- Apache Paimon version 0.4 or higher
+- Apache Paimon version 1.3 or higher
 - Network access to the Paimon warehouse location
 - A Hive Metastore service (HMS) or compatible metastore for metadata management
 - Access to object storage (S3, Azure, GCS) or HDFS where Paimon data is stored
@@ -59,6 +59,33 @@ connector:
 * - `hive.metastore.uri`
   - The URI of the Hive Metastore service. Use `thrift://` protocol for HMS.
   -
+* - `fs.native-s3.enabled`
+  - Enable Trino's native S3 file system. Required for MinIO and S3-compatible
+    storage.
+  - `false`
+* - `fs.hadoop.enabled`
+  - Enable Hadoop file system support. Set to `false` when using S3-only
+    configuration.
+  - `true`
+* - `s3.endpoint`
+  - S3 endpoint URL. For AWS S3, use regional endpoints like
+    `https://s3.us-east-1.amazonaws.com`. For MinIO, use your MinIO server
+    URL (e.g., `http://192.168.1.100:9000`).
+  -
+* - `s3.path-style-access`
+  - Use path-style access for S3 URLs. Set to `true` for MinIO and some
+    S3-compatible storage systems.
+  - `false`
+* - `s3.access-key`
+  - AWS access key ID or MinIO access key for authentication.
+  -
+* - `s3.secret-key`
+  - AWS secret access key or MinIO secret key for authentication.
+  -
+* - `s3.region`
+  - AWS region name (e.g., `us-east-1`). Required for AWS S3. For MinIO, can
+    be set to any valid region name.
+  -
 :::
 
 (paimon-file-system-configuration)=
@@ -74,7 +101,7 @@ appropriate configuration:
 
 ### S3 configuration example
 
-For S3-compatible storage, add the following properties to your catalog
+For AWS S3 storage, add the following properties to your catalog
 configuration file:
 
 ```properties
@@ -82,13 +109,42 @@ connector.name=paimon
 warehouse=s3://my-bucket/warehouse
 hive.metastore.uri=thrift://example.net:9083
 
-# S3 configuration
+# AWS S3 configuration
 s3.endpoint=https://s3.amazonaws.com
 s3.region=us-east-1
 s3.path-style-access=false
 ```
 
 You can also configure S3 credentials using environment variables or IAM roles.
+
+### MinIO configuration example
+
+For MinIO or other S3-compatible storage, use the following configuration:
+
+```properties
+connector.name=paimon
+warehouse=s3://bucket-name/warehouse/paimon/schema-name
+hive.metastore.uri=thrift://example.net:9083
+
+# MinIO S3-compatible storage configuration
+fs.native-s3.enabled=true
+s3.endpoint=http://192.168.240.77:9005
+s3.path-style-access=true
+s3.access-key=admin
+s3.secret-key=your-secret-key
+s3.region=us-east-1
+
+# Disable HDFS when using S3
+fs.hadoop.enabled=false
+```
+
+:::{note}
+For MinIO:
+- Set `fs.native-s3.enabled=true` to use Trino's native S3 file system
+- Set `s3.path-style-access=true` for path-style URLs (required for MinIO)
+- Use `http://` or `https://` protocol in the endpoint
+- Set `fs.hadoop.enabled=false` to disable HDFS when using S3
+:::
 
 ## Type mapping
 
