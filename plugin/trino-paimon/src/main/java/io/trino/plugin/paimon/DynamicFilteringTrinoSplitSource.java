@@ -20,7 +20,11 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.metrics.Metrics;
+import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.Type;
+import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
 import org.apache.paimon.table.Table;
@@ -200,9 +204,37 @@ public class DynamicFilteringTrinoSplitSource
             return false;
         }
 
-        int totalValues = predicate.getDomains().get().values().stream()
-                .mapToInt(domain -> domain.getValues().getRanges().getRangeCount()).sum();
+        return estimateComplexity(predicate) > threshold;
+    }
 
-        return totalValues > threshold;
+    @VisibleForTesting
+    static int estimateComplexity(TupleDomain<PaimonColumnHandle> predicate)
+    {
+        if (predicate.isAll() || predicate.isNone()) {
+            return 0;
+        }
+        if (predicate.getDomains().isEmpty()) {
+            return 0;
+        }
+        return predicate.getDomains().get().values().stream()
+                .mapToInt(DynamicFilteringTrinoSplitSource::estimateDomainComplexity)
+                .sum();
+    }
+
+    private static int estimateDomainComplexity(Domain domain)
+    {
+        ValueSet values = domain.getValues();
+        if (values.isAll() || values.isNone()) {
+            return 0;
+        }
+
+        Type type = values.getType();
+        if (type.isOrderable()) {
+            return values.getRanges().getRangeCount();
+        }
+        if (type.isComparable()) {
+            return values.getDiscreteValues().getValuesCount();
+        }
+        return 0;
     }
 }
