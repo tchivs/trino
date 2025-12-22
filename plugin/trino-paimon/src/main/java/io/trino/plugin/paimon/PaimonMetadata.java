@@ -84,6 +84,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static io.trino.plugin.paimon.PaimonColumnHandle.TRINO_ROW_ID_NAME;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -1007,9 +1008,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         try {
             // Build Paimon View from Trino ViewDefinition
-            List<DataField> fields = definition.getColumns().stream().map(column -> new DataField(0, // id will be
-                                                                                                     // auto-assigned
-                    column.getName(), PaimonTypeUtils.toPaimonType(typeManager.getType(column.getType()))))
+            List<ConnectorViewDefinition.ViewColumn> columns = definition.getColumns();
+            List<DataField> fields = IntStream.range(0, columns.size())
+                    .mapToObj(index -> {
+                        ConnectorViewDefinition.ViewColumn column = columns.get(index);
+                        return new DataField(index, column.getName(), PaimonTypeUtils.toPaimonType(typeManager.getType(column.getType())));
+                    })
                     .collect(toList());
 
             // Store Trino dialect SQL
@@ -1019,6 +1023,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
             // Build options from view metadata
             Map<String, String> options = new HashMap<>();
             definition.getComment().ifPresent(c -> options.put("comment", c));
+            definition.getCatalog().ifPresent(catalog -> options.put("trino.catalog", catalog));
+            definition.getSchema().ifPresent(schema -> options.put("trino.schema", schema));
 
             // Create ViewImpl
             org.apache.paimon.view.View paimonView = new org.apache.paimon.view.ViewImpl(identifier, fields,
@@ -1078,8 +1084,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
             // Get Trino-specific SQL from dialects, fallback to default query
             String originalSql = paimonView.dialects().getOrDefault("trino", paimonView.query());
 
-            return Optional.of(new ConnectorViewDefinition(originalSql, Optional.empty(), // catalog
-                    Optional.of(viewName.getSchemaName()), // schema
+            Optional<String> catalogName = Optional.ofNullable(paimonView.options().get("trino.catalog"));
+            Optional<String> schemaName = Optional.ofNullable(paimonView.options().get("trino.schema"));
+            if (catalogName.isEmpty()) {
+                schemaName = Optional.empty();
+            }
+
+            return Optional.of(new ConnectorViewDefinition(originalSql, catalogName,
+                    schemaName,
                     columns, paimonView.comment(), // comment
                     Optional.empty(), // owner
                     false, // runAsInvoker
