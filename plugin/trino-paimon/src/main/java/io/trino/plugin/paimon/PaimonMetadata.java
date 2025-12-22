@@ -109,6 +109,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     @Override
     public Optional<ConnectorTableLayout> getInsertLayout(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
+        catalog.initSession(session);
         PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
         Table table = paimonTableHandle.table(catalog);
         if (!(table instanceof FileStoreTable storeTable)) {
@@ -203,6 +204,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     @Override
     public ColumnHandle getMergeRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
+        catalog.initSession(session);
         PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
         Table table = paimonTableHandle.table(catalog);
         if (!(table instanceof FileStoreTable storeTable)) {
@@ -223,6 +225,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public Optional<ConnectorPartitioningHandle> getUpdateLayout(ConnectorSession session,
             ConnectorTableHandle tableHandle)
     {
+        catalog.initSession(session);
         PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
         Table table = paimonTableHandle.table(catalog);
         if (!(table instanceof FileStoreTable storeTable)) {
@@ -924,6 +927,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(ConnectorSession session,
             ConnectorTableHandle handle, long limit)
     {
+        catalog.initSession(session);
         // TODO: Enhancement - SUPPORTS_TOPN_PUSHDOWN_WITH_VARCHAR
         // Current implementation supports basic TOP-N pushdown but not with VARCHAR
         // sorting keys.
