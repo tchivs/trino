@@ -22,7 +22,6 @@ import io.trino.spi.metrics.Metrics;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.OptionalLong;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 
@@ -31,16 +30,13 @@ public class PaimonSplitSource
         ConnectorSplitSource
 {
     private final Queue<PaimonSplit> splits;
-    private final OptionalLong limit;
     private final long totalSplitCount;
     private final long totalRowCount;
-    private long count;
     private long processedSplitCount;
 
-    public PaimonSplitSource(List<PaimonSplit> splits, OptionalLong limit)
+    public PaimonSplitSource(List<PaimonSplit> splits)
     {
         this.splits = new LinkedList<>(splits);
-        this.limit = limit;
         this.totalSplitCount = splits.size();
         this.totalRowCount = splits.stream().mapToLong(split -> split.decodeSplit().rowCount()).sum();
     }
@@ -50,10 +46,9 @@ public class PaimonSplitSource
         List<ConnectorSplit> batch = new ArrayList<>();
         for (int i = 0; i < maxSize; i++) {
             PaimonSplit split = splits.poll();
-            if (split == null || (limit.isPresent() && count >= limit.getAsLong())) {
+            if (split == null) {
                 break;
             }
-            count += split.decodeSplit().rowCount();
             processedSplitCount++;
             batch.add(split);
         }
@@ -74,7 +69,7 @@ public class PaimonSplitSource
     @Override
     public boolean isFinished()
     {
-        return splits.isEmpty() || (limit.isPresent() && count >= limit.getAsLong());
+        return splits.isEmpty();
     }
 
     @Override

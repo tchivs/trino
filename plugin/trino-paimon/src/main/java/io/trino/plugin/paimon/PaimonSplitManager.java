@@ -110,7 +110,7 @@ public class PaimonSplitManager
                             Math.min(Math.max((double) split.rowCount() / maxRowCount, minimumSplitWeight), 1.0);
                     return PaimonSplit.fromSplit(split, weight);
                 })
-                .collect(Collectors.toList()), tableHandle.getLimit());
+                .collect(Collectors.toList()));
 
         // Wrap with ClassLoaderSafe wrapper for proper plugin isolation
         return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
