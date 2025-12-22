@@ -147,7 +147,11 @@ public class DynamicFilteringTrinoSplitSource
         paimonPredicate.ifPresent(readBuilder::withFilter);
 
         // Apply limit if present
-        tableHandle.getLimit().ifPresent(limit -> readBuilder.withLimit((int) limit));
+        tableHandle.getLimit().ifPresent(limit -> {
+            if (limit <= Integer.MAX_VALUE) {
+                readBuilder.withLimit((int) limit);
+            }
+        });
 
         // Plan splits
         List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
@@ -159,8 +163,12 @@ public class DynamicFilteringTrinoSplitSource
         double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
 
         return new PaimonSplitSource(splits.stream()
-                .map(split -> PaimonSplit.fromSplit(split,
-                        Math.min(Math.max((double) split.rowCount() / maxRowCount, minimumSplitWeight), 1.0)))
+                .map(split -> {
+                    // Avoid NaN when maxRowCount is 0 (empty table or all splits have 0 rows)
+                    double weight = maxRowCount == 0 ? minimumSplitWeight :
+                            Math.min(Math.max((double) split.rowCount() / maxRowCount, minimumSplitWeight), 1.0);
+                    return PaimonSplit.fromSplit(split, weight);
+                })
                 .collect(Collectors.toList()), tableHandle.getLimit());
     }
 
