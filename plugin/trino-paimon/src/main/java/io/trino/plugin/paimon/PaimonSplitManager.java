@@ -94,20 +94,14 @@ public class PaimonSplitManager
         Table table = tableHandle.tableWithDynamicOptions(paimonCatalog, session);
         ReadBuilder readBuilder = table.newReadBuilder();
         new PaimonFilterConverter(table.rowType()).convert(tableHandle.getFilter()).ifPresent(readBuilder::withFilter);
-        tableHandle.getLimit().ifPresent(limit -> {
-            if (limit <= Integer.MAX_VALUE) {
-                readBuilder.withLimit((int) limit);
-            }
-        });
+        SplitPlanningUtils.toPaimonLimit(tableHandle.getLimit()).ifPresent(readBuilder::withLimit);
         List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
 
         long maxRowCount = splits.stream().mapToLong(Split::rowCount).max().orElse(0L);
         double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
         PaimonSplitSource splitSource = new PaimonSplitSource(splits.stream()
                 .map(split -> {
-                    // Avoid NaN when maxRowCount is 0 (empty table or all splits have 0 rows)
-                    double weight = maxRowCount == 0 ? minimumSplitWeight :
-                            Math.min(Math.max((double) split.rowCount() / maxRowCount, minimumSplitWeight), 1.0);
+                    double weight = SplitPlanningUtils.computeSplitWeight(split.rowCount(), maxRowCount, minimumSplitWeight);
                     return PaimonSplit.fromSplit(split, weight);
                 })
                 .collect(Collectors.toList()));
