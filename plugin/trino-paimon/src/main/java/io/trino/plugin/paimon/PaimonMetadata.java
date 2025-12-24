@@ -1022,13 +1022,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return Optional.empty();
         }
 
-        // Don't push down if there are filters that can't be fully pushed to storage
-        if (!paimonTableHandle.getFilter().isAll()) {
-            return Optional.empty();
-        }
-
         try {
             Table table = paimonTableHandle.tableWithDynamicOptions(catalog, session);
+
+            // Aggregation pushdown computes results from split-level metadata, so it is only correct without row-level
+            // filtering. Partition-only filters are safe because they only restrict which splits are selected.
+            if (!isPartitionOnlyFilter(table, paimonTableHandle.getFilter())) {
+                return Optional.empty();
+            }
 
             // Only support FileStoreTable for MIN/MAX pushdown
             if (!(table instanceof FileStoreTable)) {
@@ -1041,12 +1042,26 @@ public record PaimonMetadata(PaimonCatalog catalog,
             boolean hasPrimaryKeys = !fileStoreTable.schema().primaryKeys().isEmpty();
             boolean deletionVectorsEnabled = fileStoreTable.coreOptions().deletionVectorsEnabled();
 
+            boolean hasMinMax = aggregates.stream()
+                    .map(AggregateFunction::getFunctionName)
+                    .map(String::toLowerCase)
+                    .anyMatch(functionName -> "min".equals(functionName) || "max".equals(functionName));
+
+            // MIN/MAX based on file-level statistics may include rows removed by deletion vectors
+            // and may also be incorrect for primary key tables due to updates/deduplication.
+            if (hasMinMax && (hasPrimaryKeys || deletionVectorsEnabled)) {
+                log.debug("MIN/MAX pushdown not supported for table %s.%s: table has primary keys or deletion vectors enabled",
+                        paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
+                return Optional.empty();
+            }
+
             // For primary key tables, COUNT(*) pushdown is only supported when deletion-vectors is enabled
             // Without deletion-vectors, mergedRowCount would be incorrect as it doesn't account for key deduplication
             boolean countPushdownSupported = !hasPrimaryKeys || deletionVectorsEnabled;
 
             // Get all splits to compute aggregation
             org.apache.paimon.table.source.ReadBuilder readBuilder = table.newReadBuilder();
+            new PaimonFilterConverter(table.rowType()).convert(paimonTableHandle.getFilter()).ifPresent(readBuilder::withFilter);
             List<Split> splits = readBuilder.newScan().plan().splits();
 
             // Check if all splits support mergedRowCount for COUNT(*)
@@ -1085,7 +1100,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 String functionName = aggregate.getFunctionName().toLowerCase();
                 String syntheticColumnName = "paimon_agg_" + columnIndex;
 
-                if ("count".equals(functionName) && aggregate.getArguments().isEmpty()) {
+                if ("count".equals(functionName) && (aggregate.getArguments().isEmpty() || isCountNonNull(aggregate, assignments))) {
                     // COUNT(*) - sum up mergedRowCount from all splits
                     // For PK tables without deletion-vectors, count would be incorrect
                     if (!countPushdownSupported) {
@@ -1287,8 +1302,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
 
             if ("count".equals(functionName)) {
-                // COUNT(*) has no arguments
-                if (!aggregate.getArguments().isEmpty()) {
+                // COUNT(*) and COUNT(non-null column) are supported
+                if (!aggregate.getArguments().isEmpty() && !isCountNonNull(aggregate, assignments)) {
                     return false;
                 }
             }
@@ -1316,6 +1331,44 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return !aggregates.isEmpty();
     }
 
+    private boolean isCountNonNull(AggregateFunction aggregate, Map<String, ColumnHandle> assignments)
+    {
+        if (aggregate.getArguments().size() != 1) {
+            return false;
+        }
+        ConnectorExpression argument = aggregate.getArguments().get(0);
+        if (!(argument instanceof Variable)) {
+            return false;
+        }
+        String columnName = ((Variable) argument).getName();
+        ColumnHandle sourceColumnHandle = assignments.get(columnName);
+        if (!(sourceColumnHandle instanceof PaimonColumnHandle)) {
+            return false;
+        }
+        return !((PaimonColumnHandle) sourceColumnHandle).logicalType().isNullable();
+    }
+
+    private boolean isPartitionOnlyFilter(Table table, io.trino.spi.predicate.TupleDomain<PaimonColumnHandle> filter)
+    {
+        if (filter.isAll() || filter.isNone()) {
+            return true;
+        }
+
+        HashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
+        HashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
+        new PaimonFilterConverter(table.rowType()).convert(filter, acceptedDomains, unsupportedDomains);
+
+        if (!unsupportedDomains.isEmpty()) {
+            return false;
+        }
+
+        Set<String> acceptedFields = acceptedDomains.keySet().stream()
+                .map(PaimonColumnHandle::getColumnName)
+                .collect(Collectors.toSet());
+
+        return new HashSet<>(table.partitionKeys()).containsAll(acceptedFields);
+    }
+
     @Override
     public Optional<TopNApplicationResult<ConnectorTableHandle>> applyTopN(
             ConnectorSession session,
@@ -1324,80 +1377,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
             List<SortItem> sortItems,
             Map<String, ColumnHandle> assignments)
     {
-        catalog.initSession(session);
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) handle;
-
-        // Don't push down if TopN is already applied
-        if (paimonTableHandle.getTopN().isPresent()) {
-            return Optional.empty();
-        }
-
-        // Don't push down if there are filters
-        if (!paimonTableHandle.getFilter().isAll()) {
-            return Optional.empty();
-        }
-
-        // Only support single sort column (Paimon limitation)
-        if (sortItems.size() != 1) {
-            return Optional.empty();
-        }
-
-        // Limit topN count to 100 (Paimon limitation)
-        if (topNCount > 100) {
-            return Optional.empty();
-        }
-
-        try {
-            Table table = paimonTableHandle.tableWithDynamicOptions(catalog, session);
-
-            // Only support FileStoreTable
-            if (!(table instanceof FileStoreTable)) {
-                return Optional.empty();
-            }
-            FileStoreTable fileStoreTable = (FileStoreTable) table;
-
-            // Don't support tables with primary keys
-            if (!fileStoreTable.schema().primaryKeys().isEmpty()) {
-                return Optional.empty();
-            }
-
-            // Don't support tables with deletion vectors enabled
-            if (fileStoreTable.coreOptions().deletionVectorsEnabled()) {
-                return Optional.empty();
-            }
-
-            SortItem sortItem = sortItems.get(0);
-            String columnName = sortItem.getName();
-            ColumnHandle columnHandle = assignments.get(columnName);
-
-            if (!(columnHandle instanceof PaimonColumnHandle)) {
-                return Optional.empty();
-            }
-
-            PaimonColumnHandle paimonColumn = (PaimonColumnHandle) columnHandle;
-            DataType paimonType = paimonColumn.logicalType();
-
-            // Check if the type supports MIN/MAX statistics
-            if (!isMinMaxSupported(paimonType)) {
-                return Optional.empty();
-            }
-
-            // Create TopN info
-            List<PaimonTopN.PaimonSortItem> paimonSortItems = sortItems.stream()
-                    .map(item -> new PaimonTopN.PaimonSortItem(item.getName(), item.getSortOrder()))
-                    .collect(toList());
-
-            PaimonTopN topN = new PaimonTopN(paimonSortItems, topNCount);
-            PaimonTableHandle newHandle = paimonTableHandle.copyWithTopN(topN);
-
-            // Return with topNGuaranteed=false because we only filter splits, not guarantee exact count
-            return Optional.of(new TopNApplicationResult<>(newHandle, false, false));
-        }
-        catch (Exception e) {
-            log.debug(e, "Failed to push down TopN for table %s.%s",
-                    paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
-            return Optional.empty();
-        }
+        // Split-level TopN pruning based on file statistics is not guaranteed to be conservative,
+        // and may drop splits containing qualifying rows. Until we can guarantee correctness,
+        // do not apply TopN pushdown.
+        return Optional.empty();
     }
 
     // ========== View Support ==========
