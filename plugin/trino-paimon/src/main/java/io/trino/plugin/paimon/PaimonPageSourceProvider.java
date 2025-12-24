@@ -128,6 +128,12 @@ public class PaimonPageSourceProvider
     {
         paimonCatalog.initSession(session);
         PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+
+        // Check if this is an aggregation pushdown result
+        if (paimonTableHandle.getAggregationResult().isPresent()) {
+            return new PaimonAggregationPageSource(paimonTableHandle.getAggregationResult().get());
+        }
+
         Table table = paimonTableHandle.tableWithDynamicOptions(paimonCatalog, session);
         return runWithContextClassLoader(() -> {
             Optional<PaimonColumnHandle> rowId = columns.stream().map(PaimonColumnHandle.class::cast)
@@ -182,55 +188,84 @@ public class PaimonPageSourceProvider
                     List<RawFile> files = optionalRawFiles.orElseThrow();
                     LinkedList<ConnectorPageSource> sources = new LinkedList<>();
 
-                    // if file index exists, do the filter.
-                    for (int i = 0; i < files.size(); i++) {
-                        RawFile rawFile = files.get(i);
-                        if (indexFiles.isPresent()) {
-                            IndexFile indexFile = indexFiles.get().get(i);
-                            if (indexFile != null && paimonFilter.isPresent()) {
-                                try (FileIndexPredicate fileIndexPredicate = new FileIndexPredicate(
-                                        new Path(indexFile.path()), table.fileIO(), rowType)) {
+                    // Cache schemas to avoid repeated reads for files with the same schema ID
+                    Map<Long, org.apache.paimon.schema.TableSchema> schemaCache = new HashMap<>();
+                    long tableSchemaId = fileStoreTable.schema().id();
+
+                    // Cache FileIndexPredicate objects to avoid repeated I/O for same index files
+                    // Key: index file path, Value: FileIndexPredicate
+                    Map<String, FileIndexPredicate> indexPredicateCache = new HashMap<>();
+
+                    try {
+                        // if file index exists, do the filter.
+                        for (int i = 0; i < files.size(); i++) {
+                            RawFile rawFile = files.get(i);
+                            if (indexFiles.isPresent()) {
+                                IndexFile indexFile = indexFiles.get().get(i);
+                                if (indexFile != null && paimonFilter.isPresent()) {
+                                    FileIndexPredicate fileIndexPredicate = indexPredicateCache.computeIfAbsent(
+                                            indexFile.path(),
+                                            path -> {
+                                                try {
+                                                    return new FileIndexPredicate(new Path(path), table.fileIO(), rowType);
+                                                }
+                                                catch (IOException e) {
+                                                    throw new RuntimeException("Failed to create FileIndexPredicate for: " + path, e);
+                                                }
+                                            });
                                     if (!fileIndexPredicate.evaluate(paimonFilter.get()).remain()) {
                                         continue;
                                     }
                                 }
                             }
-                        }
 
-                        // Schema evolution: map table column names to data file column names
-                        // Paimon stores column names in lowercase in ORC/Parquet files,
-                        // so we need to convert to lowercase for file reading
-                        List<String> dataFileColumns;
-                        long tableSchemaId = fileStoreTable.schema().id();
-                        long fileSchemaId = rawFile.schemaId();
+                            // Schema evolution: map table column names to data file column names
+                            // Paimon stores column names in lowercase in ORC/Parquet files,
+                            // so we need to convert to lowercase for file reading
+                            List<String> dataFileColumns;
+                            long fileSchemaId = rawFile.schemaId();
 
-                        if (tableSchemaId == fileSchemaId) {
-                            // No schema evolution - convert projected fields to lowercase
-                            // because Paimon writes column names in lowercase to files
-                            dataFileColumns = FieldNameUtils.toLowerCase(projectedFields);
-                        }
-                        else {
-                            // Schema evolution: map table fields to data file fields by ID
-                            dataFileColumns = schemaEvolutionFieldNames(projectedFields, rowType.getFields(),
-                                    schemaManager.schema(fileSchemaId).fields());
-                        }
+                            if (tableSchemaId == fileSchemaId) {
+                                // No schema evolution - convert projected fields to lowercase
+                                // because Paimon writes column names in lowercase to files
+                                dataFileColumns = FieldNameUtils.toLowerCase(projectedFields);
+                            }
+                            else {
+                                // Schema evolution: map table fields to data file fields by ID
+                                // Use cached schema to avoid repeated reads
+                                org.apache.paimon.schema.TableSchema fileSchema = schemaCache.computeIfAbsent(
+                                        fileSchemaId,
+                                        id -> schemaManager.schema(id));
+                                dataFileColumns = schemaEvolutionFieldNames(projectedFields, rowType.getFields(),
+                                        fileSchema.fields());
+                            }
 
-                        ConnectorPageSource source = createDataPageSource(rawFile.format(),
-                                fileSystem.newInputFile(Location.of(rawFile.path())), fileStoreTable.coreOptions(),
-                                dataFileColumns, type, orderDomains(projectedFields, filter));
+                            ConnectorPageSource source = createDataPageSource(rawFile.format(),
+                                    fileSystem.newInputFile(Location.of(rawFile.path())), fileStoreTable.coreOptions(),
+                                    dataFileColumns, type, orderDomains(projectedFields, filter));
 
-                        if (deletionFiles.isPresent()) {
-                            source = PaimonPageSourceWrapper.wrap(source,
-                                    Optional.ofNullable(deletionFiles.get().get(i)).map(deletionFile -> {
-                                        try {
-                                            return DeletionVector.read(fileStoreTable.fileIO(), deletionFile);
-                                        }
-                                        catch (IOException e) {
-                                            throw new RuntimeException(e);
-                                        }
-                                    }));
+                            if (deletionFiles.isPresent()) {
+                                source = PaimonPageSourceWrapper.wrap(source,
+                                        Optional.ofNullable(deletionFiles.get().get(i)).map(deletionFile -> {
+                                            try {
+                                                return DeletionVector.read(fileStoreTable.fileIO(), deletionFile);
+                                            }
+                                            catch (IOException e) {
+                                                throw new RuntimeException(e);
+                                            }
+                                        }));
+                            }
+                            sources.add(source);
                         }
-                        sources.add(source);
+                    }
+                    finally {
+                        for (FileIndexPredicate predicate : indexPredicateCache.values()) {
+                            try {
+                                predicate.close();
+                            }
+                            catch (IOException ignored) {
+                            }
+                        }
                     }
 
                     return new DirectTrinoPageSource(sources);

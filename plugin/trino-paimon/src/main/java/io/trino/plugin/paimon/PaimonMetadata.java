@@ -13,9 +13,15 @@
  */
 package io.trino.plugin.paimon;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -41,10 +47,14 @@ import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.SortItem;
+import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
+import io.trino.spi.type.BigintType;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
@@ -56,6 +66,9 @@ import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.schema.SchemaManager;
+import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.stats.SimpleStatsEvolutions;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -63,6 +76,8 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
+import org.apache.paimon.table.source.DataSplit;
+import org.apache.paimon.table.source.Split;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
@@ -82,7 +97,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -99,7 +113,9 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
 public record PaimonMetadata(PaimonCatalog catalog,
                              io.trino.spi.type.TypeManager typeManager) implements ConnectorMetadata
 {
+    private static final Logger log = Logger.get(PaimonMetadata.class);
     private static final String TAG_PREFIX = "tag-";
+    private static final int GET_METADATA_BATCH_SIZE = 1000;
 
     private static boolean containSameElements(List<? extends ColumnHandle> first, List<? extends ColumnHandle> second)
     {
@@ -563,16 +579,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
             SchemaTablePrefix prefix)
     {
         requireNonNull(prefix, "prefix is null");
-        List<SchemaTableName> tableNames;
-        if (prefix.getTable().isPresent()) {
-            tableNames = Collections.singletonList(prefix.toSchemaTableName());
-        }
-        else {
-            tableNames = listTables(session, prefix.getSchema());
-        }
-
-        return tableNames.stream().collect(Collectors.toMap(Function.identity(),
-                table -> ((PaimonTableHandle) requireNonNull(getTableHandle(session, table, Optional.empty(), Optional.empty()))).columnMetadatas(catalog)));
+        Map<SchemaTableName, List<ColumnMetadata>> result = new LinkedHashMap<>();
+        streamTableColumns(session, prefix).forEachRemaining(tableColumnsMetadata ->
+                tableColumnsMetadata.getColumns().ifPresent(columns -> result.put(tableColumnsMetadata.getTable(), columns)));
+        return result;
     }
 
     @Override
@@ -588,8 +598,32 @@ public record PaimonMetadata(PaimonCatalog catalog,
             tableNames = listTables(session, prefix.getSchema());
         }
 
-        return tableNames.stream().map(tableName -> io.trino.spi.connector.TableColumnsMetadata.forTable(tableName,
-                ((PaimonTableHandle) requireNonNull(getTableHandle(session, tableName, Optional.empty(), Optional.empty()))).columnMetadatas(catalog)))
+        // Process tables in batches to improve performance
+        return Lists.partition(tableNames, GET_METADATA_BATCH_SIZE).stream()
+                .map(tableBatch -> {
+                    ImmutableList.Builder<io.trino.spi.connector.TableColumnsMetadata> tableMetadatas =
+                            ImmutableList.builderWithExpectedSize(tableBatch.size());
+
+                    for (SchemaTableName tableName : tableBatch) {
+                        try {
+                            PaimonTableHandle tableHandle = (PaimonTableHandle) getTableHandle(
+                                    session, tableName, Optional.empty(), Optional.empty());
+                            if (tableHandle != null) {
+                                List<ColumnMetadata> columns = tableHandle.columnMetadatas(catalog);
+                                tableMetadatas.add(io.trino.spi.connector.TableColumnsMetadata.forTable(tableName, columns));
+                            }
+                        }
+                        catch (RuntimeException e) {
+                            // Table can be being removed and this may cause all sorts of exceptions
+                            // Log and skip this table
+                            log.warn(e, "Failed to access metadata of table %s during streaming table columns for %s",
+                                    tableName, prefix);
+                        }
+                    }
+
+                    return tableMetadatas.build();
+                })
+                .flatMap(List::stream)
                 .iterator();
     }
 
@@ -966,37 +1000,406 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return Optional.of(new LimitApplicationResult<>(table, false, false));
     }
 
-    // TODO: Long-term Enhancement - SUPPORTS_AGGREGATION_PUSHDOWN
-    // Aggregation pushdown (COUNT, SUM, AVG, etc.) to storage layer is a complex
-    // feature.
-    // Current status: Not implemented (Iceberg and Hudi also don't support this)
-    //
-    // Implementation path:
-    // 1. Research if Paimon supports aggregation at storage level
-    // - Check:
-    // /opt/source/paimon/paimon-core/src/main/java/org/apache/paimon/table/
-    // - Look for: Statistics, Aggregation-related interfaces
-    // 2. If supported, implement applyAggregation() method:
-    // @Override
-    // public Optional<AggregationApplicationResult<ConnectorTableHandle>>
-    // applyAggregation(
-    // ConnectorSession session,
-    // ConnectorTableHandle handle,
-    // List<AggregateFunction> aggregates,
-    // Map<String, ColumnHandle> assignments,
-    // List<List<ColumnHandle>> groupingSets)
-    // {
-    // // Convert Trino aggregates to Paimon API
-    // // Return partial aggregation results
-    // }
-    // 3. Handle edge cases: NULL values, precision, type conversions
-    // 4. Performance benchmarking - pushdown not always faster
-    //
-    // Reference:
-    // tmp-docs/PUSHDOWN_OPTIMIZATION_GUIDE.md#5-supports_aggregation_pushdown
-    // Estimated effort: 40-60 hours (requires dedicated research)
-    // Priority: P3 (High uncertainty, major implementation effort)
-    //
+    @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+            ConnectorSession session,
+            ConnectorTableHandle handle,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets)
+    {
+        catalog.initSession(session);
+        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) handle;
+
+        // Only support global aggregation (no GROUP BY) for now
+        // Global aggregation is represented by [[]]
+        if (groupingSets.size() != 1 || !groupingSets.get(0).isEmpty()) {
+            return Optional.empty();
+        }
+
+        // Check if all aggregates are supported
+        if (!canPushdownAggregation(aggregates, assignments)) {
+            return Optional.empty();
+        }
+
+        // Don't push down if there are filters that can't be fully pushed to storage
+        if (!paimonTableHandle.getFilter().isAll()) {
+            return Optional.empty();
+        }
+
+        try {
+            Table table = paimonTableHandle.tableWithDynamicOptions(catalog, session);
+
+            // Only support FileStoreTable for MIN/MAX pushdown
+            if (!(table instanceof FileStoreTable)) {
+                log.debug("Aggregation pushdown not supported: table is not FileStoreTable");
+                return Optional.empty();
+            }
+            FileStoreTable fileStoreTable = (FileStoreTable) table;
+
+            // Check table properties for COUNT(*) pushdown eligibility
+            boolean hasPrimaryKeys = !fileStoreTable.schema().primaryKeys().isEmpty();
+            boolean deletionVectorsEnabled = fileStoreTable.coreOptions().deletionVectorsEnabled();
+
+            // For primary key tables, COUNT(*) pushdown is only supported when deletion-vectors is enabled
+            // Without deletion-vectors, mergedRowCount would be incorrect as it doesn't account for key deduplication
+            boolean countPushdownSupported = !hasPrimaryKeys || deletionVectorsEnabled;
+
+            // Get all splits to compute aggregation
+            org.apache.paimon.table.source.ReadBuilder readBuilder = table.newReadBuilder();
+            List<Split> splits = readBuilder.newScan().plan().splits();
+
+            // Check if all splits support mergedRowCount for COUNT(*)
+            List<DataSplit> dataSplits = splits.stream()
+                    .filter(split -> split instanceof DataSplit)
+                    .map(split -> (DataSplit) split)
+                    .collect(toList());
+
+            // For COUNT(*), check if mergedRowCount is available
+            // This is only true for append-only tables (no primary keys)
+            boolean allMergedRowCountAvailable = dataSplits.stream()
+                    .allMatch(DataSplit::mergedRowCountAvailable);
+
+            if (!allMergedRowCountAvailable) {
+                log.debug("Aggregation pushdown not supported for table %s.%s: mergedRowCount not available (table may have primary keys or deletion vectors)",
+                        paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
+            }
+
+            // Prepare for MIN/MAX computation
+            TableSchema tableSchema = fileStoreTable.schema();
+            SchemaManager schemaManager = fileStoreTable.schemaManager();
+            Map<Long, TableSchema> schemaCache = new HashMap<>();
+            SimpleStatsEvolutions evolutions = new SimpleStatsEvolutions(
+                    id -> schemaCache.computeIfAbsent(id, key ->
+                            key == tableSchema.id() ? tableSchema : schemaManager.schema(key)).fields(),
+                    tableSchema.id());
+
+            // Compute aggregation results
+            List<Object> aggregationValues = new ArrayList<>();
+            List<PaimonAggregationResult.AggregationColumn> aggregationColumns = new ArrayList<>();
+            ImmutableList.Builder<ConnectorExpression> projections = ImmutableList.builder();
+            ImmutableList.Builder<Assignment> resultAssignments = ImmutableList.builder();
+
+            int columnIndex = 0;
+            for (AggregateFunction aggregate : aggregates) {
+                String functionName = aggregate.getFunctionName().toLowerCase();
+                String syntheticColumnName = "paimon_agg_" + columnIndex;
+
+                if ("count".equals(functionName) && aggregate.getArguments().isEmpty()) {
+                    // COUNT(*) - sum up mergedRowCount from all splits
+                    // For PK tables without deletion-vectors, count would be incorrect
+                    if (!countPushdownSupported) {
+                        log.debug("COUNT(*) pushdown not supported for table %s.%s: primary key table without deletion-vectors",
+                                paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
+                        return Optional.empty();
+                    }
+                    if (!allMergedRowCountAvailable) {
+                        return Optional.empty();
+                    }
+
+                    long count = dataSplits.stream()
+                            .mapToLong(DataSplit::mergedRowCount)
+                            .sum();
+
+                    aggregationValues.add(count);
+                    aggregationColumns.add(new PaimonAggregationResult.AggregationColumn(
+                            syntheticColumnName, BigintType.BIGINT));
+
+                    PaimonColumnHandle columnHandle = PaimonColumnHandle.of(
+                            syntheticColumnName,
+                            org.apache.paimon.types.DataTypes.BIGINT());
+
+                    projections.add(new Variable(syntheticColumnName, BigintType.BIGINT));
+                    resultAssignments.add(new Assignment(syntheticColumnName, columnHandle, BigintType.BIGINT));
+                }
+                else if ("min".equals(functionName) || "max".equals(functionName)) {
+                    // MIN/MAX aggregation
+                    if (aggregate.getArguments().size() != 1) {
+                        return Optional.empty();
+                    }
+
+                    ConnectorExpression argument = aggregate.getArguments().get(0);
+                    if (!(argument instanceof Variable)) {
+                        return Optional.empty();
+                    }
+
+                    String columnName = ((Variable) argument).getName();
+                    ColumnHandle sourceColumnHandle = assignments.get(columnName);
+                    if (!(sourceColumnHandle instanceof PaimonColumnHandle)) {
+                        return Optional.empty();
+                    }
+
+                    PaimonColumnHandle paimonColumn = (PaimonColumnHandle) sourceColumnHandle;
+                    DataType paimonType = paimonColumn.logicalType();
+
+                    // Check if the type supports MIN/MAX statistics
+                    if (!isMinMaxSupported(paimonType)) {
+                        return Optional.empty();
+                    }
+
+                    // Check if all splits have statistics for this column
+                    String paimonColumnName = paimonColumn.getColumnName();
+                    Set<String> columnSet = Set.of(paimonColumnName);
+                    boolean statsAvailable = dataSplits.stream()
+                            .allMatch(split -> org.apache.paimon.table.source.PushDownUtils.minmaxAvailable(split, columnSet));
+
+                    if (!statsAvailable) {
+                        return Optional.empty();
+                    }
+
+                    // Find the field index
+                    int fieldIndex = -1;
+                    DataField targetField = null;
+                    for (int i = 0; i < tableSchema.fields().size(); i++) {
+                        DataField field = tableSchema.fields().get(i);
+                        if (field.name().equals(paimonColumnName)) {
+                            fieldIndex = i;
+                            targetField = field;
+                            break;
+                        }
+                    }
+
+                    if (fieldIndex < 0 || targetField == null) {
+                        return Optional.empty();
+                    }
+
+                    // Compute MIN or MAX across all splits
+                    Object result = null;
+                    boolean isMin = "min".equals(functionName);
+
+                    for (DataSplit split : dataSplits) {
+                        Object value = isMin
+                                ? split.minValue(fieldIndex, targetField, evolutions)
+                                : split.maxValue(fieldIndex, targetField, evolutions);
+
+                        if (value != null) {
+                            if (result == null) {
+                                result = value;
+                            }
+                            else {
+                                int cmp = org.apache.paimon.predicate.CompareUtils.compareLiteral(targetField.type(), result, value);
+                                if (isMin ? cmp > 0 : cmp < 0) {
+                                    result = value;
+                                }
+                            }
+                        }
+                    }
+
+                    // Convert Paimon value to Trino value
+                    Type trinoType = paimonColumn.getTrinoType();
+                    Object trinoValue = convertPaimonValueToTrino(result, paimonType, trinoType);
+
+                    aggregationValues.add(trinoValue);
+                    aggregationColumns.add(new PaimonAggregationResult.AggregationColumn(
+                            syntheticColumnName, trinoType));
+
+                    PaimonColumnHandle resultColumnHandle = PaimonColumnHandle.of(
+                            syntheticColumnName, paimonType);
+
+                    projections.add(new Variable(syntheticColumnName, trinoType));
+                    resultAssignments.add(new Assignment(syntheticColumnName, resultColumnHandle, trinoType));
+                }
+                else {
+                    // Unsupported aggregation
+                    return Optional.empty();
+                }
+
+                columnIndex++;
+            }
+
+            PaimonAggregationResult aggregationResult = new PaimonAggregationResult(
+                    aggregationColumns, aggregationValues);
+
+            PaimonTableHandle newHandle = paimonTableHandle.copyWithAggregationResult(aggregationResult);
+
+            return Optional.of(new AggregationApplicationResult<>(
+                    newHandle,
+                    projections.build(),
+                    resultAssignments.build(),
+                    ImmutableMap.of(),
+                    false));
+        }
+        catch (Exception e) {
+            log.debug(e, "Failed to push down aggregation for table %s.%s",
+                    paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
+            return Optional.empty();
+        }
+    }
+
+    private boolean isMinMaxSupported(DataType paimonType)
+    {
+        // Based on PushDownUtils.minmaxAvailable()
+        return paimonType instanceof org.apache.paimon.types.BooleanType
+                || paimonType instanceof org.apache.paimon.types.TinyIntType
+                || paimonType instanceof org.apache.paimon.types.SmallIntType
+                || paimonType instanceof org.apache.paimon.types.IntType
+                || paimonType instanceof org.apache.paimon.types.BigIntType
+                || paimonType instanceof org.apache.paimon.types.FloatType
+                || paimonType instanceof org.apache.paimon.types.DoubleType
+                || paimonType instanceof org.apache.paimon.types.DateType;
+    }
+
+    private Object convertPaimonValueToTrino(Object paimonValue, DataType paimonType, Type trinoType)
+    {
+        if (paimonValue == null) {
+            return null;
+        }
+
+        // Handle numeric types
+        if (paimonType instanceof org.apache.paimon.types.TinyIntType
+                || paimonType instanceof org.apache.paimon.types.SmallIntType
+                || paimonType instanceof org.apache.paimon.types.IntType) {
+            return ((Number) paimonValue).longValue();
+        }
+        if (paimonType instanceof org.apache.paimon.types.BigIntType) {
+            return ((Number) paimonValue).longValue();
+        }
+        if (paimonType instanceof org.apache.paimon.types.FloatType) {
+            // Trino represents REAL as long bits
+            return (long) Float.floatToIntBits(((Number) paimonValue).floatValue());
+        }
+        if (paimonType instanceof org.apache.paimon.types.DoubleType) {
+            return ((Number) paimonValue).doubleValue();
+        }
+        if (paimonType instanceof org.apache.paimon.types.BooleanType) {
+            return paimonValue;
+        }
+        if (paimonType instanceof org.apache.paimon.types.DateType) {
+            // Paimon stores date as days since epoch (int)
+            return ((Number) paimonValue).longValue();
+        }
+
+        return paimonValue;
+    }
+
+    private boolean canPushdownAggregation(List<AggregateFunction> aggregates, Map<String, ColumnHandle> assignments)
+    {
+        for (AggregateFunction aggregate : aggregates) {
+            String functionName = aggregate.getFunctionName().toLowerCase();
+
+            // Don't support DISTINCT
+            if (aggregate.isDistinct()) {
+                return false;
+            }
+            // Don't support filters
+            if (aggregate.getFilter().isPresent()) {
+                return false;
+            }
+
+            if ("count".equals(functionName)) {
+                // COUNT(*) has no arguments
+                if (!aggregate.getArguments().isEmpty()) {
+                    return false;
+                }
+            }
+            else if ("min".equals(functionName) || "max".equals(functionName)) {
+                // MIN/MAX requires exactly one argument
+                if (aggregate.getArguments().size() != 1) {
+                    return false;
+                }
+                // Argument must be a column reference
+                ConnectorExpression argument = aggregate.getArguments().get(0);
+                if (!(argument instanceof Variable)) {
+                    return false;
+                }
+                // Column must exist in assignments
+                String columnName = ((Variable) argument).getName();
+                if (!assignments.containsKey(columnName)) {
+                    return false;
+                }
+            }
+            else {
+                // Other aggregations not supported
+                return false;
+            }
+        }
+        return !aggregates.isEmpty();
+    }
+
+    @Override
+    public Optional<TopNApplicationResult<ConnectorTableHandle>> applyTopN(
+            ConnectorSession session,
+            ConnectorTableHandle handle,
+            long topNCount,
+            List<SortItem> sortItems,
+            Map<String, ColumnHandle> assignments)
+    {
+        catalog.initSession(session);
+        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) handle;
+
+        // Don't push down if TopN is already applied
+        if (paimonTableHandle.getTopN().isPresent()) {
+            return Optional.empty();
+        }
+
+        // Don't push down if there are filters
+        if (!paimonTableHandle.getFilter().isAll()) {
+            return Optional.empty();
+        }
+
+        // Only support single sort column (Paimon limitation)
+        if (sortItems.size() != 1) {
+            return Optional.empty();
+        }
+
+        // Limit topN count to 100 (Paimon limitation)
+        if (topNCount > 100) {
+            return Optional.empty();
+        }
+
+        try {
+            Table table = paimonTableHandle.tableWithDynamicOptions(catalog, session);
+
+            // Only support FileStoreTable
+            if (!(table instanceof FileStoreTable)) {
+                return Optional.empty();
+            }
+            FileStoreTable fileStoreTable = (FileStoreTable) table;
+
+            // Don't support tables with primary keys
+            if (!fileStoreTable.schema().primaryKeys().isEmpty()) {
+                return Optional.empty();
+            }
+
+            // Don't support tables with deletion vectors enabled
+            if (fileStoreTable.coreOptions().deletionVectorsEnabled()) {
+                return Optional.empty();
+            }
+
+            SortItem sortItem = sortItems.get(0);
+            String columnName = sortItem.getName();
+            ColumnHandle columnHandle = assignments.get(columnName);
+
+            if (!(columnHandle instanceof PaimonColumnHandle)) {
+                return Optional.empty();
+            }
+
+            PaimonColumnHandle paimonColumn = (PaimonColumnHandle) columnHandle;
+            DataType paimonType = paimonColumn.logicalType();
+
+            // Check if the type supports MIN/MAX statistics
+            if (!isMinMaxSupported(paimonType)) {
+                return Optional.empty();
+            }
+
+            // Create TopN info
+            List<PaimonTopN.PaimonSortItem> paimonSortItems = sortItems.stream()
+                    .map(item -> new PaimonTopN.PaimonSortItem(item.getName(), item.getSortOrder()))
+                    .collect(toList());
+
+            PaimonTopN topN = new PaimonTopN(paimonSortItems, topNCount);
+            PaimonTableHandle newHandle = paimonTableHandle.copyWithTopN(topN);
+
+            // Return with topNGuaranteed=false because we only filter splits, not guarantee exact count
+            return Optional.of(new TopNApplicationResult<>(newHandle, false, false));
+        }
+        catch (Exception e) {
+            log.debug(e, "Failed to push down TopN for table %s.%s",
+                    paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
+            return Optional.empty();
+        }
+    }
+
     // ========== View Support ==========
 
     @Override
@@ -1172,6 +1575,137 @@ public record PaimonMetadata(PaimonCatalog catalog,
         catch (Exception e) {
             throw new RuntimeException(format("Failed to set comment on view '%s'", viewName), e);
         }
+    }
+
+    @Override
+    public io.trino.spi.statistics.TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        catalog.initSession(session);
+        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+
+        try {
+            Table table = paimonTableHandle.tableWithDynamicOptions(catalog, session);
+            org.apache.paimon.table.source.ReadBuilder readBuilder = table.newReadBuilder();
+
+            // Apply filters if present
+            new PaimonFilterConverter(table.rowType()).convert(paimonTableHandle.getFilter()).ifPresent(readBuilder::withFilter);
+
+            // Get splits with statistics (do NOT drop stats)
+            List<org.apache.paimon.table.source.Split> splits = readBuilder.newScan().plan().splits();
+
+            // Calculate total row count from splits
+            long totalRowCount = splits.stream()
+                    .mapToLong(org.apache.paimon.table.source.Split::rowCount)
+                    .sum();
+
+            // Build table statistics with column-level statistics
+            io.trino.spi.statistics.TableStatistics.Builder statisticsBuilder = io.trino.spi.statistics.TableStatistics.builder()
+                    .setRowCount(io.trino.spi.statistics.Estimate.of(totalRowCount));
+
+            // Add column-level statistics if we have projected columns
+            if (paimonTableHandle.getProjectedColumns().isPresent() && totalRowCount > 0) {
+                Map<String, PaimonColumnHandle> columnsByName = paimonTableHandle.getProjectedColumns().get().stream()
+                        .map(PaimonColumnHandle.class::cast)
+                        .collect(Collectors.toMap(PaimonColumnHandle::getColumnName, col -> col));
+
+                Map<PaimonColumnHandle, io.trino.spi.statistics.ColumnStatistics> columnStats =
+                        buildColumnStatistics(splits, table.rowType(), columnsByName, totalRowCount);
+
+                columnStats.forEach(statisticsBuilder::setColumnStatistics);
+            }
+
+            return statisticsBuilder.build();
+        }
+        catch (Exception e) {
+            // If we fail to get statistics, return empty statistics
+            // This allows queries to continue with default cost-based optimization
+            return io.trino.spi.statistics.TableStatistics.empty();
+        }
+    }
+
+    private Map<PaimonColumnHandle, io.trino.spi.statistics.ColumnStatistics> buildColumnStatistics(
+            List<org.apache.paimon.table.source.Split> splits,
+            org.apache.paimon.types.RowType rowType,
+            Map<String, PaimonColumnHandle> columnsByName,
+            long totalRowCount)
+    {
+        Map<PaimonColumnHandle, io.trino.spi.statistics.ColumnStatistics> result = new HashMap<>();
+
+        // Only process DataSplit which contains DataFileMeta with statistics
+        List<org.apache.paimon.table.source.DataSplit> dataSplits = splits.stream()
+                .filter(split -> split instanceof org.apache.paimon.table.source.DataSplit)
+                .map(split -> (org.apache.paimon.table.source.DataSplit) split)
+                .collect(toList());
+
+        if (dataSplits.isEmpty()) {
+            return result;
+        }
+
+        // Build field name to index mapping
+        List<String> fieldNames = rowType.getFieldNames();
+        Map<String, Integer> fieldIndexMap = new HashMap<>();
+        for (int i = 0; i < fieldNames.size(); i++) {
+            fieldIndexMap.put(fieldNames.get(i).toLowerCase(), i);
+        }
+
+        // Aggregate statistics for each column
+        for (Map.Entry<String, PaimonColumnHandle> entry : columnsByName.entrySet()) {
+            String columnName = entry.getKey();
+            PaimonColumnHandle columnHandle = entry.getValue();
+
+            Integer fieldIndex = fieldIndexMap.get(columnName.toLowerCase());
+            if (fieldIndex == null) {
+                continue;
+            }
+
+            try {
+                io.trino.spi.statistics.ColumnStatistics columnStats =
+                        aggregateColumnStatistics(dataSplits, fieldIndex, columnHandle.getTrinoType(), totalRowCount);
+                result.put(columnHandle, columnStats);
+            }
+            catch (Exception e) {
+                // Skip this column if we fail to get statistics
+                log.debug(e, "Failed to get statistics for column: %s", columnName);
+            }
+        }
+
+        return result;
+    }
+
+    private io.trino.spi.statistics.ColumnStatistics aggregateColumnStatistics(
+            List<org.apache.paimon.table.source.DataSplit> dataSplits,
+            int fieldIndex,
+            Type trinoType,
+            long totalRowCount)
+    {
+        io.trino.spi.statistics.ColumnStatistics.Builder builder = new io.trino.spi.statistics.ColumnStatistics.Builder();
+
+        long totalNullCount = 0;
+        boolean hasNullCount = false;
+
+        // Aggregate statistics from all data files
+        for (org.apache.paimon.table.source.DataSplit split : dataSplits) {
+            for (org.apache.paimon.io.DataFileMeta fileMeta : split.dataFiles()) {
+                org.apache.paimon.stats.SimpleStats valueStats = fileMeta.valueStats();
+
+                // Aggregate null counts
+                org.apache.paimon.data.BinaryArray nullCounts = valueStats.nullCounts();
+                if (nullCounts != null && fieldIndex < nullCounts.size()) {
+                    Long nullCount = nullCounts.getLong(fieldIndex);
+                    if (nullCount != null) {
+                        totalNullCount += nullCount;
+                        hasNullCount = true;
+                    }
+                }
+            }
+        }
+
+        // Set null fraction
+        if (hasNullCount && totalRowCount > 0) {
+            builder.setNullsFraction(io.trino.spi.statistics.Estimate.of((double) totalNullCount / totalRowCount));
+        }
+
+        return builder.build();
     }
 
     // TODO: Long-term Enhancement - SUPPORTS_JOIN_PUSHDOWN

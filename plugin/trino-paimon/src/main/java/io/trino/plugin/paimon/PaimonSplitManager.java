@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.airlift.units.Duration;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitSource;
@@ -24,13 +25,22 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.FixedSplitSource;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import jakarta.annotation.PreDestroy;
+import org.apache.paimon.predicate.SortValue;
+import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
+import org.apache.paimon.table.source.TopNDataSplitEvaluator;
+import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.RowType;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
@@ -74,6 +84,12 @@ public class PaimonSplitManager
     protected ConnectorSplitSource getSplits(PaimonTableHandle tableHandle, ConnectorSession session,
             DynamicFilter dynamicFilter)
     {
+        // If aggregation pushdown is active, return a single empty split
+        // The actual data is already computed and stored in the table handle
+        if (tableHandle.getAggregationResult().isPresent()) {
+            return new FixedSplitSource(ImmutableList.of(new PaimonSplit("", 1.0)));
+        }
+
         Duration dynamicFilteringWaitTimeout = PaimonSessionProperties.getDynamicFilteringWaitTimeout(session);
 
         // If dynamic filtering is disabled (timeout = 0) or not awaitable, use original
@@ -97,6 +113,11 @@ public class PaimonSplitManager
         SplitPlanningUtils.toPaimonLimit(tableHandle.getLimit()).ifPresent(readBuilder::withLimit);
         List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
 
+        // Apply TopN split filtering if TopN is pushed down
+        if (tableHandle.getTopN().isPresent() && table instanceof FileStoreTable) {
+            splits = applyTopNSplitFiltering(splits, tableHandle.getTopN().get(), (FileStoreTable) table);
+        }
+
         long maxRowCount = splits.stream().mapToLong(Split::rowCount).max().orElse(0L);
         double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
         PaimonSplitSource splitSource = new PaimonSplitSource(splits.stream()
@@ -108,5 +129,75 @@ public class PaimonSplitManager
 
         // Wrap with ClassLoaderSafe wrapper for proper plugin isolation
         return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
+    }
+
+    private List<Split> applyTopNSplitFiltering(List<Split> splits, PaimonTopN topN, FileStoreTable table)
+    {
+        if (topN.getSortItems().isEmpty()) {
+            return splits;
+        }
+
+        // Only support single sort column
+        PaimonTopN.PaimonSortItem sortItem = topN.getSortItems().get(0);
+        String columnName = sortItem.getColumnName();
+        SortOrder sortOrder = sortItem.getSortOrder();
+
+        // Find the field in the schema
+        RowType rowType = table.rowType();
+        Optional<DataField> fieldOpt = rowType.getFields().stream()
+                .filter(f -> f.name().equals(columnName))
+                .findFirst();
+
+        if (fieldOpt.isEmpty()) {
+            return splits;
+        }
+
+        DataField field = fieldOpt.get();
+
+        // Convert Trino SortOrder to Paimon SortValue
+        SortValue.SortDirection direction = sortOrder.isAscending()
+                ? SortValue.SortDirection.ASCENDING
+                : SortValue.SortDirection.DESCENDING;
+
+        SortValue.NullOrdering nullOrdering = sortOrder.isNullsFirst()
+                ? SortValue.NullOrdering.NULLS_FIRST
+                : SortValue.NullOrdering.NULLS_LAST;
+
+        // Find field index
+        int fieldIndex = -1;
+        for (int i = 0; i < rowType.getFields().size(); i++) {
+            if (rowType.getFields().get(i).name().equals(columnName)) {
+                fieldIndex = i;
+                break;
+            }
+        }
+
+        if (fieldIndex < 0) {
+            return splits;
+        }
+
+        // Create SortValue
+        org.apache.paimon.predicate.FieldRef fieldRef = new org.apache.paimon.predicate.FieldRef(
+                fieldIndex, field.name(), field.type());
+        SortValue sortValue = new SortValue(fieldRef, direction, nullOrdering);
+
+        // Filter DataSplits
+        List<DataSplit> dataSplits = splits.stream()
+                .filter(split -> split instanceof DataSplit)
+                .map(split -> (DataSplit) split)
+                .collect(Collectors.toList());
+
+        if (dataSplits.isEmpty()) {
+            return splits;
+        }
+
+        // Use TopNDataSplitEvaluator to select top splits
+        TopNDataSplitEvaluator evaluator = new TopNDataSplitEvaluator(
+                table.schema(), table.schemaManager());
+
+        List<DataSplit> topNSplits = evaluator.evaluate(sortValue, (int) topN.getTopNCount(), dataSplits);
+
+        // Return filtered splits
+        return ImmutableList.copyOf(topNSplits);
     }
 }

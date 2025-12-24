@@ -26,10 +26,13 @@ import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
@@ -53,8 +56,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.spi.type.TimeType.TIME_MILLIS;
-import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
+import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
 import static java.lang.Float.intBitsToFloat;
 import static java.lang.Math.toIntExact;
@@ -324,15 +326,42 @@ public class PaimonFilterConverter
             return (int) ((long) trinoNativeValue / PICOSECONDS_PER_MILLISECOND);
         }
 
-        if (type.equals(TIMESTAMP_MILLIS)) {
-            return Timestamp.fromEpochMillis((long) trinoNativeValue / 1000);
+        if (type instanceof TimestampType timestampType) {
+            int precision = timestampType.getPrecision();
+            if (precision <= 3) {
+                // Short timestamp (precision 0-3): value is microseconds
+                long micros = (long) trinoNativeValue;
+                return Timestamp.fromEpochMillis(micros / MICROSECONDS_PER_MILLISECOND);
+            }
+            else if (precision <= 6) {
+                // Medium timestamp (precision 4-6): value is microseconds
+                long micros = (long) trinoNativeValue;
+                int nanoAdjustment = (int) (micros % MICROSECONDS_PER_MILLISECOND) * 1000;
+                return Timestamp.fromEpochMillis(micros / MICROSECONDS_PER_MILLISECOND, nanoAdjustment);
+            }
+            else {
+                // Long timestamp (precision 7-12): value is LongTimestamp
+                LongTimestamp longTimestamp = (LongTimestamp) trinoNativeValue;
+                long micros = longTimestamp.getEpochMicros();
+                int nanoAdjustment = (int) (micros % MICROSECONDS_PER_MILLISECOND) * 1000 + longTimestamp.getPicosOfMicro() / 1000;
+                return Timestamp.fromEpochMillis(micros / MICROSECONDS_PER_MILLISECOND, nanoAdjustment);
+            }
         }
 
-        if (type.equals(TIMESTAMP_TZ_MILLIS)) {
-            if (trinoNativeValue instanceof Long) {
-                return trinoNativeValue;
+        if (type instanceof TimestampWithTimeZoneType timestampTzType) {
+            int precision = timestampTzType.getPrecision();
+            if (precision <= 3) {
+                // Short timestamp with time zone: value is packed long (millis + zone)
+                long packedValue = (long) trinoNativeValue;
+                long millis = packedValue >>> 12;
+                return Timestamp.fromEpochMillis(millis);
             }
-            return Timestamp.fromEpochMillis(((LongTimestampWithTimeZone) trinoNativeValue).getEpochMillis());
+            else {
+                // Long timestamp with time zone: value is LongTimestampWithTimeZone
+                LongTimestampWithTimeZone longTsTz = (LongTimestampWithTimeZone) trinoNativeValue;
+                int nanoAdjustment = longTsTz.getPicosOfMilli() / 1000;
+                return Timestamp.fromEpochMillis(longTsTz.getEpochMillis(), nanoAdjustment);
+            }
         }
 
         if (type instanceof VarcharType || type instanceof CharType) {

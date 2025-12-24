@@ -308,6 +308,37 @@ public class PaimonCatalog
     }
 
     @Override
+    public void deleteTag(Identifier identifier, String tag)
+            throws TagNotExistException,
+            TableNotExistException
+    {
+        current.deleteTag(identifier, tag);
+    }
+
+    @Override
+    public void createTag(Identifier identifier, String tag, @Nullable Long snapshotId, @Nullable String timeRetained, boolean ignoreIfExists)
+            throws TableNotExistException,
+            TagAlreadyExistException
+    {
+        current.createTag(identifier, tag, snapshotId, timeRetained, ignoreIfExists);
+    }
+
+    @Override
+    public org.apache.paimon.rest.responses.GetTagResponse getTag(Identifier identifier, String tag)
+            throws TagNotExistException,
+            TableNotExistException
+    {
+        return current.getTag(identifier, tag);
+    }
+
+    @Override
+    public PagedList<String> listTagsPaged(Identifier identifier, @Nullable Integer maxResults, @Nullable String pageToken)
+            throws TableNotExistException
+    {
+        return current.listTagsPaged(identifier, maxResults, pageToken);
+    }
+
+    @Override
     public void createPartitions(Identifier identifier, List<Map<String, String>> partitions)
             throws TableNotExistException
     {

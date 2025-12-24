@@ -650,6 +650,41 @@ public class TrinoITCase
                 .isEqualTo("[[1, 1], [1, 1], [2, 2], [2, 2], [3, 3], [3, 3], [4, 4], [4, 4]]");
     }
 
+    @Test
+    public void testCountStarAggregation()
+    {
+        // Test COUNT(*) on append-only table (t3 has 3 rows)
+        assertThat(sql("SELECT COUNT(*) FROM paimon.default.t3")).isEqualTo("[[3]]");
+
+        // Test COUNT(*) on table with data (t2 has 4 rows after all commits)
+        assertThat(sql("SELECT COUNT(*) FROM paimon.default.t2")).isEqualTo("[[4]]");
+
+        // Test COUNT(*) on empty table
+        assertThat(sql("SELECT COUNT(*) FROM paimon.default.empty_t")).isEqualTo("[[0]]");
+
+        // Test COUNT(*) on file index table (t102 has 100 rows)
+        assertThat(sql("SELECT COUNT(*) FROM paimon.default.t102")).isEqualTo("[[100]]");
+    }
+
+    @Test
+    public void testMinMaxAggregation()
+    {
+        // Test MIN/MAX on integer column (t3 has a=1,1,3)
+        assertThat(sql("SELECT MIN(a), MAX(a) FROM paimon.default.t3")).isEqualTo("[[1, 3]]");
+
+        // Test MIN/MAX on bigint column (t3 has b=1,2,3)
+        assertThat(sql("SELECT MIN(b), MAX(b) FROM paimon.default.t3")).isEqualTo("[[1, 3]]");
+
+        // Test combined COUNT(*), MIN, MAX
+        assertThat(sql("SELECT COUNT(*), MIN(a), MAX(a) FROM paimon.default.t3")).isEqualTo("[[3, 1, 3]]");
+
+        // Test MIN/MAX on t2 (a=1,3,5,7)
+        assertThat(sql("SELECT MIN(a), MAX(a) FROM paimon.default.t2")).isEqualTo("[[1, 7]]");
+
+        // Test MIN/MAX on t102 (b ranges from 0 to 99)
+        assertThat(sql("SELECT MIN(b), MAX(b) FROM paimon.default.t102")).isEqualTo("[[0, 99]]");
+    }
+
     protected String sql(String sql)
     {
         MaterializedResult result = getQueryRunner().execute(sql);
