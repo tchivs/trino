@@ -50,6 +50,7 @@ import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
@@ -275,6 +276,43 @@ public class PaimonPageSourceProvider
                 }
             }
             else {
+                // Check file index to skip files that don't match the filter
+                if (table instanceof FileStoreTable fileStoreTable) {
+                    boolean readIndex = fileStoreTable.coreOptions().fileIndexReadEnabled();
+                    if (readIndex && paimonFilter.isPresent()) {
+                        Optional<List<IndexFile>> indexFiles = paimonSplit.indexFiles();
+                        if (indexFiles.isPresent()) {
+                            boolean allFilesFiltered = true;
+                            for (IndexFile indexFile : indexFiles.get()) {
+                                if (indexFile != null) {
+                                    try {
+                                        FileIndexPredicate fileIndexPredicate = new FileIndexPredicate(
+                                                new Path(indexFile.path()), table.fileIO(), rowType);
+                                        if (fileIndexPredicate.evaluate(paimonFilter.get()).remain()) {
+                                            allFilesFiltered = false;
+                                            break;
+                                        }
+                                    }
+                                    catch (IOException e) {
+                                        // If we can't read the index, don't filter
+                                        allFilesFiltered = false;
+                                        break;
+                                    }
+                                }
+                                else {
+                                    // No index file, can't filter
+                                    allFilesFiltered = false;
+                                    break;
+                                }
+                            }
+                            if (allFilesFiltered) {
+                                // All files filtered out by index, return empty page source
+                                return new EmptyPageSource();
+                            }
+                        }
+                    }
+                }
+
                 // Use case-insensitive lookup for field names
                 int[] columnIndex = projectedFields.stream().mapToInt(field -> {
                     for (int i = 0; i < fieldNames.size(); i++) {
