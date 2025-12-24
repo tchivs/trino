@@ -118,6 +118,7 @@ public class TrinoFilterConverterTest
     @Test
     public void testTimeStamp()
     {
+        // Test TIMESTAMP(3) - short timestamp, value is microseconds
         RowType rowType = new RowType(
                 Collections.singletonList(new DataField(0, "ts", new org.apache.paimon.types.TimestampType(3))));
         PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
@@ -131,13 +132,34 @@ public class TrinoFilterConverterTest
     }
 
     @Test
-    public void testTimeStampWithTimeZone()
+    public void testTimeStampMicros()
     {
-        RowType rowType = new RowType(Collections
-                .singletonList(new DataField(0, "ts", new org.apache.paimon.types.LocalZonedTimestampType(3))));
+        // Test TIMESTAMP(6) - medium timestamp, value is microseconds with nano adjustment
+        RowType rowType = new RowType(
+                Collections.singletonList(new DataField(0, "ts", new org.apache.paimon.types.TimestampType(6))));
         PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
         PredicateBuilder builder = new PredicateBuilder(rowType);
-        PaimonColumnHandle tsColumn = PaimonColumnHandle.of("ts", new org.apache.paimon.types.LocalZonedTimestampType(3));
+        PaimonColumnHandle tsColumn = PaimonColumnHandle.of("ts", new org.apache.paimon.types.TimestampType(6));
+
+        // Test value: 1695645403123456 microseconds = 1695645403123 millis + 456 micros
+        long micros = 1695645403123456L;
+        TupleDomain<PaimonColumnHandle> eq = TupleDomain.withColumnDomains(
+                ImmutableMap.of(tsColumn, Domain.singleValue(TimestampType.createTimestampType(6), micros)));
+        // Expected: millis = 1695645403123, nanoAdjustment = 456 * 1000 = 456000
+        Predicate expectedEqq = builder.equal(0, Timestamp.fromEpochMillis(1695645403123L, 456000));
+        Predicate actualEqq = converter.convert(eq).get();
+        assertThat(actualEqq).isEqualTo(expectedEqq);
+    }
+
+    @Test
+    public void testTimeStampWithTimeZone()
+    {
+        // Test long timestamp with time zone (precision > 3): value is LongTimestampWithTimeZone
+        RowType rowType = new RowType(Collections
+                .singletonList(new DataField(0, "ts", new org.apache.paimon.types.LocalZonedTimestampType(6))));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PredicateBuilder builder = new PredicateBuilder(rowType);
+        PaimonColumnHandle tsColumn = PaimonColumnHandle.of("ts", new org.apache.paimon.types.LocalZonedTimestampType(6));
         TupleDomain<PaimonColumnHandle> eq = TupleDomain
                 .withColumnDomains(ImmutableMap.of(tsColumn, Domain.singleValue(createTimestampWithTimeZoneType(6),
                         fromEpochMillisAndFraction(1695645403000L, 0, TimeZoneKey.UTC_KEY))));
@@ -146,10 +168,18 @@ public class TrinoFilterConverterTest
         Predicate actualEqq = converter.convert(eq).get();
         assertThat(actualEqq).isEqualTo(expectedEqq);
 
+        // Test short timestamp with time zone (precision <= 3): value is packed long (millis << 12 | zoneKey)
+        RowType rowType3 = new RowType(Collections
+                .singletonList(new DataField(0, "ts", new org.apache.paimon.types.LocalZonedTimestampType(3))));
+        PaimonFilterConverter converter3 = new PaimonFilterConverter(rowType3);
+        PredicateBuilder builder3 = new PredicateBuilder(rowType3);
+        PaimonColumnHandle tsColumn3 = PaimonColumnHandle.of("ts", new org.apache.paimon.types.LocalZonedTimestampType(3));
+        long packedValue = 1695645403000L;
+        long unpackedMillis = packedValue >> 12;  // Extract millis from packed value
         eq = TupleDomain.withColumnDomains(
-                ImmutableMap.of(tsColumn, Domain.singleValue(createTimestampWithTimeZoneType(3), 1695645403000L)));
-        expectedEqq = builder.equal(0, 1695645403000L);
-        actualEqq = converter.convert(eq).get();
+                ImmutableMap.of(tsColumn3, Domain.singleValue(createTimestampWithTimeZoneType(3), packedValue)));
+        expectedEqq = builder3.equal(0, Timestamp.fromEpochMillis(unpackedMillis));
+        actualEqq = converter3.convert(eq).get();
         assertThat(actualEqq).isEqualTo(expectedEqq);
     }
 

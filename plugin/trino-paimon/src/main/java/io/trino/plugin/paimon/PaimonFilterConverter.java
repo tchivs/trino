@@ -351,9 +351,9 @@ public class PaimonFilterConverter
         if (type instanceof TimestampWithTimeZoneType timestampTzType) {
             int precision = timestampTzType.getPrecision();
             if (precision <= 3) {
-                // Short timestamp with time zone: value is packed long (millis + zone)
+                // Short timestamp with time zone: value is packed long (millis << 12 | zoneKey)
                 long packedValue = (long) trinoNativeValue;
-                long millis = packedValue >>> 12;
+                long millis = packedValue >> 12;  // unpack millis from packed value
                 return Timestamp.fromEpochMillis(millis);
             }
             else {
