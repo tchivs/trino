@@ -1377,10 +1377,43 @@ public record PaimonMetadata(PaimonCatalog catalog,
             List<SortItem> sortItems,
             Map<String, ColumnHandle> assignments)
     {
-        // Split-level TopN pruning based on file statistics is not guaranteed to be conservative,
-        // and may drop splits containing qualifying rows. Until we can guarantee correctness,
-        // do not apply TopN pushdown.
-        return Optional.empty();
+        catalog.initSession(session);
+        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) handle;
+
+        // Already has TopN applied
+        if (paimonTableHandle.getTopN().isPresent()) {
+            return Optional.empty();
+        }
+
+        // Only support single sort column for now
+        if (sortItems.size() != 1) {
+            return Optional.empty();
+        }
+
+        SortItem sortItem = sortItems.get(0);
+        String columnName = sortItem.getName();
+        ColumnHandle columnHandle = assignments.get(columnName);
+
+        if (!(columnHandle instanceof PaimonColumnHandle paimonColumn)) {
+            return Optional.empty();
+        }
+
+        // Check if the column type supports ordering
+        if (!paimonColumn.getTrinoType().isOrderable()) {
+            return Optional.empty();
+        }
+
+        // Create TopN info
+        List<PaimonTopN.PaimonSortItem> paimonSortItems = sortItems.stream()
+                .map(item -> new PaimonTopN.PaimonSortItem(item.getName(), item.getSortOrder()))
+                .collect(toList());
+
+        PaimonTopN topN = new PaimonTopN(paimonSortItems, topNCount);
+        PaimonTableHandle newHandle = paimonTableHandle.copyWithTopN(topN);
+
+        // Return with topNGuaranteed=false because Paimon's TopN filtering is not guaranteed
+        // to be complete. Trino will still perform a final sort to ensure correctness.
+        return Optional.of(new TopNApplicationResult<>(newHandle, false, false));
     }
 
     // ========== View Support ==========

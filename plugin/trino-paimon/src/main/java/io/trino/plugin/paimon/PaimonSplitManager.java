@@ -28,11 +28,17 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import jakarta.annotation.PreDestroy;
+import org.apache.paimon.predicate.FieldRef;
+import org.apache.paimon.predicate.SortValue;
+import org.apache.paimon.predicate.TopN;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
+import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.RowType;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
@@ -103,6 +109,7 @@ public class PaimonSplitManager
         ReadBuilder readBuilder = table.newReadBuilder();
         new PaimonFilterConverter(table.rowType()).convert(tableHandle.getFilter()).ifPresent(readBuilder::withFilter);
         SplitPlanningUtils.toPaimonLimit(tableHandle.getLimit()).ifPresent(readBuilder::withLimit);
+        convertTopN(tableHandle.getTopN(), table.rowType()).ifPresent(readBuilder::withTopN);
         List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
 
         long maxRowCount = splits.stream().mapToLong(Split::rowCount).max().orElse(0L);
@@ -116,5 +123,67 @@ public class PaimonSplitManager
 
         // Wrap with ClassLoaderSafe wrapper for proper plugin isolation
         return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
+    }
+
+    private Optional<TopN> convertTopN(Optional<PaimonTopN> topN, RowType rowType)
+    {
+        if (topN.isEmpty()) {
+            return Optional.empty();
+        }
+
+        PaimonTopN paimonTopN = topN.get();
+        List<PaimonTopN.PaimonSortItem> sortItems = paimonTopN.getSortItems();
+
+        if (sortItems.isEmpty()) {
+            return Optional.empty();
+        }
+
+        // Currently only support single sort column
+        PaimonTopN.PaimonSortItem sortItem = sortItems.get(0);
+        String columnName = sortItem.getColumnName();
+
+        // Find field index by name (case-insensitive)
+        int fieldIndex = -1;
+        List<DataField> fields = rowType.getFields();
+        for (int i = 0; i < fields.size(); i++) {
+            if (fields.get(i).name().equalsIgnoreCase(columnName)) {
+                fieldIndex = i;
+                break;
+            }
+        }
+
+        if (fieldIndex < 0) {
+            return Optional.empty();
+        }
+
+        FieldRef fieldRef = new FieldRef(fieldIndex, columnName, rowType.getTypeAt(fieldIndex));
+
+        // Convert Trino SortOrder to Paimon SortDirection and NullOrdering
+        SortValue.SortDirection direction;
+        SortValue.NullOrdering nullOrdering;
+
+        switch (sortItem.getSortOrder()) {
+            case ASC_NULLS_FIRST -> {
+                direction = SortValue.SortDirection.ASCENDING;
+                nullOrdering = SortValue.NullOrdering.NULLS_FIRST;
+            }
+            case ASC_NULLS_LAST -> {
+                direction = SortValue.SortDirection.ASCENDING;
+                nullOrdering = SortValue.NullOrdering.NULLS_LAST;
+            }
+            case DESC_NULLS_FIRST -> {
+                direction = SortValue.SortDirection.DESCENDING;
+                nullOrdering = SortValue.NullOrdering.NULLS_FIRST;
+            }
+            case DESC_NULLS_LAST -> {
+                direction = SortValue.SortDirection.DESCENDING;
+                nullOrdering = SortValue.NullOrdering.NULLS_LAST;
+            }
+            default -> {
+                return Optional.empty();
+            }
+        }
+
+        return Optional.of(new TopN(fieldRef, direction, nullOrdering, (int) paimonTopN.getTopNCount()));
     }
 }

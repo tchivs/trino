@@ -23,6 +23,7 @@ import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TinyintType;
+import io.trino.spi.type.VarcharType;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.predicate.Predicate;
@@ -211,5 +212,37 @@ public class TrinoFilterConverterTest
         Predicate expectedEqq = builder.equal(0, Short.MAX_VALUE);
         Predicate actualEqq = converter.convert(eq).get();
         assertThat(actualEqq).isEqualTo(expectedEqq);
+    }
+
+    @Test
+    public void testVarcharRange()
+    {
+        // Test VARCHAR range predicate: name > 'Alice' AND name < 'Bob'
+        RowType rowType = new RowType(
+                Collections.singletonList(new DataField(0, "name", new org.apache.paimon.types.VarCharType(100))));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PredicateBuilder builder = new PredicateBuilder(rowType);
+        PaimonColumnHandle nameColumn = PaimonColumnHandle.of("name", new org.apache.paimon.types.VarCharType(100));
+
+        // Test: name > 'Alice'
+        TupleDomain<PaimonColumnHandle> gt = TupleDomain.withColumnDomains(ImmutableMap.of(nameColumn,
+                Domain.create(ValueSet.ofRanges(Range.greaterThan(VarcharType.VARCHAR, Slices.utf8Slice("Alice"))), false)));
+        Predicate expectedGt = builder.greaterThan(0, BinaryString.fromString("Alice"));
+        Predicate actualGt = converter.convert(gt).get();
+        assertThat(actualGt).isEqualTo(expectedGt);
+
+        // Test: name >= 'Alice'
+        TupleDomain<PaimonColumnHandle> gte = TupleDomain.withColumnDomains(ImmutableMap.of(nameColumn,
+                Domain.create(ValueSet.ofRanges(Range.greaterThanOrEqual(VarcharType.VARCHAR, Slices.utf8Slice("Alice"))), false)));
+        Predicate expectedGte = builder.greaterOrEqual(0, BinaryString.fromString("Alice"));
+        Predicate actualGte = converter.convert(gte).get();
+        assertThat(actualGte).isEqualTo(expectedGte);
+
+        // Test: name < 'Bob'
+        TupleDomain<PaimonColumnHandle> lt = TupleDomain.withColumnDomains(ImmutableMap.of(nameColumn,
+                Domain.create(ValueSet.ofRanges(Range.lessThan(VarcharType.VARCHAR, Slices.utf8Slice("Bob"))), false)));
+        Predicate expectedLt = builder.lessThan(0, BinaryString.fromString("Bob"));
+        Predicate actualLt = converter.convert(lt).get();
+        assertThat(actualLt).isEqualTo(expectedLt);
     }
 }
