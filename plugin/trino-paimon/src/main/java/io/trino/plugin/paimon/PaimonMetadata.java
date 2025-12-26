@@ -1527,22 +1527,24 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return Optional.empty();
         }
 
-        // Only support single sort column for now
-        if (sortItems.size() != 1) {
+        // Need at least one sort column
+        if (sortItems.isEmpty()) {
             return Optional.empty();
         }
 
-        SortItem sortItem = sortItems.get(0);
-        String columnName = sortItem.getName();
-        ColumnHandle columnHandle = assignments.get(columnName);
+        // Validate all sort columns
+        for (SortItem sortItem : sortItems) {
+            String columnName = sortItem.getName();
+            ColumnHandle columnHandle = assignments.get(columnName);
 
-        if (!(columnHandle instanceof PaimonColumnHandle paimonColumn)) {
-            return Optional.empty();
-        }
+            if (!(columnHandle instanceof PaimonColumnHandle paimonColumn)) {
+                return Optional.empty();
+            }
 
-        // Check if the column type supports ordering
-        if (!paimonColumn.getTrinoType().isOrderable()) {
-            return Optional.empty();
+            // Check if the column type supports ordering
+            if (!paimonColumn.getTrinoType().isOrderable()) {
+                return Optional.empty();
+            }
         }
 
         // Create TopN info

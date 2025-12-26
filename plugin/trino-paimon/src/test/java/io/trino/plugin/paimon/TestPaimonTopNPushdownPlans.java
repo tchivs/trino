@@ -133,17 +133,17 @@ public class TestPaimonTopNPushdownPlans
     }
 
     @Test
-    public void testTopNNotPushedDownWithMultipleSortColumns()
+    public void testTopNPushedDownWithMultipleSortColumns()
             throws Exception
     {
         String tableName = "test_topn_multi_sort_" + randomNameSuffix();
         createTestTable(tableName);
 
-        // TopN with multiple sort columns should NOT be pushed down
+        // TopN with multiple sort columns should now be pushed down
         assertPlan(
                 "SELECT * FROM " + tableName + " ORDER BY name, v LIMIT 10",
                 anyTree(tableScan(
-                        handle -> !hasTopNForTable(handle, tableName),
+                        handle -> hasTopNForTable(handle, tableName),
                         TupleDomain.all(),
                         ImmutableMap.of())));
     }
