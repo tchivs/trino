@@ -29,8 +29,10 @@ import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import jakarta.annotation.PreDestroy;
 import org.apache.paimon.predicate.FieldRef;
+import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.SortValue;
 import org.apache.paimon.predicate.TopN;
+import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
@@ -108,9 +110,14 @@ public class PaimonSplitManager
     {
         Table table = tableHandle.tableWithDynamicOptions(paimonCatalog, session);
         ReadBuilder readBuilder = table.newReadBuilder();
-        new PaimonFilterConverter(table.rowType()).convert(tableHandle.getFilter()).ifPresent(readBuilder::withFilter);
+        Optional<Predicate> paimonFilter = new PaimonFilterConverter(table.rowType()).convert(tableHandle.getFilter());
+        paimonFilter.ifPresent(readBuilder::withFilter);
         SplitPlanningUtils.toPaimonLimit(tableHandle.getLimit()).ifPresent(readBuilder::withLimit);
         convertTopN(tableHandle.getTopN(), table.rowType()).ifPresent(readBuilder::withTopN);
+
+        // Apply bucket filter if applicable
+        applyBucketFilter(table, paimonFilter).ifPresent(readBuilder::withBucketFilter);
+
         List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
 
         long maxRowCount = splits.stream().mapToLong(Split::rowCount).max().orElse(0L);
@@ -190,5 +197,46 @@ public class PaimonSplitManager
         }
 
         return Optional.of(new TopN(sortValues, (int) paimonTopN.getTopNCount()));
+    }
+
+    private Optional<org.apache.paimon.utils.Filter<Integer>> applyBucketFilter(
+            Table table,
+            Optional<Predicate> paimonFilter)
+    {
+        if (paimonFilter.isEmpty()) {
+            return Optional.empty();
+        }
+
+        if (!(table instanceof FileStoreTable fileStoreTable)) {
+            return Optional.empty();
+        }
+
+        List<String> bucketKeys = fileStoreTable.schema().bucketKeys();
+        if (bucketKeys.isEmpty()) {
+            return Optional.empty();
+        }
+
+        int numBuckets = fileStoreTable.schema().numBuckets();
+        if (numBuckets <= 1) {
+            return Optional.empty();
+        }
+
+        // Use Paimon's BucketSelectConverter to extract bucket filter
+        RowType bucketKeyType = fileStoreTable.schema().logicalBucketKeyType();
+        org.apache.paimon.CoreOptions coreOptions = fileStoreTable.coreOptions();
+
+        Optional<org.apache.paimon.utils.BiFilter<Integer, Integer>> bucketSelector =
+                org.apache.paimon.operation.BucketSelectConverter.create(
+                        paimonFilter.get(),
+                        bucketKeyType,
+                        coreOptions.bucketFunctionType());
+
+        if (bucketSelector.isEmpty()) {
+            return Optional.empty();
+        }
+
+        // Convert BiFilter to Filter by binding numBuckets
+        org.apache.paimon.utils.BiFilter<Integer, Integer> selector = bucketSelector.get();
+        return Optional.of(bucket -> selector.test(bucket, numBuckets));
     }
 }
