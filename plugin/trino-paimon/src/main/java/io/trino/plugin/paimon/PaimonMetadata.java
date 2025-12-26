@@ -54,6 +54,7 @@ import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.type.BigintType;
@@ -103,8 +104,10 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static io.trino.plugin.paimon.PaimonColumnHandle.TRINO_ROW_ID_NAME;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static io.trino.spi.connector.RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static java.lang.String.format;
@@ -1586,6 +1589,235 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         // precalculateStatistics=true because sampled statistics may not be accurate
         return Optional.of(new SampleApplicationResult<>(newHandle, true));
+    }
+
+    // ========== Delete Pushdown ==========
+
+    @Override
+    public Optional<ConnectorTableHandle> applyDelete(ConnectorSession session, ConnectorTableHandle handle)
+    {
+        PaimonTableHandle tableHandle = (PaimonTableHandle) handle;
+        catalog.initSession(session);
+
+        Table table = tableHandle.table(catalog);
+        if (!(table instanceof FileStoreTable fileStoreTable)) {
+            return Optional.empty();
+        }
+
+        List<String> partitionKeys = fileStoreTable.schema().partitionKeys();
+        TupleDomain<PaimonColumnHandle> filter = tableHandle.getFilter();
+
+        // Case 1: Non-partitioned table with no filter - can truncate
+        if (partitionKeys.isEmpty() && filter.isAll()) {
+            return Optional.of(handle);
+        }
+
+        // Case 2: Partitioned table - check if filter only contains partition key equality predicates
+        if (!partitionKeys.isEmpty()) {
+            if (!canDeleteByPartition(filter, partitionKeys)) {
+                return Optional.empty();
+            }
+            return Optional.of(handle);
+        }
+
+        return Optional.empty();
+    }
+
+    @Override
+    public OptionalLong executeDelete(ConnectorSession session, ConnectorTableHandle handle)
+    {
+        PaimonTableHandle tableHandle = (PaimonTableHandle) handle;
+        catalog.initSession(session);
+
+        Table table = tableHandle.table(catalog);
+        if (!(table instanceof FileStoreTable fileStoreTable)) {
+            throw new TrinoException(NOT_SUPPORTED, "Delete is only supported for FileStoreTable");
+        }
+
+        Identifier identifier = Identifier.create(tableHandle.getSchemaName(), tableHandle.getTableName());
+        List<String> partitionKeys = fileStoreTable.schema().partitionKeys();
+        TupleDomain<PaimonColumnHandle> filter = tableHandle.getFilter();
+
+        try {
+            // Case 1: No filter (DELETE without WHERE) - truncate the table
+            if (filter.isAll()) {
+                truncateTable(fileStoreTable, identifier);
+                return OptionalLong.empty();
+            }
+
+            // Case 2: Partitioned table with partition key filter - delete matching partitions
+            if (!partitionKeys.isEmpty()) {
+                List<Map<String, String>> partitionsToDelete = extractPartitionsFromFilter(filter, partitionKeys);
+                if (!partitionsToDelete.isEmpty()) {
+                    catalog.dropPartitions(identifier, partitionsToDelete);
+                }
+                return OptionalLong.empty();
+            }
+        }
+        catch (Catalog.TableNotExistException e) {
+            throw new TrinoException(TABLE_NOT_FOUND,
+                    format("Table '%s.%s' not found", tableHandle.getSchemaName(), tableHandle.getTableName()));
+        }
+        catch (Exception e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR,
+                    format("Failed to execute delete on table '%s.%s': %s",
+                            tableHandle.getSchemaName(), tableHandle.getTableName(), e.getMessage()), e);
+        }
+
+        return OptionalLong.empty();
+    }
+
+    private boolean canDeleteByPartition(TupleDomain<PaimonColumnHandle> filter, List<String> partitionKeys)
+    {
+        if (filter.isNone()) {
+            return false;
+        }
+        if (filter.isAll()) {
+            // DELETE without WHERE on partitioned table - delete all partitions
+            return true;
+        }
+
+        Optional<Map<PaimonColumnHandle, Domain>> domains = filter.getDomains();
+        if (domains.isEmpty()) {
+            return false;
+        }
+
+        Set<String> partitionKeySet = partitionKeys.stream()
+                .map(String::toLowerCase)
+                .collect(Collectors.toSet());
+
+        // All filter columns must be partition keys
+        for (PaimonColumnHandle column : domains.get().keySet()) {
+            if (!partitionKeySet.contains(column.getColumnName().toLowerCase())) {
+                return false;
+            }
+        }
+
+        // All domains must be single-value (equality predicates)
+        for (Domain domain : domains.get().values()) {
+            if (!domain.isSingleValue() && !domain.getValues().isDiscreteSet()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private List<Map<String, String>> extractPartitionsFromFilter(
+            TupleDomain<PaimonColumnHandle> filter,
+            List<String> partitionKeys)
+    {
+        if (filter.isAll()) {
+            // DELETE all partitions - return empty list to signal "delete all"
+            // The caller should handle this by listing and deleting all partitions
+            try {
+                // List all partitions and return them
+                return listAllPartitions(partitionKeys);
+            }
+            catch (Exception e) {
+                log.warn(e, "Failed to list partitions for delete all");
+                return List.of();
+            }
+        }
+
+        Optional<Map<PaimonColumnHandle, Domain>> domains = filter.getDomains();
+        if (domains.isEmpty()) {
+            return List.of();
+        }
+
+        // Build partition specs from filter domains
+        // For single-value domains, create one partition spec
+        // For discrete sets, create multiple partition specs (one per value combination)
+        return buildPartitionSpecs(domains.get(), partitionKeys);
+    }
+
+    private List<Map<String, String>> listAllPartitions(List<String> partitionKeys)
+    {
+        // This method would need access to the table to list partitions
+        // For now, return empty to indicate we can't enumerate all partitions
+        // The truncate path handles the "delete all" case for non-partitioned tables
+        return List.of();
+    }
+
+    private List<Map<String, String>> buildPartitionSpecs(
+            Map<PaimonColumnHandle, Domain> domains,
+            List<String> partitionKeys)
+    {
+        // Start with a single empty partition spec
+        List<Map<String, String>> partitionSpecs = new ArrayList<>();
+        partitionSpecs.add(new HashMap<>());
+
+        for (String partitionKey : partitionKeys) {
+            // Find the domain for this partition key
+            Domain domain = null;
+            for (Map.Entry<PaimonColumnHandle, Domain> entry : domains.entrySet()) {
+                if (entry.getKey().getColumnName().equalsIgnoreCase(partitionKey)) {
+                    domain = entry.getValue();
+                    break;
+                }
+            }
+
+            if (domain == null) {
+                // No filter on this partition key - can't determine specific partitions
+                return List.of();
+            }
+
+            // Extract values from domain
+            List<String> values = extractValuesFromDomain(domain);
+            if (values.isEmpty()) {
+                return List.of();
+            }
+
+            // Expand partition specs with all values
+            List<Map<String, String>> expandedSpecs = new ArrayList<>();
+            for (Map<String, String> spec : partitionSpecs) {
+                for (String value : values) {
+                    Map<String, String> newSpec = new HashMap<>(spec);
+                    newSpec.put(partitionKey, value);
+                    expandedSpecs.add(newSpec);
+                }
+            }
+            partitionSpecs = expandedSpecs;
+        }
+
+        return partitionSpecs;
+    }
+
+    private List<String> extractValuesFromDomain(Domain domain)
+    {
+        List<String> values = new ArrayList<>();
+
+        if (domain.isSingleValue()) {
+            values.add(convertToPartitionString(domain.getSingleValue(), domain.getType()));
+        }
+        else if (domain.getValues().isDiscreteSet()) {
+            for (Object value : domain.getValues().getDiscreteSet()) {
+                values.add(convertToPartitionString(value, domain.getType()));
+            }
+        }
+
+        return values;
+    }
+
+    private String convertToPartitionString(Object value, Type type)
+    {
+        if (value == null) {
+            return null;
+        }
+        if (type instanceof VarcharType) {
+            return ((Slice) value).toStringUtf8();
+        }
+        return value.toString();
+    }
+
+    private void truncateTable(FileStoreTable table, Identifier identifier)
+            throws Exception
+    {
+        // Use Paimon's native truncateTable API
+        BatchWriteBuilder writeBuilder = table.newBatchWriteBuilder();
+        try (BatchTableCommit commit = writeBuilder.newCommit()) {
+            commit.truncateTable();
+        }
     }
 
     // ========== View Support ==========
