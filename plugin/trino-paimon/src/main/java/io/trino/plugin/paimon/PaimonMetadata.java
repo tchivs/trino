@@ -1011,11 +1011,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
         catalog.initSession(session);
         PaimonTableHandle paimonTableHandle = (PaimonTableHandle) handle;
 
-        // Only support global aggregation (no GROUP BY) for now
-        // Global aggregation is represented by [[]]
-        if (groupingSets.size() != 1 || !groupingSets.get(0).isEmpty()) {
+        // Only support single grouping set
+        if (groupingSets.size() != 1) {
             return Optional.empty();
         }
+
+        List<ColumnHandle> groupByColumns = groupingSets.get(0);
+        boolean isGlobalAggregation = groupByColumns.isEmpty();
 
         // Check if all aggregates are supported
         if (!canPushdownAggregation(aggregates, assignments)) {
@@ -1070,6 +1072,22 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     .map(split -> (DataSplit) split)
                     .collect(toList());
 
+            // For GROUP BY, only support partition keys
+            List<String> partitionKeys = fileStoreTable.schema().partitionKeys();
+            if (!isGlobalAggregation) {
+                // Check if GROUP BY columns are exactly the partition keys
+                if (!isGroupByPartitionKeys(groupByColumns, partitionKeys)) {
+                    return Optional.empty();
+                }
+                // For partition GROUP BY, only support COUNT(*) for now
+                boolean onlyCount = aggregates.stream()
+                        .allMatch(agg -> "count".equalsIgnoreCase(agg.getFunctionName())
+                                && (agg.getArguments().isEmpty() || isCountNonNull(agg, assignments)));
+                if (!onlyCount) {
+                    return Optional.empty();
+                }
+            }
+
             // For COUNT(*), check if mergedRowCount is available
             // This is only true for append-only tables (no primary keys)
             boolean allMergedRowCountAvailable = dataSplits.stream()
@@ -1089,7 +1107,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
                             key == tableSchema.id() ? tableSchema : schemaManager.schema(key)).fields(),
                     tableSchema.id());
 
-            // Compute aggregation results
+            // Handle GROUP BY partition keys separately
+            if (!isGlobalAggregation) {
+                return applyPartitionGroupByAggregation(
+                        paimonTableHandle, fileStoreTable, dataSplits, aggregates,
+                        groupByColumns, partitionKeys, countPushdownSupported, allMergedRowCountAvailable);
+            }
+
+            // Compute global aggregation results
             List<Object> aggregationValues = new ArrayList<>();
             List<PaimonAggregationResult.AggregationColumn> aggregationColumns = new ArrayList<>();
             ImmutableList.Builder<ConnectorExpression> projections = ImmutableList.builder();
@@ -1239,6 +1264,123 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
             return Optional.empty();
         }
+    }
+
+    private boolean isGroupByPartitionKeys(List<ColumnHandle> groupByColumns, List<String> partitionKeys)
+    {
+        if (groupByColumns.size() != partitionKeys.size()) {
+            return false;
+        }
+        Set<String> groupByNames = groupByColumns.stream()
+                .filter(col -> col instanceof PaimonColumnHandle)
+                .map(col -> ((PaimonColumnHandle) col).getColumnName().toLowerCase())
+                .collect(Collectors.toSet());
+        Set<String> partitionKeyNames = partitionKeys.stream()
+                .map(String::toLowerCase)
+                .collect(Collectors.toSet());
+        return groupByNames.equals(partitionKeyNames);
+    }
+
+    private Optional<AggregationApplicationResult<ConnectorTableHandle>> applyPartitionGroupByAggregation(
+            PaimonTableHandle paimonTableHandle,
+            FileStoreTable fileStoreTable,
+            List<DataSplit> dataSplits,
+            List<AggregateFunction> aggregates,
+            List<ColumnHandle> groupByColumns,
+            List<String> partitionKeys,
+            boolean countPushdownSupported,
+            boolean allMergedRowCountAvailable)
+    {
+        if (!countPushdownSupported || !allMergedRowCountAvailable) {
+            return Optional.empty();
+        }
+
+        // Group splits by partition value
+        Map<org.apache.paimon.data.BinaryRow, Long> partitionCounts = new HashMap<>();
+        for (DataSplit split : dataSplits) {
+            org.apache.paimon.data.BinaryRow partition = split.partition();
+            partitionCounts.merge(partition, split.mergedRowCount(), Long::sum);
+        }
+
+        // Build result columns: partition keys + aggregates
+        List<PaimonAggregationResult.AggregationColumn> columns = new ArrayList<>();
+        ImmutableList.Builder<ConnectorExpression> projections = ImmutableList.builder();
+        ImmutableList.Builder<Assignment> resultAssignments = ImmutableList.builder();
+        Map<ColumnHandle, ColumnHandle> groupIdColumns = new HashMap<>();
+
+        // Add partition key columns to result (for data) but not to projections (per API contract)
+        for (ColumnHandle groupByCol : groupByColumns) {
+            PaimonColumnHandle paimonCol = (PaimonColumnHandle) groupByCol;
+            Type trinoType = paimonCol.getTrinoType();
+            columns.add(new PaimonAggregationResult.AggregationColumn(paimonCol.getColumnName(), trinoType));
+            // GROUP BY columns: original -> result mapping (same column)
+            groupIdColumns.put(paimonCol, paimonCol);
+        }
+
+        // Add aggregate columns
+        int aggIndex = 0;
+        for (AggregateFunction aggregate : aggregates) {
+            String syntheticName = "paimon_agg_" + aggIndex++;
+            columns.add(new PaimonAggregationResult.AggregationColumn(syntheticName, BigintType.BIGINT));
+            PaimonColumnHandle columnHandle = PaimonColumnHandle.of(syntheticName,
+                    org.apache.paimon.types.DataTypes.BIGINT());
+            projections.add(new Variable(syntheticName, BigintType.BIGINT));
+            resultAssignments.add(new Assignment(syntheticName, columnHandle, BigintType.BIGINT));
+        }
+
+        // Build result rows
+        List<List<Object>> rows = new ArrayList<>();
+        org.apache.paimon.types.RowType partitionType = fileStoreTable.schema().logicalPartitionType();
+
+        for (Map.Entry<org.apache.paimon.data.BinaryRow, Long> entry : partitionCounts.entrySet()) {
+            List<Object> row = new ArrayList<>();
+            org.apache.paimon.data.BinaryRow partition = entry.getKey();
+
+            // Add partition values
+            for (int i = 0; i < partitionKeys.size(); i++) {
+                Object value = extractPartitionValue(partition, i, partitionType);
+                row.add(value);
+            }
+
+            // Add count value
+            row.add(entry.getValue());
+            rows.add(row);
+        }
+
+        PaimonAggregationResult result = PaimonAggregationResult.multiRow(columns, rows);
+        PaimonTableHandle newHandle = paimonTableHandle.copyWithAggregationResult(result);
+
+        return Optional.of(new AggregationApplicationResult<>(
+                newHandle,
+                projections.build(),
+                resultAssignments.build(),
+                groupIdColumns,
+                false));
+    }
+
+    private Object extractPartitionValue(
+            org.apache.paimon.data.BinaryRow partition,
+            int index,
+            org.apache.paimon.types.RowType partitionType)
+    {
+        if (partition.isNullAt(index)) {
+            return null;
+        }
+        org.apache.paimon.types.DataType fieldType = partitionType.getTypeAt(index);
+        if (fieldType instanceof org.apache.paimon.types.VarCharType
+                || fieldType instanceof org.apache.paimon.types.CharType) {
+            return partition.getString(index).toString();
+        }
+        else if (fieldType instanceof org.apache.paimon.types.IntType) {
+            return (long) partition.getInt(index);
+        }
+        else if (fieldType instanceof org.apache.paimon.types.BigIntType) {
+            return partition.getLong(index);
+        }
+        else if (fieldType instanceof org.apache.paimon.types.DateType) {
+            return (long) partition.getInt(index);
+        }
+        return partition.getString(index).toString();
     }
 
     private boolean isMinMaxSupported(DataType paimonType)

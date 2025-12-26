@@ -79,21 +79,38 @@ public class PaimonAggregationPageSource
         long startTime = System.nanoTime();
 
         List<PaimonAggregationResult.AggregationColumn> columns = aggregationResult.getAggregationColumns();
-        List<Object> values = aggregationResult.getAggregationValues();
+        Block[] blocks;
+        int rowCount;
 
-        Block[] blocks = new Block[columns.size()];
+        if (aggregationResult.isMultiRow()) {
+            // Multi-row result (GROUP BY partition key)
+            List<List<Object>> rows = aggregationResult.getAggregationRows();
+            rowCount = rows.size();
+            blocks = new Block[columns.size()];
 
-        for (int i = 0; i < columns.size(); i++) {
-            Type type = columns.get(i).getType();
-            Object value = values.get(i);
-            blocks[i] = createSingleValueBlock(type, value);
+            for (int colIdx = 0; colIdx < columns.size(); colIdx++) {
+                Type type = columns.get(colIdx).getType();
+                blocks[colIdx] = createMultiValueBlock(type, rows, colIdx);
+            }
+        }
+        else {
+            // Single-row result (global aggregation)
+            List<Object> values = aggregationResult.getAggregationValues();
+            rowCount = 1;
+            blocks = new Block[columns.size()];
+
+            for (int i = 0; i < columns.size(); i++) {
+                Type type = columns.get(i).getType();
+                Object value = values.get(i);
+                blocks[i] = createSingleValueBlock(type, value);
+            }
         }
 
         finished = true;
         readTimeNanos = System.nanoTime() - startTime;
-        completedBytes = 8L * columns.size(); // Approximate size
+        completedBytes = 8L * columns.size() * rowCount;
 
-        return SourcePage.create(new Page(1, blocks));
+        return SourcePage.create(new Page(rowCount, blocks));
     }
 
     private Block createSingleValueBlock(Type type, Object value)
@@ -142,6 +159,56 @@ public class PaimonAggregationPageSource
         }
 
         return blockBuilder.build();
+    }
+
+    private Block createMultiValueBlock(Type type, List<List<Object>> rows, int colIdx)
+    {
+        BlockBuilder blockBuilder = type.createBlockBuilder(null, rows.size());
+
+        for (List<Object> row : rows) {
+            Object value = row.get(colIdx);
+            writeValue(blockBuilder, type, value);
+        }
+
+        return blockBuilder.build();
+    }
+
+    private void writeValue(BlockBuilder blockBuilder, Type type, Object value)
+    {
+        if (value == null) {
+            blockBuilder.appendNull();
+        }
+        else if (type instanceof BigintType) {
+            BigintType.BIGINT.writeLong(blockBuilder, ((Number) value).longValue());
+        }
+        else if (type instanceof IntegerType) {
+            IntegerType.INTEGER.writeLong(blockBuilder, ((Number) value).longValue());
+        }
+        else if (type instanceof SmallintType) {
+            SmallintType.SMALLINT.writeLong(blockBuilder, ((Number) value).longValue());
+        }
+        else if (type instanceof TinyintType) {
+            TinyintType.TINYINT.writeLong(blockBuilder, ((Number) value).longValue());
+        }
+        else if (type instanceof DoubleType) {
+            DoubleType.DOUBLE.writeDouble(blockBuilder, ((Number) value).doubleValue());
+        }
+        else if (type instanceof RealType) {
+            RealType.REAL.writeLong(blockBuilder, ((Number) value).longValue());
+        }
+        else if (type instanceof BooleanType) {
+            BooleanType.BOOLEAN.writeBoolean(blockBuilder, (Boolean) value);
+        }
+        else if (type instanceof DateType) {
+            DateType.DATE.writeLong(blockBuilder, ((Number) value).longValue());
+        }
+        else if (type instanceof io.trino.spi.type.VarcharType) {
+            io.trino.spi.type.VarcharType.VARCHAR.writeSlice(blockBuilder,
+                    io.airlift.slice.Slices.utf8Slice((String) value));
+        }
+        else {
+            throw new UnsupportedOperationException("Unsupported aggregation result type: " + type);
+        }
     }
 
     @Override

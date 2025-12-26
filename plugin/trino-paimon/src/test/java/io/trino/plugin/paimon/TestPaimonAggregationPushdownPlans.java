@@ -136,6 +136,14 @@ public class TestPaimonAggregationPushdownPlans
                         handle -> isRegularScanForTable(handle, tableName),
                         TupleDomain.all(),
                         ImmutableMap.of())));
+
+        // GROUP BY partition key should be pushed down
+        assertPlan(
+                "SELECT dt, count(*) FROM " + tableName + " GROUP BY dt",
+                anyTree(tableScan(
+                        handle -> hasAggregationResultForTable(handle, tableName),
+                        TupleDomain.all(),
+                        ImmutableMap.of())));
     }
 
     private void createTestTable(String tableName)

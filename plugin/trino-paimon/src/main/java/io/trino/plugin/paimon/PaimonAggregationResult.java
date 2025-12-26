@@ -26,22 +26,42 @@ import static java.util.Objects.requireNonNull;
  * Holds the result of aggregation pushdown for Paimon tables.
  * When aggregation is pushed down, this class stores the pre-computed
  * aggregation values that can be returned directly without scanning data.
+ * Supports both single-row results (global aggregation) and multi-row results
+ * (GROUP BY partition key aggregation).
  */
 public class PaimonAggregationResult
 {
     private final List<AggregationColumn> aggregationColumns;
+    // For single-row result (backward compatibility)
     private final List<Object> aggregationValues;
+    // For multi-row results (GROUP BY partition key)
+    private final List<List<Object>> aggregationRows;
 
     @JsonCreator
     public PaimonAggregationResult(
             @JsonProperty("aggregationColumns") List<AggregationColumn> aggregationColumns,
-            @JsonProperty("aggregationValues") List<Object> aggregationValues)
+            @JsonProperty("aggregationValues") List<Object> aggregationValues,
+            @JsonProperty("aggregationRows") List<List<Object>> aggregationRows)
     {
         this.aggregationColumns = requireNonNull(aggregationColumns, "aggregationColumns is null");
-        this.aggregationValues = requireNonNull(aggregationValues, "aggregationValues is null");
-        if (aggregationColumns.size() != aggregationValues.size()) {
-            throw new IllegalArgumentException("aggregationColumns and aggregationValues must have the same size");
-        }
+        this.aggregationValues = aggregationValues;
+        this.aggregationRows = aggregationRows;
+    }
+
+    // Constructor for single-row result (backward compatibility)
+    public PaimonAggregationResult(
+            List<AggregationColumn> aggregationColumns,
+            List<Object> aggregationValues)
+    {
+        this(aggregationColumns, aggregationValues, null);
+    }
+
+    // Constructor for multi-row results
+    public static PaimonAggregationResult multiRow(
+            List<AggregationColumn> aggregationColumns,
+            List<List<Object>> aggregationRows)
+    {
+        return new PaimonAggregationResult(aggregationColumns, null, aggregationRows);
     }
 
     @JsonProperty
@@ -56,6 +76,17 @@ public class PaimonAggregationResult
         return aggregationValues;
     }
 
+    @JsonProperty
+    public List<List<Object>> getAggregationRows()
+    {
+        return aggregationRows;
+    }
+
+    public boolean isMultiRow()
+    {
+        return aggregationRows != null;
+    }
+
     @Override
     public boolean equals(Object o)
     {
@@ -67,13 +98,14 @@ public class PaimonAggregationResult
         }
         PaimonAggregationResult that = (PaimonAggregationResult) o;
         return Objects.equals(aggregationColumns, that.aggregationColumns)
-                && Objects.equals(aggregationValues, that.aggregationValues);
+                && Objects.equals(aggregationValues, that.aggregationValues)
+                && Objects.equals(aggregationRows, that.aggregationRows);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(aggregationColumns, aggregationValues);
+        return Objects.hash(aggregationColumns, aggregationValues, aggregationRows);
     }
 
     /**
