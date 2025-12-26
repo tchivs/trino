@@ -45,6 +45,8 @@ import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.RowChangeParadigm;
+import io.trino.spi.connector.SampleApplicationResult;
+import io.trino.spi.connector.SampleType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.SortItem;
@@ -1558,6 +1560,32 @@ public record PaimonMetadata(PaimonCatalog catalog,
         // Return with topNGuaranteed=false because Paimon's TopN filtering is not guaranteed
         // to be complete. Trino will still perform a final sort to ensure correctness.
         return Optional.of(new TopNApplicationResult<>(newHandle, false, false));
+    }
+
+    @Override
+    public Optional<SampleApplicationResult<ConnectorTableHandle>> applySample(
+            ConnectorSession session,
+            ConnectorTableHandle handle,
+            SampleType sampleType,
+            double sampleRatio)
+    {
+        // Only support SYSTEM sampling (block-level sampling)
+        if (sampleType != SampleType.SYSTEM) {
+            return Optional.empty();
+        }
+
+        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) handle;
+
+        // Already has sample applied
+        if (paimonTableHandle.getSampleRatio().isPresent()) {
+            return Optional.empty();
+        }
+
+        // Store sample ratio in table handle for use during split generation
+        PaimonTableHandle newHandle = paimonTableHandle.copyWithSampleRatio(sampleRatio);
+
+        // precalculateStatistics=true because sampled statistics may not be accurate
+        return Optional.of(new SampleApplicationResult<>(newHandle, true));
     }
 
     // ========== View Support ==========

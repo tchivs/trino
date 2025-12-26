@@ -57,18 +57,19 @@ public class PaimonTableHandle
     private final Map<String, String> dynamicOptions;
     private final Optional<PaimonAggregationResult> aggregationResult;
     private final Optional<PaimonTopN> topN;
+    private final Optional<Double> sampleRatio;
 
     private transient Table table;
 
     public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions)
     {
-        this(schemaName, tableName, dynamicOptions, TupleDomain.all(), Optional.empty(), OptionalLong.empty(), Optional.empty(), Optional.empty());
+        this(schemaName, tableName, dynamicOptions, TupleDomain.all(), Optional.empty(), OptionalLong.empty(), Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions,
             TupleDomain<PaimonColumnHandle> filter, Optional<List<ColumnHandle>> projectedColumns, OptionalLong limit)
     {
-        this(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, Optional.empty(), Optional.empty());
+        this(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     @JsonCreator
@@ -78,7 +79,8 @@ public class PaimonTableHandle
             @JsonProperty("projectedColumns") Optional<List<ColumnHandle>> projectedColumns,
             @JsonProperty("limit") OptionalLong limit,
             @JsonProperty("aggregationResult") Optional<PaimonAggregationResult> aggregationResult,
-            @JsonProperty("topN") Optional<PaimonTopN> topN)
+            @JsonProperty("topN") Optional<PaimonTopN> topN,
+            @JsonProperty("sampleRatio") Optional<Double> sampleRatio)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         this.tableName = requireNonNull(tableName, "tableName is null");
@@ -88,6 +90,7 @@ public class PaimonTableHandle
         this.limit = requireNonNull(limit, "limit is null");
         this.aggregationResult = requireNonNull(aggregationResult, "aggregationResult is null");
         this.topN = requireNonNull(topN, "topN is null");
+        this.sampleRatio = requireNonNull(sampleRatio, "sampleRatio is null");
     }
 
     @JsonProperty
@@ -135,6 +138,12 @@ public class PaimonTableHandle
     public Optional<PaimonTopN> getTopN()
     {
         return topN;
+    }
+
+    @JsonProperty
+    public Optional<Double> getSampleRatio()
+    {
+        return sampleRatio;
     }
 
     public Table tableWithDynamicOptions(PaimonCatalog catalog, ConnectorSession session)
@@ -199,27 +208,32 @@ public class PaimonTableHandle
 
     public PaimonTableHandle copy(TupleDomain<PaimonColumnHandle> filter)
     {
-        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, aggregationResult, topN);
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, aggregationResult, topN, sampleRatio);
     }
 
     public PaimonTableHandle copy(Optional<List<ColumnHandle>> projectedColumns)
     {
-        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, aggregationResult, topN);
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, aggregationResult, topN, sampleRatio);
     }
 
     public PaimonTableHandle copy(OptionalLong limit)
     {
-        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, aggregationResult, topN);
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, aggregationResult, topN, sampleRatio);
     }
 
     public PaimonTableHandle copyWithAggregationResult(PaimonAggregationResult aggregationResult)
     {
-        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, Optional.of(aggregationResult), topN);
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, Optional.of(aggregationResult), topN, sampleRatio);
     }
 
     public PaimonTableHandle copyWithTopN(PaimonTopN topN)
     {
-        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, aggregationResult, Optional.of(topN));
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, aggregationResult, Optional.of(topN), sampleRatio);
+    }
+
+    public PaimonTableHandle copyWithSampleRatio(double sampleRatio)
+    {
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit, aggregationResult, topN, Optional.of(sampleRatio));
     }
 
     @Override
@@ -236,12 +250,13 @@ public class PaimonTableHandle
                 && Objects.equals(tableName, that.tableName) && Objects.equals(filter, that.filter)
                 && Objects.equals(projectedColumns, that.projectedColumns)
                 && Objects.equals(aggregationResult, that.aggregationResult)
-                && Objects.equals(topN, that.topN);
+                && Objects.equals(topN, that.topN)
+                && Objects.equals(sampleRatio, that.sampleRatio);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(schemaName, tableName, filter, projectedColumns, dynamicOptions, aggregationResult, topN);
+        return Objects.hash(schemaName, tableName, filter, projectedColumns, dynamicOptions, aggregationResult, topN, sampleRatio);
     }
 }

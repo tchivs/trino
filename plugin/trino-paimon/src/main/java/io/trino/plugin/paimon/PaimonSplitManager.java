@@ -120,6 +120,9 @@ public class PaimonSplitManager
 
         List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
 
+        // Apply sampling if requested
+        splits = applySampling(splits, tableHandle.getSampleRatio());
+
         long maxRowCount = splits.stream().mapToLong(Split::rowCount).max().orElse(0L);
         double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
         PaimonSplitSource splitSource = new PaimonSplitSource(splits.stream()
@@ -238,5 +241,32 @@ public class PaimonSplitManager
         // Convert BiFilter to Filter by binding numBuckets
         org.apache.paimon.utils.BiFilter<Integer, Integer> selector = bucketSelector.get();
         return Optional.of(bucket -> selector.test(bucket, numBuckets));
+    }
+
+    private List<Split> applySampling(List<Split> splits, Optional<Double> sampleRatio)
+    {
+        if (sampleRatio.isEmpty() || splits.isEmpty()) {
+            return splits;
+        }
+
+        double ratio = sampleRatio.get();
+        if (ratio >= 1.0) {
+            return splits;
+        }
+        if (ratio <= 0.0) {
+            return List.of();
+        }
+
+        // SYSTEM sampling: select a subset of splits based on ratio
+        int targetCount = Math.max(1, (int) Math.ceil(splits.size() * ratio));
+        if (targetCount >= splits.size()) {
+            return splits;
+        }
+
+        // Use deterministic sampling based on split hash for reproducibility
+        return splits.stream()
+                .sorted((a, b) -> Integer.compare(a.hashCode(), b.hashCode()))
+                .limit(targetCount)
+                .collect(Collectors.toList());
     }
 }
