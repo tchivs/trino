@@ -38,6 +38,12 @@ import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.StringUtils;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -48,12 +54,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.YearMonth;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
 
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
