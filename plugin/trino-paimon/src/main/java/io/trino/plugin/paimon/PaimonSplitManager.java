@@ -93,11 +93,6 @@ public class PaimonSplitManager
 
         Duration dynamicFilteringWaitTimeout = PaimonSessionProperties.getDynamicFilteringWaitTimeout(session);
 
-        // If dynamic filtering is not awaitable, use original logic
-        if (!dynamicFilter.isAwaitable()) {
-            return getSplitsWithoutDynamicFilter(tableHandle, session);
-        }
-
         // Use dynamic filtering split source
         DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(tableHandle, session,
                 paimonCatalog, dynamicFilter, dynamicFilteringWaitTimeout);

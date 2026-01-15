@@ -29,11 +29,14 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
+import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.MapType;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -43,6 +46,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.Set;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
@@ -50,11 +61,15 @@ import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_
 import static io.trino.spi.expression.StandardFunctions.IN_PREDICATE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.OR_FUNCTION_NAME;
+import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
 import static org.apache.paimon.fileindex.FileIndexCommon.toMapKey;
 
 public class PaimonFilterExtractor
 {
     public static final String TRINO_MAP_ELEMENT_AT_FUNCTION_NAME = "element_at";
+    private static final String DERIVED_PARTITION_COLUMNS_OPTION = "trino.derived-partition-columns";
+    private static final DateTimeFormatter YEAR_MONTH_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM");
+    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd");
 
     private PaimonFilterExtractor()
     {
@@ -75,7 +90,8 @@ public class PaimonFilterExtractor
     public static Optional<TrinoFilter> extract(PaimonCatalog catalog, PaimonTableHandle paimonTableHandle,
             Constraint constraint)
     {
-        RowType rowType = paimonTableHandle.table(catalog).rowType();
+        org.apache.paimon.table.Table table = paimonTableHandle.table(catalog);
+        RowType rowType = table.rowType();
         TupleDomain<PaimonColumnHandle> oldFilter = paimonTableHandle.getFilter();
         TupleDomain<PaimonColumnHandle> newFilter = constraint.getSummary().transformKeys(PaimonColumnHandle.class::cast)
                 .intersect(oldFilter);
@@ -88,6 +104,10 @@ public class PaimonFilterExtractor
         if (!likeDomains.isEmpty()) {
             newFilter = newFilter.intersect(TupleDomain.withColumnDomains(likeDomains));
         }
+        newFilter = removeRedundantDerivedPartitionFilters(
+                newFilter,
+                table.partitionKeys(),
+                table.options().get(DERIVED_PARTITION_COLUMNS_OPTION));
 
         if (oldFilter.equals(newFilter)
                 && trinoColumnHandleForExpressionFilter.isEmpty()
@@ -489,6 +509,197 @@ public class PaimonFilterExtractor
         return List.copyOf(merged.keySet());
     }
 
+    static TupleDomain<PaimonColumnHandle> removeRedundantDerivedPartitionFilters(
+            TupleDomain<PaimonColumnHandle> filter,
+            List<String> partitionKeys,
+            String derivedPartitionColumns)
+    {
+        if (filter.isAll() || filter.isNone() || StringUtils.isNullOrWhitespaceOnly(derivedPartitionColumns)) {
+            return filter;
+        }
+        Optional<Map<PaimonColumnHandle, Domain>> domains = filter.getDomains();
+        if (domains.isEmpty()) {
+            return filter;
+        }
+        List<DerivedPartitionColumn> mappings = parseDerivedPartitionColumns(derivedPartitionColumns);
+        if (mappings.isEmpty()) {
+            return filter;
+        }
+
+        Set<String> normalizedPartitionKeys = partitionKeys.stream()
+                .map(FieldNameUtils::toLowerCase)
+                .collect(java.util.stream.Collectors.toSet());
+
+        Map<PaimonColumnHandle, Domain> updated = new LinkedHashMap<>(domains.get());
+        boolean changed = false;
+        for (DerivedPartitionColumn mapping : mappings) {
+            if (!normalizedPartitionKeys.contains(mapping.partitionColumn())) {
+                continue;
+            }
+            Optional<PaimonColumnHandle> partitionHandle = findHandle(updated, mapping.partitionColumn());
+            Optional<PaimonColumnHandle> sourceHandle = findHandle(updated, mapping.sourceColumn());
+            if (partitionHandle.isEmpty() || sourceHandle.isEmpty()) {
+                continue;
+            }
+            Domain partitionDomain = updated.get(partitionHandle.get());
+            Domain sourceDomain = updated.get(sourceHandle.get());
+            if (isRedundantDerivedPartition(partitionDomain, sourceDomain, mapping.pattern())) {
+                updated.remove(sourceHandle.get());
+                changed = true;
+            }
+        }
+
+        if (!changed) {
+            return filter;
+        }
+        if (updated.isEmpty()) {
+            return TupleDomain.all();
+        }
+        return TupleDomain.withColumnDomains(updated);
+    }
+
+    private static List<DerivedPartitionColumn> parseDerivedPartitionColumns(String derivedPartitionColumns)
+    {
+        if (StringUtils.isNullOrWhitespaceOnly(derivedPartitionColumns)) {
+            return List.of();
+        }
+        List<DerivedPartitionColumn> mappings = new ArrayList<>();
+        for (String entry : derivedPartitionColumns.split(",")) {
+            String trimmed = entry.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            int equalsIndex = trimmed.indexOf('=');
+            if (equalsIndex <= 0 || equalsIndex == trimmed.length() - 1) {
+                continue;
+            }
+            String partitionColumn = trimmed.substring(0, equalsIndex).trim();
+            String remainder = trimmed.substring(equalsIndex + 1).trim();
+            int patternIndex = remainder.indexOf(':');
+            if (patternIndex <= 0 || patternIndex == remainder.length() - 1) {
+                continue;
+            }
+            String sourceColumn = remainder.substring(0, patternIndex).trim();
+            String pattern = remainder.substring(patternIndex + 1).trim();
+            if (partitionColumn.isEmpty() || sourceColumn.isEmpty() || pattern.isEmpty()) {
+                continue;
+            }
+            mappings.add(new DerivedPartitionColumn(
+                    FieldNameUtils.toLowerCase(partitionColumn),
+                    FieldNameUtils.toLowerCase(sourceColumn),
+                    pattern));
+        }
+        return mappings;
+    }
+
+    private static Optional<PaimonColumnHandle> findHandle(Map<PaimonColumnHandle, Domain> domains, String columnName)
+    {
+        return domains.keySet().stream()
+                .filter(handle -> FieldNameUtils.toLowerCase(handle.getColumnName()).equals(columnName))
+                .findFirst();
+    }
+
+    private static boolean isRedundantDerivedPartition(Domain partitionDomain, Domain sourceDomain, String pattern)
+    {
+        if (!partitionDomain.isSingleValue()) {
+            return false;
+        }
+        Type partitionType = partitionDomain.getType();
+        if (!(partitionType instanceof VarcharType || partitionType instanceof CharType)) {
+            return false;
+        }
+        Object partitionValue = partitionDomain.getSingleValue();
+        if (!(partitionValue instanceof Slice partitionSlice)) {
+            return false;
+        }
+        Optional<PartitionRange> range = parsePartitionRange(partitionSlice.toStringUtf8(), pattern);
+        if (range.isEmpty()) {
+            return false;
+        }
+
+        Type sourceType = sourceDomain.getType();
+        if (!(sourceType instanceof TimestampType timestampType)) {
+            return false;
+        }
+        Optional<Range> sourceRange = extractSingleRange(sourceDomain);
+        if (sourceRange.isEmpty()) {
+            return false;
+        }
+        Range rangeValue = sourceRange.get();
+        if (rangeValue.isLowUnbounded() || rangeValue.isHighUnbounded()) {
+            return false;
+        }
+        if (!rangeValue.isLowInclusive() || rangeValue.isHighInclusive()) {
+            return false;
+        }
+
+        OptionalLong low = toEpochMicros(timestampType, rangeValue.getLowBoundedValue());
+        OptionalLong high = toEpochMicros(timestampType, rangeValue.getHighBoundedValue());
+        if (low.isEmpty() || high.isEmpty()) {
+            return false;
+        }
+        return low.getAsLong() == range.get().startMicros()
+                && high.getAsLong() == range.get().endMicros();
+    }
+
+    private static Optional<Range> extractSingleRange(Domain domain)
+    {
+        if (!domain.getValues().isAll() && !domain.getValues().isNone()) {
+            if (domain.getValues().getType().isOrderable()) {
+                List<Range> ranges = domain.getValues().getRanges().getOrderedRanges();
+                if (ranges.size() == 1) {
+                    return Optional.of(ranges.get(0));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static Optional<PartitionRange> parsePartitionRange(String value, String pattern)
+    {
+        try {
+            if ("yyyy-MM".equals(pattern)) {
+                YearMonth yearMonth = YearMonth.parse(value, YEAR_MONTH_FORMATTER);
+                LocalDateTime start = yearMonth.atDay(1).atStartOfDay();
+                LocalDateTime end = yearMonth.plusMonths(1).atDay(1).atStartOfDay();
+                return Optional.of(new PartitionRange(toEpochMicros(start), toEpochMicros(end)));
+            }
+            if ("yyyy-MM-dd".equals(pattern)) {
+                LocalDate date = LocalDate.parse(value, DATE_FORMATTER);
+                LocalDateTime start = date.atStartOfDay();
+                LocalDateTime end = date.plusDays(1).atStartOfDay();
+                return Optional.of(new PartitionRange(toEpochMicros(start), toEpochMicros(end)));
+            }
+        }
+        catch (DateTimeParseException ignored) {
+            return Optional.empty();
+        }
+        return Optional.empty();
+    }
+
+    private static long toEpochMicros(LocalDateTime dateTime)
+    {
+        long epochSecond = dateTime.toEpochSecond(ZoneOffset.UTC);
+        return Math.addExact(Math.multiplyExact(epochSecond, MICROSECONDS_PER_SECOND), dateTime.getNano() / 1_000);
+    }
+
+    private static OptionalLong toEpochMicros(TimestampType timestampType, Object value)
+    {
+        if (timestampType.isShort()) {
+            if (!(value instanceof Long)) {
+                return OptionalLong.empty();
+            }
+            return OptionalLong.of((long) value);
+        }
+        if (!(value instanceof LongTimestamp longTimestamp)) {
+            return OptionalLong.empty();
+        }
+        if (longTimestamp.getPicosOfMicro() != 0) {
+            return OptionalLong.empty();
+        }
+        return OptionalLong.of(longTimestamp.getEpochMicros());
+    }
+
     static Map<PaimonColumnHandle, Domain> extractLikeDomains(RowType rowType, List<PaimonLikeFilter> likeFilters)
     {
         if (likeFilters.isEmpty()) {
@@ -577,6 +788,10 @@ public class PaimonFilterExtractor
     private record ElementAtArguments(String columnName, String nestedName, Type elementType) {}
 
     record ParsedLikePattern(String literal, boolean hasTrailingWildcard) {}
+
+    private record DerivedPartitionColumn(String partitionColumn, String sourceColumn, String pattern) {}
+
+    private record PartitionRange(long startMicros, long endMicros) {}
 
     /** TrinoFilter for paimon trinoMetadata applyFilter. */
     public record TrinoFilter(TupleDomain<PaimonColumnHandle> filter, TupleDomain<ColumnHandle> remainFilter,

@@ -641,6 +641,13 @@ Table properties are specified using the `WITH` clause in `CREATE TABLE` or
 * - `compaction_max_file_num`
   - `varchar`
   - Maximum number of files to include in a single compaction.
+* - `trino.derived-partition-columns`
+  - `varchar`
+  - Declares partition columns derived from a source timestamp column. Used to
+    drop redundant timestamp range predicates when they exactly match the
+    derived partition, enabling limit pushdown on partition-only filters.
+    Format: `partition_column=source_column:pattern` (comma-separated for
+    multiple mappings). Supported patterns: `yyyy-MM`, `yyyy-MM-dd`.
 :::
 
 :::{note}
@@ -665,6 +672,28 @@ WITH (
   merge_engine = 'DEDUPLICATE',
   snapshot_time_retained = '7d',
   snapshot_num_retained = '10'
+);
+```
+
+#### Derived partition columns
+
+If a partition column is derived from a timestamp column (for example,
+`dt = date_format(jjsj, 'yyyy-MM')`), you can declare the mapping to allow the
+connector to simplify filters that exactly match the partition boundary.
+
+```sql
+ALTER TABLE paimon.example_schema.orders
+SET PROPERTIES (
+  "trino.derived-partition-columns" = 'dt=jjsj:yyyy-MM'
+);
+```
+
+Multiple mappings can be provided as a comma-separated list:
+
+```sql
+ALTER TABLE paimon.example_schema.orders
+SET PROPERTIES (
+  "trino.derived-partition-columns" = 'dt=jjsj:yyyy-MM,dt_day=jjsj:yyyy-MM-dd'
 );
 ```
 

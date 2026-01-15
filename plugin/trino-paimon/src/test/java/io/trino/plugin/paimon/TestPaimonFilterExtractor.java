@@ -27,12 +27,15 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.MapType;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TypeOperators;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -273,6 +276,52 @@ public class TestPaimonFilterExtractor
     }
 
     @Test
+    public void testRemoveRedundantDerivedPartitionFilter()
+    {
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", PaimonTypeUtils.toPaimonType(VARCHAR));
+        PaimonColumnHandle jjsj = PaimonColumnHandle.of("jjsj", PaimonTypeUtils.toPaimonType(TimestampType.TIMESTAMP_MICROS));
+
+        Domain dtDomain = Domain.singleValue(VARCHAR, Slices.utf8Slice("2025-10"));
+        Domain jjsjDomain = Domain.create(ValueSet.ofRanges(Range.range(
+                TimestampType.TIMESTAMP_MICROS,
+                toEpochMicros(LocalDateTime.of(2025, 10, 1, 0, 0)),
+                true,
+                toEpochMicros(LocalDateTime.of(2025, 11, 1, 0, 0)),
+                false)), false);
+
+        TupleDomain<PaimonColumnHandle> filter = TupleDomain.withColumnDomains(Map.of(dt, dtDomain, jjsj, jjsjDomain));
+        TupleDomain<PaimonColumnHandle> simplified = PaimonFilterExtractor.removeRedundantDerivedPartitionFilters(
+                filter, List.of("dt"), "dt=jjsj:yyyy-MM");
+
+        assertThat(simplified.getDomains()).isPresent();
+        assertThat(simplified.getDomains().get()).containsKey(dt);
+        assertThat(simplified.getDomains().get()).doesNotContainKey(jjsj);
+    }
+
+    @Test
+    public void testRemoveDerivedPartitionFilterKeepsPartialRange()
+    {
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", PaimonTypeUtils.toPaimonType(VARCHAR));
+        PaimonColumnHandle jjsj = PaimonColumnHandle.of("jjsj", PaimonTypeUtils.toPaimonType(TimestampType.TIMESTAMP_MICROS));
+
+        Domain dtDomain = Domain.singleValue(VARCHAR, Slices.utf8Slice("2025-10"));
+        Domain jjsjDomain = Domain.create(ValueSet.ofRanges(Range.range(
+                TimestampType.TIMESTAMP_MICROS,
+                toEpochMicros(LocalDateTime.of(2025, 10, 1, 0, 0)),
+                true,
+                toEpochMicros(LocalDateTime.of(2025, 10, 15, 0, 0)),
+                false)), false);
+
+        TupleDomain<PaimonColumnHandle> filter = TupleDomain.withColumnDomains(Map.of(dt, dtDomain, jjsj, jjsjDomain));
+        TupleDomain<PaimonColumnHandle> simplified = PaimonFilterExtractor.removeRedundantDerivedPartitionFilters(
+                filter, List.of("dt"), "dt=jjsj:yyyy-MM");
+
+        assertThat(simplified.getDomains()).isPresent();
+        assertThat(simplified.getDomains().get()).containsKey(dt);
+        assertThat(simplified.getDomains().get()).containsKey(jjsj);
+    }
+
+    @Test
     public void testComputeRemainingExpressionReturnsTrueOnlyWhenAlreadyTrue()
     {
         Constraint constraint = new Constraint(TupleDomain.all(), TRUE, Map.of());
@@ -286,5 +335,11 @@ public class TestPaimonFilterExtractor
     {
         // assignments are only required to satisfy Constraint construction for these tests
         return new ColumnHandle() {};
+    }
+
+    private static long toEpochMicros(LocalDateTime dateTime)
+    {
+        long epochSecond = dateTime.toEpochSecond(ZoneOffset.UTC);
+        return Math.addExact(epochSecond * 1_000_000L, dateTime.getNano() / 1_000);
     }
 }

@@ -983,17 +983,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
         // Estimated effort: 4-6 hours
         // Priority: P1 (High value, moderate cost)
 
-        PaimonTableHandle table = (PaimonTableHandle) handle;
+        PaimonTableHandle tableHandle = (PaimonTableHandle) handle;
 
-        if (table.getLimit().isPresent() && table.getLimit().getAsLong() <= limit) {
+        if (tableHandle.getLimit().isPresent() && tableHandle.getLimit().getAsLong() <= limit) {
             return Optional.empty();
         }
 
-        Table paimonTable = table.table(catalog);
-
-        if (!table.getLikeFilters().isEmpty()) {
+        if (!tableHandle.getLikeFilters().isEmpty()) {
+            Table paimonTable = tableHandle.table(catalog);
             Set<String> partitionKeys = new HashSet<>(paimonTable.partitionKeys());
-            Set<String> likeFields = table.getLikeFilters().stream()
+            Set<String> likeFields = tableHandle.getLikeFilters().stream()
                     .map(PaimonLikeFilter::columnName)
                     .collect(Collectors.toSet());
             if (!partitionKeys.containsAll(likeFields)) {
@@ -1001,10 +1000,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
         }
 
-        if (!table.getFilter().isAll()) {
+        if (!tableHandle.getFilter().isAll()) {
+            Table paimonTable = tableHandle.table(catalog);
             HashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
             HashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
-            new PaimonFilterConverter(paimonTable.rowType()).convert(table.getFilter(), acceptedDomains,
+            new PaimonFilterConverter(paimonTable.rowType()).convert(tableHandle.getFilter(), acceptedDomains,
                     unsupportedDomains);
             Set<String> acceptedFields = acceptedDomains.keySet().stream().map(PaimonColumnHandle::getColumnName)
                     .collect(Collectors.toSet());
@@ -1014,9 +1014,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
         }
 
-        table = table.copy(OptionalLong.of(limit));
+        tableHandle = tableHandle.copy(OptionalLong.of(limit));
 
-        return Optional.of(new LimitApplicationResult<>(table, false, false));
+        return Optional.of(new LimitApplicationResult<>(tableHandle, false, false));
     }
 
     @Override
