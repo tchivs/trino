@@ -455,6 +455,19 @@ public class UnwrapCastInComparison
             }
 
             boolean coercible = new TypeCoercion(plannerContext.getTypeManager()::getType).canCoerce(source, target);
+            // Handle varchar(N) -> varchar(M) where N <= M: this is injective (no data loss)
+            if (source instanceof VarcharType sourceVarchar && target instanceof VarcharType targetVarchar) {
+                if (sourceVarchar.isUnbounded()) {
+                    // unbounded varchar -> bounded varchar may truncate
+                    return !targetVarchar.isUnbounded();
+                }
+                if (targetVarchar.isUnbounded()) {
+                    // bounded varchar -> unbounded varchar is always injective
+                    return true;
+                }
+                // bounded -> bounded: injective if source length <= target length
+                return sourceVarchar.getBoundedLength() <= targetVarchar.getBoundedLength();
+            }
             if (source instanceof VarcharType sourceVarchar && target instanceof CharType targetChar) {
                 if (sourceVarchar.isUnbounded() || sourceVarchar.getBoundedLength() > targetChar.getLength()) {
                     // Truncation, not injective.

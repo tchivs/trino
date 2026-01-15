@@ -121,6 +121,13 @@ public class TestUnwrapCastInComparison
         // unbounded varchar and char
         // actually unwrapping didn't happen
         testUnwrap("varchar", "a = CAST('abc' AS char(3))", new Comparison(EQUAL, new Cast(new Reference(VARCHAR, "a"), createCharType(65536)), new Constant(createCharType(65536), Slices.utf8Slice("abc"))));
+
+        // varchar(N) to varchar(M) where N < M: should unwrap
+        testUnwrap("varchar(40)", "a = CAST('test' AS varchar(256))", new Comparison(EQUAL, new Reference(createVarcharType(40), "a"), new Constant(createVarcharType(40), Slices.utf8Slice("test"))));
+        // varchar(N) to varchar(M) where N = M: should unwrap
+        testUnwrap("varchar(10)", "a = CAST('test' AS varchar(10))", new Comparison(EQUAL, new Reference(createVarcharType(10), "a"), new Constant(createVarcharType(10), Slices.utf8Slice("test"))));
+        // bounded varchar to unbounded varchar: should unwrap
+        testUnwrap("varchar(40)", "a = CAST('test' AS varchar)", new Comparison(EQUAL, new Reference(createVarcharType(40), "a"), new Constant(createVarcharType(40), Slices.utf8Slice("test"))));
     }
 
     @Test
