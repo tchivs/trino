@@ -142,6 +142,12 @@ public class DynamicFilteringTrinoSplitSource
         // Combine dynamic filter with static filters
         TupleDomain<PaimonColumnHandle> combinedPredicate = combinePredicates(tableHandle.getFilter(), dynamicFilter);
 
+        // Early termination: if combined predicate is NONE (empty result set), return empty splits
+        if (combinedPredicate.isNone()) {
+            LOG.info("Combined predicate is NONE (empty result set), skipping table scan");
+            return new PaimonSplitSource(ImmutableList.of());
+        }
+
         // Apply combined predicate to table scan
         Table table = tableHandle.tableWithDynamicOptions(paimonCatalog, session);
         ReadBuilder readBuilder = table.newReadBuilder();
@@ -180,8 +186,21 @@ public class DynamicFilteringTrinoSplitSource
         LOG.debug("Static predicate: {}", staticPredicate);
         LOG.debug("Dynamic predicate: {}", dynamicPredicate);
 
+        // Early termination: if dynamic predicate is NONE (empty result set from build side)
+        // This is critical for performance - prevents full table scan when JOIN build side returns 0 rows
+        if (dynamicPredicate.isNone()) {
+            LOG.info("Dynamic filter is NONE (build side returned empty result), returning NONE to skip scan");
+            return TupleDomain.none();
+        }
+
         // Combine with static predicate
         TupleDomain<PaimonColumnHandle> combined = staticPredicate.intersect(dynamicPredicate);
+
+        // Check if intersection resulted in NONE (contradictory predicates)
+        if (combined.isNone()) {
+            LOG.info("Combined predicate is NONE (contradictory predicates), returning NONE to skip scan");
+            return combined;
+        }
 
         // Simplify if too complex (prevent memory explosion)
         if (exceedsComplexityThreshold(combined, DOMAIN_COMPACTION_THRESHOLD)) {

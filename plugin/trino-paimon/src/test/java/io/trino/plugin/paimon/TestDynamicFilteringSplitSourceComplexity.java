@@ -53,4 +53,20 @@ public class TestDynamicFilteringSplitSourceComplexity
         TupleDomain<PaimonColumnHandle> predicate = TupleDomain.withColumnDomains(Map.of(column, domain));
         assertThat(DynamicFilteringTrinoSplitSource.estimateComplexity(predicate)).isEqualTo(2);
     }
+
+    @Test
+    public void testEstimateComplexityForNonePredicate()
+    {
+        // Test that NONE predicate (empty result set) has zero complexity
+        TupleDomain<PaimonColumnHandle> predicate = TupleDomain.none();
+        assertThat(DynamicFilteringTrinoSplitSource.estimateComplexity(predicate)).isEqualTo(0);
+    }
+
+    @Test
+    public void testEstimateComplexityForAllPredicate()
+    {
+        // Test that ALL predicate (no restrictions) has zero complexity
+        TupleDomain<PaimonColumnHandle> predicate = TupleDomain.all();
+        assertThat(DynamicFilteringTrinoSplitSource.estimateComplexity(predicate)).isEqualTo(0);
+    }
 }
