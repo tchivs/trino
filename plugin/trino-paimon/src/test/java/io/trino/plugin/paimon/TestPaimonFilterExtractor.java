@@ -24,13 +24,18 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.SortedRangeSet;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.TypeOperators;
+import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static io.trino.spi.expression.Constant.TRUE;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
@@ -168,6 +173,103 @@ public class TestPaimonFilterExtractor
 
         Constraint constraint = new Constraint(TupleDomain.all(), like, Map.of("bjnr", mockColumnHandle()));
         assertThat(PaimonFilterExtractor.computeRemainingExpression(constraint, TupleDomain.all())).isEqualTo(like);
+    }
+
+    @Test
+    public void testExtractLikeFilters()
+    {
+        PaimonColumnHandle column = PaimonColumnHandle.of("bjnr", PaimonTypeUtils.toPaimonType(VARCHAR));
+        Call like = new Call(
+                BOOLEAN,
+                LIKE_FUNCTION_NAME,
+                List.of(new Variable("bjnr", VARCHAR), new Constant(Slices.utf8Slice("abc%"), VARCHAR)));
+
+        Constraint constraint = new Constraint(TupleDomain.all(), like, Map.of("bjnr", column));
+        List<PaimonLikeFilter> filters = PaimonFilterExtractor.extractLikeFilters(constraint);
+
+        assertThat(filters).containsExactly(new PaimonLikeFilter("bjnr", "abc%", Optional.empty()));
+    }
+
+    @Test
+    public void testExtractLikeFiltersSkipsUnsupportedEscape()
+    {
+        PaimonColumnHandle column = PaimonColumnHandle.of("bjnr", PaimonTypeUtils.toPaimonType(VARCHAR));
+        Call like = new Call(
+                BOOLEAN,
+                LIKE_FUNCTION_NAME,
+                List.of(
+                        new Variable("bjnr", VARCHAR),
+                        new Constant(Slices.utf8Slice("a!%"), VARCHAR),
+                        new Constant(Slices.utf8Slice("!"), VARCHAR)));
+
+        Constraint constraint = new Constraint(TupleDomain.all(), like, Map.of("bjnr", column));
+        assertThat(PaimonFilterExtractor.extractLikeFilters(constraint)).isEmpty();
+    }
+
+    @Test
+    public void testExtractLikeFiltersSkipsOr()
+    {
+        PaimonColumnHandle column = PaimonColumnHandle.of("bjnr", PaimonTypeUtils.toPaimonType(VARCHAR));
+        Call like1 = new Call(
+                BOOLEAN,
+                LIKE_FUNCTION_NAME,
+                List.of(new Variable("bjnr", VARCHAR), new Constant(Slices.utf8Slice("abc%"), VARCHAR)));
+        Call like2 = new Call(
+                BOOLEAN,
+                LIKE_FUNCTION_NAME,
+                List.of(new Variable("bjnr", VARCHAR), new Constant(Slices.utf8Slice("def%"), VARCHAR)));
+        Call orCall = new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(like1, like2));
+
+        Constraint constraint = new Constraint(TupleDomain.all(), orCall, Map.of("bjnr", column));
+        assertThat(PaimonFilterExtractor.extractLikeFilters(constraint)).isEmpty();
+    }
+
+    @Test
+    public void testExtractLikeDomainsForPrefix()
+    {
+        RowType rowType = new RowType(List.of(new DataField(0, "name", DataTypes.STRING())));
+        List<PaimonLikeFilter> filters = List.of(new PaimonLikeFilter("name", "abc%", Optional.empty()));
+
+        Map<PaimonColumnHandle, Domain> domains = PaimonFilterExtractor.extractLikeDomains(rowType, filters);
+
+        PaimonColumnHandle handle = PaimonColumnHandle.of("name", rowType.getTypeAt(0));
+        assertThat(domains).containsOnlyKeys(handle);
+
+        Domain domain = domains.get(handle);
+        assertThat(domain).isNotNull();
+        assertThat(domain.getValues().getRanges().getRangeCount()).isEqualTo(1);
+
+        Domain expected = Domain.create(
+                ValueSet.ofRanges(Range.range(
+                        handle.getTrinoType(),
+                        Slices.utf8Slice("abc"),
+                        true,
+                        PaimonFilterExtractor.nextPrefix(Slices.utf8Slice("abc")).orElseThrow(),
+                        false)),
+                false);
+        assertThat(domain).isEqualTo(expected);
+    }
+
+    @Test
+    public void testExtractLikeDomainsForExactMatch()
+    {
+        RowType rowType = new RowType(List.of(new DataField(0, "name", DataTypes.STRING())));
+        List<PaimonLikeFilter> filters = List.of(new PaimonLikeFilter("name", "abc", Optional.empty()));
+
+        Map<PaimonColumnHandle, Domain> domains = PaimonFilterExtractor.extractLikeDomains(rowType, filters);
+
+        PaimonColumnHandle handle = PaimonColumnHandle.of("name", rowType.getTypeAt(0));
+        assertThat(domains).containsOnlyKeys(handle);
+        assertThat(domains.get(handle)).isEqualTo(Domain.singleValue(handle.getTrinoType(), Slices.utf8Slice("abc")));
+    }
+
+    @Test
+    public void testExtractLikeDomainsSkipsNonPrefixPatterns()
+    {
+        RowType rowType = new RowType(List.of(new DataField(0, "name", DataTypes.STRING())));
+        List<PaimonLikeFilter> filters = List.of(new PaimonLikeFilter("name", "a_c", Optional.empty()));
+
+        assertThat(PaimonFilterExtractor.extractLikeDomains(rowType, filters)).isEmpty();
     }
 
     @Test

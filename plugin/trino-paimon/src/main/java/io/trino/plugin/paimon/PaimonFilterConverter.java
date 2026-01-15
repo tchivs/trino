@@ -46,6 +46,7 @@ import org.apache.paimon.predicate.LeafPredicate;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.types.VarCharType;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -80,6 +81,35 @@ public class PaimonFilterConverter
     public Optional<Predicate> convert(TupleDomain<PaimonColumnHandle> tupleDomain)
     {
         return convert(tupleDomain, new LinkedHashMap<>(), new LinkedHashMap<>());
+    }
+
+    public Optional<Predicate> convertLikeFilters(List<PaimonLikeFilter> likeFilters)
+    {
+        if (likeFilters.isEmpty()) {
+            return Optional.empty();
+        }
+
+        List<Predicate> conjuncts = new ArrayList<>();
+        List<String> fieldNames = FieldNameUtils.fieldNames(rowType);
+        for (PaimonLikeFilter likeFilter : likeFilters) {
+            if (likeFilter.escape().isPresent() && !"\\".equals(likeFilter.escape().get())) {
+                continue;
+            }
+            String fieldName = FieldNameUtils.toLowerCase(likeFilter.columnName());
+            int index = fieldNames.indexOf(fieldName);
+            if (index < 0) {
+                continue;
+            }
+            if (!(rowType.getTypeAt(index) instanceof VarCharType || rowType.getTypeAt(index) instanceof org.apache.paimon.types.CharType)) {
+                continue;
+            }
+            conjuncts.add(builder.like(index, BinaryString.fromString(likeFilter.pattern())));
+        }
+
+        if (conjuncts.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(and(conjuncts));
     }
 
     // TODO: Enhancement - SUPPORTS_DEREFERENCE_PUSHDOWN
@@ -140,6 +170,17 @@ public class PaimonFilterConverter
             return Optional.empty();
         }
         return Optional.of(and(conjuncts));
+    }
+
+    static Optional<Predicate> combinePredicates(Optional<Predicate> primary, Optional<Predicate> additional)
+    {
+        if (primary.isEmpty()) {
+            return additional;
+        }
+        if (additional.isEmpty()) {
+            return primary;
+        }
+        return Optional.of(and(primary.get(), additional.get()));
     }
 
     private Predicate toPredicate(int columnIndex, String field, Type type, Domain domain)

@@ -47,6 +47,7 @@ public class DynamicFilteringTrinoSplitSource
     private static final Logger LOG = Logger.get(DynamicFilteringTrinoSplitSource.class);
     private static final int DOMAIN_COMPACTION_THRESHOLD = 1000;
     private static final ConnectorSplitBatch EMPTY_BATCH = new ConnectorSplitBatch(ImmutableList.of(), false);
+    private static final ConnectorSplitBatch FINISHED_BATCH = new ConnectorSplitBatch(ImmutableList.of(), true);
 
     private final PaimonTableHandle tableHandle;
     private final ConnectorSession session;
@@ -75,6 +76,9 @@ public class DynamicFilteringTrinoSplitSource
     @Override
     public CompletableFuture<ConnectorSplitBatch> getNextBatch(int maxSize)
     {
+        if (dynamicFilter.getCurrentPredicate().isNone()) {
+            return CompletableFuture.completedFuture(FINISHED_BATCH);
+        }
         long timeLeft = computeTimeLeft();
 
         synchronized (this) {
@@ -93,6 +97,9 @@ public class DynamicFilteringTrinoSplitSource
         }
 
         // Delegate to actual split source
+        if (dynamicFilter.getCurrentPredicate().isNone()) {
+            return CompletableFuture.completedFuture(FINISHED_BATCH);
+        }
         return delegateSplitSource.getNextBatch(maxSize);
     }
 
@@ -109,6 +116,9 @@ public class DynamicFilteringTrinoSplitSource
     @Override
     public boolean isFinished()
     {
+        if (dynamicFilter.getCurrentPredicate().isNone()) {
+            return true;
+        }
         synchronized (this) {
             if (!splitsPlanningStarted) {
                 return false;
@@ -153,14 +163,20 @@ public class DynamicFilteringTrinoSplitSource
         ReadBuilder readBuilder = table.newReadBuilder();
 
         // Convert combined predicate to Paimon predicate
-        Optional<Predicate> paimonPredicate = new PaimonFilterConverter(table.rowType()).convert(combinedPredicate);
+        PaimonFilterConverter filterConverter = new PaimonFilterConverter(table.rowType());
+        Optional<Predicate> tuplePredicate = filterConverter.convert(combinedPredicate);
+        Optional<Predicate> likePredicate = filterConverter.convertLikeFilters(tableHandle.getLikeFilters());
+        Optional<Predicate> paimonPredicate = PaimonFilterConverter.combinePredicates(tuplePredicate, likePredicate);
         paimonPredicate.ifPresent(readBuilder::withFilter);
 
         // Apply limit if present
         SplitPlanningUtils.toPaimonLimit(tableHandle.getLimit()).ifPresent(readBuilder::withLimit);
+        PaimonSplitManager.convertTopN(tableHandle.getTopN(), table.rowType()).ifPresent(readBuilder::withTopN);
+        PaimonSplitManager.applyBucketFilter(table, paimonPredicate).ifPresent(readBuilder::withBucketFilter);
 
         // Plan splits
         List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
+        splits = PaimonSplitManager.applySampling(splits, tableHandle.getSampleRatio());
 
         LOG.info("Planned {} splits after applying dynamic filters", splits.size());
 
@@ -204,13 +220,61 @@ public class DynamicFilteringTrinoSplitSource
 
         // Simplify if too complex (prevent memory explosion)
         if (exceedsComplexityThreshold(combined, DOMAIN_COMPACTION_THRESHOLD)) {
-            LOG.warn("Combined predicate exceeds complexity threshold ({}), using only static predicate",
+            LOG.debug("Combined predicate exceeds complexity threshold ({}), compacting dynamic predicate",
                     DOMAIN_COMPACTION_THRESHOLD);
-            return staticPredicate;
+            // Instead of dropping dynamic filter entirely, compact it to retain most selective domains
+            TupleDomain<PaimonColumnHandle> compactedDynamic = compactPredicate(dynamicPredicate, DOMAIN_COMPACTION_THRESHOLD / 2);
+            combined = staticPredicate.intersect(compactedDynamic);
+            LOG.debug("Compacted combined predicate: {}", combined);
         }
 
         LOG.debug("Combined predicate: {}", combined);
         return combined;
+    }
+
+    /**
+     * Compact a predicate by retaining only the most selective domains.
+     * Strategy: keep orderable range domains, drop high-cardinality discrete sets.
+     */
+    private TupleDomain<PaimonColumnHandle> compactPredicate(TupleDomain<PaimonColumnHandle> predicate, int targetComplexity)
+    {
+        if (predicate.isAll() || predicate.isNone() || predicate.getDomains().isEmpty()) {
+            return predicate;
+        }
+
+        java.util.Map<PaimonColumnHandle, Domain> domains = predicate.getDomains().get();
+        java.util.Map<PaimonColumnHandle, Domain> compactedDomains = new java.util.LinkedHashMap<>();
+        int currentComplexity = 0;
+
+        // First pass: add all simple domains (complexity <= 10)
+        for (java.util.Map.Entry<PaimonColumnHandle, Domain> entry : domains.entrySet()) {
+            int domainComplexity = estimateDomainComplexity(entry.getValue());
+            if (domainComplexity <= 10) {
+                compactedDomains.put(entry.getKey(), entry.getValue());
+                currentComplexity += domainComplexity;
+            }
+        }
+
+        // Second pass: add range-based domains up to target complexity
+        for (java.util.Map.Entry<PaimonColumnHandle, Domain> entry : domains.entrySet()) {
+            if (compactedDomains.containsKey(entry.getKey())) {
+                continue;
+            }
+            Domain domain = entry.getValue();
+            int domainComplexity = estimateDomainComplexity(domain);
+
+            // Prefer range domains over discrete sets
+            if (domain.getValues().getType().isOrderable() && currentComplexity + domainComplexity <= targetComplexity) {
+                compactedDomains.put(entry.getKey(), domain);
+                currentComplexity += domainComplexity;
+            }
+        }
+
+        if (compactedDomains.isEmpty()) {
+            return TupleDomain.all();
+        }
+
+        return TupleDomain.withColumnDomains(compactedDomains);
     }
 
     private boolean exceedsComplexityThreshold(TupleDomain<PaimonColumnHandle> predicate, int threshold)

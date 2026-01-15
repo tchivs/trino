@@ -93,9 +93,8 @@ public class PaimonSplitManager
 
         Duration dynamicFilteringWaitTimeout = PaimonSessionProperties.getDynamicFilteringWaitTimeout(session);
 
-        // If dynamic filtering is disabled (timeout = 0) or not awaitable, use original
-        // logic
-        if (dynamicFilteringWaitTimeout.toMillis() == 0 || !dynamicFilter.isAwaitable()) {
+        // If dynamic filtering is not awaitable, use original logic
+        if (!dynamicFilter.isAwaitable()) {
             return getSplitsWithoutDynamicFilter(tableHandle, session);
         }
 
@@ -110,7 +109,10 @@ public class PaimonSplitManager
     {
         Table table = tableHandle.tableWithDynamicOptions(paimonCatalog, session);
         ReadBuilder readBuilder = table.newReadBuilder();
-        Optional<Predicate> paimonFilter = new PaimonFilterConverter(table.rowType()).convert(tableHandle.getFilter());
+        PaimonFilterConverter filterConverter = new PaimonFilterConverter(table.rowType());
+        Optional<Predicate> tuplePredicate = filterConverter.convert(tableHandle.getFilter());
+        Optional<Predicate> likePredicate = filterConverter.convertLikeFilters(tableHandle.getLikeFilters());
+        Optional<Predicate> paimonFilter = PaimonFilterConverter.combinePredicates(tuplePredicate, likePredicate);
         paimonFilter.ifPresent(readBuilder::withFilter);
         SplitPlanningUtils.toPaimonLimit(tableHandle.getLimit()).ifPresent(readBuilder::withLimit);
         convertTopN(tableHandle.getTopN(), table.rowType()).ifPresent(readBuilder::withTopN);
@@ -136,7 +138,7 @@ public class PaimonSplitManager
         return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
     }
 
-    private Optional<TopN> convertTopN(Optional<PaimonTopN> topN, RowType rowType)
+    static Optional<TopN> convertTopN(Optional<PaimonTopN> topN, RowType rowType)
     {
         if (topN.isEmpty()) {
             return Optional.empty();
@@ -202,7 +204,7 @@ public class PaimonSplitManager
         return Optional.of(new TopN(sortValues, (int) paimonTopN.getTopNCount()));
     }
 
-    private Optional<org.apache.paimon.utils.Filter<Integer>> applyBucketFilter(
+    static Optional<org.apache.paimon.utils.Filter<Integer>> applyBucketFilter(
             Table table,
             Optional<Predicate> paimonFilter)
     {
@@ -243,7 +245,7 @@ public class PaimonSplitManager
         return Optional.of(bucket -> selector.test(bucket, numBuckets));
     }
 
-    private List<Split> applySampling(List<Split> splits, Optional<Double> sampleRatio)
+    static List<Split> applySampling(List<Split> splits, Optional<Double> sampleRatio)
     {
         if (sampleRatio.isEmpty() || splits.isEmpty()) {
             return splits;

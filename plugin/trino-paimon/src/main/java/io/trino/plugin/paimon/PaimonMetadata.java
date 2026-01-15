@@ -67,6 +67,7 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
@@ -935,8 +936,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 constraint);
         if (extract.isPresent()) {
             PaimonFilterExtractor.TrinoFilter trinoFilter = extract.get();
-            return Optional.of(new ConstraintApplicationResult<>(paimonTableHandle.copy(trinoFilter.filter()),
-                    trinoFilter.remainFilter(), trinoFilter.remainingExpression(), false));
+            PaimonTableHandle updatedHandle = paimonTableHandle.copy(trinoFilter.filter())
+                    .copyWithLikeFilters(trinoFilter.likeFilters());
+            return Optional.of(new ConstraintApplicationResult<>(updatedHandle, trinoFilter.remainFilter(),
+                    trinoFilter.remainingExpression(), false));
         }
         else {
             return Optional.empty();
@@ -986,8 +989,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return Optional.empty();
         }
 
+        Table paimonTable = table.table(catalog);
+
+        if (!table.getLikeFilters().isEmpty()) {
+            Set<String> partitionKeys = new HashSet<>(paimonTable.partitionKeys());
+            Set<String> likeFields = table.getLikeFilters().stream()
+                    .map(PaimonLikeFilter::columnName)
+                    .collect(Collectors.toSet());
+            if (!partitionKeys.containsAll(likeFields)) {
+                return Optional.empty();
+            }
+        }
+
         if (!table.getFilter().isAll()) {
-            Table paimonTable = table.table(catalog);
             HashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
             HashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
             new PaimonFilterConverter(paimonTable.rowType()).convert(table.getFilter(), acceptedDomains,
@@ -1034,7 +1048,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
             // Aggregation pushdown computes results from split-level metadata, so it is only correct without row-level
             // filtering. Partition-only filters are safe because they only restrict which splits are selected.
-            if (!isPartitionOnlyFilter(table, paimonTableHandle.getFilter())) {
+            if (!isPartitionOnlyFilter(table, paimonTableHandle.getFilter(), paimonTableHandle.getLikeFilters())) {
                 return Optional.empty();
             }
 
@@ -1066,9 +1080,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
             // Without deletion-vectors, mergedRowCount would be incorrect as it doesn't account for key deduplication
             boolean countPushdownSupported = !hasPrimaryKeys || deletionVectorsEnabled;
 
+            // Extract MIN/MAX column names for statistics availability check
+            Set<String> minMaxColumns = extractMinMaxColumns(aggregates, assignments);
+
             // Get all splits to compute aggregation
             org.apache.paimon.table.source.ReadBuilder readBuilder = table.newReadBuilder();
             new PaimonFilterConverter(table.rowType()).convert(paimonTableHandle.getFilter()).ifPresent(readBuilder::withFilter);
+            // Optimization: drop stats when only COUNT(*) is requested (no MIN/MAX)
+            // Reference: AggregatePushDownUtils.scala line 52-53
+            if (minMaxColumns.isEmpty()) {
+                readBuilder.dropStats();
+            }
             List<Split> splits = readBuilder.newScan().plan().splits();
 
             // Check if all splits support mergedRowCount for COUNT(*)
@@ -1076,6 +1098,15 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     .filter(split -> split instanceof DataSplit)
                     .map(split -> (DataSplit) split)
                     .collect(toList());
+
+            // Check if MIN/MAX statistics are available for all splits
+            // Reference: AggregatePushDownUtils.scala line 59
+            if (!minMaxColumns.isEmpty()) {
+                if (!allSplitsHaveMinMaxStats(dataSplits, minMaxColumns)) {
+                    log.debug("MIN/MAX pushdown not supported: statistics not available for columns %s", minMaxColumns);
+                    return Optional.empty();
+                }
+            }
 
             // For GROUP BY, only support partition keys
             List<String> partitionKeys = fileStoreTable.schema().partitionKeys();
@@ -1469,6 +1500,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 if (!assignments.containsKey(columnName)) {
                     return false;
                 }
+                // Check data type - only numeric and date types are supported for MIN/MAX pushdown
+                // Timestamp, String, Decimal, Binary are NOT supported because:
+                // - Timestamp: INT96 sort order is undefined in Parquet
+                // - String/Binary: min/max could be truncated in Parquet (PARQUET-1685)
+                // - Decimal: stored as Binary in Parquet, same truncation issue
+                // Reference: org.apache.paimon.table.source.PushDownUtils.minmaxAvailable()
+                PaimonColumnHandle columnHandle = (PaimonColumnHandle) assignments.get(columnName);
+                if (!isMinMaxSupportedType(columnHandle.getTrinoType())) {
+                    return false;
+                }
             }
             else {
                 // Other aggregations not supported
@@ -1476,6 +1517,66 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
         }
         return !aggregates.isEmpty();
+    }
+
+    /**
+     * Extract column names used in MIN/MAX aggregations.
+     */
+    private Set<String> extractMinMaxColumns(List<AggregateFunction> aggregates, Map<String, ColumnHandle> assignments)
+    {
+        Set<String> columns = new HashSet<>();
+        for (AggregateFunction aggregate : aggregates) {
+            String functionName = aggregate.getFunctionName().toLowerCase();
+            if ("min".equals(functionName) || "max".equals(functionName)) {
+                if (aggregate.getArguments().size() == 1 && aggregate.getArguments().get(0) instanceof Variable) {
+                    columns.add(((Variable) aggregate.getArguments().get(0)).getName());
+                }
+            }
+        }
+        return columns;
+    }
+
+    /**
+     * Check if all splits have MIN/MAX statistics available for the specified columns.
+     * Reference: org.apache.paimon.table.source.PushDownUtils.minmaxAvailable(DataSplit, Set)
+     */
+    private boolean allSplitsHaveMinMaxStats(List<DataSplit> dataSplits, Set<String> columns)
+    {
+        if (columns.isEmpty()) {
+            return true;
+        }
+        for (DataSplit split : dataSplits) {
+            // rawConvertible check - split must be directly readable
+            if (!split.rawConvertible()) {
+                return false;
+            }
+            // Check if all data files have statistics for the required columns
+            for (DataFileMeta dataFile : split.dataFiles()) {
+                List<String> valueStatsCols = dataFile.valueStatsCols();
+                // null means all column statistics are available
+                if (valueStatsCols != null && !new HashSet<>(valueStatsCols).containsAll(columns)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Check if the data type supports MIN/MAX pushdown.
+     * Only numeric types and date are supported. Timestamp, String, Decimal, Binary are NOT supported.
+     * Reference: org.apache.paimon.table.source.PushDownUtils.minmaxAvailable()
+     */
+    private boolean isMinMaxSupportedType(Type type)
+    {
+        return type instanceof io.trino.spi.type.BooleanType
+                || type instanceof io.trino.spi.type.TinyintType
+                || type instanceof io.trino.spi.type.SmallintType
+                || type instanceof io.trino.spi.type.IntegerType
+                || type instanceof io.trino.spi.type.BigintType
+                || type instanceof io.trino.spi.type.RealType
+                || type instanceof io.trino.spi.type.DoubleType
+                || type instanceof io.trino.spi.type.DateType;
     }
 
     private boolean isCountNonNull(AggregateFunction aggregate, Map<String, ColumnHandle> assignments)
@@ -1495,8 +1596,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return !((PaimonColumnHandle) sourceColumnHandle).logicalType().isNullable();
     }
 
-    private boolean isPartitionOnlyFilter(Table table, io.trino.spi.predicate.TupleDomain<PaimonColumnHandle> filter)
+    private boolean isPartitionOnlyFilter(Table table, io.trino.spi.predicate.TupleDomain<PaimonColumnHandle> filter,
+            List<PaimonLikeFilter> likeFilters)
     {
+        Set<String> partitionKeys = new HashSet<>(table.partitionKeys());
+        if (!likeFilters.isEmpty()) {
+            Set<String> likeFields = likeFilters.stream()
+                    .map(PaimonLikeFilter::columnName)
+                    .collect(Collectors.toSet());
+            if (!partitionKeys.containsAll(likeFields)) {
+                return false;
+            }
+        }
+
         if (filter.isAll() || filter.isNone()) {
             return true;
         }
@@ -1513,7 +1625,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .map(PaimonColumnHandle::getColumnName)
                 .collect(Collectors.toSet());
 
-        return new HashSet<>(table.partitionKeys()).containsAll(acceptedFields);
+        return partitionKeys.containsAll(acceptedFields);
     }
 
     @Override

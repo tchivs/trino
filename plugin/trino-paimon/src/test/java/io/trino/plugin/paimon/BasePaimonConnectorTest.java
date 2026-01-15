@@ -87,7 +87,7 @@ public abstract class BasePaimonConnectorTest
             case SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_INEQUALITY -> true; // Already implemented via
                                                                               // builder.greaterThan/lessThan
             case SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN -> false;
-            case SUPPORTS_AGGREGATION_PUSHDOWN -> false;
+            case SUPPORTS_AGGREGATION_PUSHDOWN -> true;
             case SUPPORTS_JOIN_PUSHDOWN -> false;
             case SUPPORTS_DEREFERENCE_PUSHDOWN -> false;
 

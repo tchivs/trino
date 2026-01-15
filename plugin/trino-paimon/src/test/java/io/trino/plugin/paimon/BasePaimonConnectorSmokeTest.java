@@ -61,7 +61,7 @@ public abstract class BasePaimonConnectorSmokeTest
 
             // Query optimization
             case SUPPORTS_TOPN_PUSHDOWN -> true;
-            case SUPPORTS_AGGREGATION_PUSHDOWN -> false;
+            case SUPPORTS_AGGREGATION_PUSHDOWN -> true;
             case SUPPORTS_JOIN_PUSHDOWN -> false;
 
             // Views

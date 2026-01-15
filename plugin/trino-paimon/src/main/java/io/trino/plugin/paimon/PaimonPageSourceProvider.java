@@ -135,6 +135,11 @@ public class PaimonPageSourceProvider
             return new PaimonAggregationPageSource(paimonTableHandle.getAggregationResult().get());
         }
 
+        TupleDomain<PaimonColumnHandle> effectiveFilter = applyDynamicFilter(paimonTableHandle.getFilter(), dynamicFilter);
+        if (effectiveFilter.isNone()) {
+            return new EmptyPageSource();
+        }
+
         Table table = paimonTableHandle.tableWithDynamicOptions(paimonCatalog, session);
         return runWithContextClassLoader(() -> {
             Optional<PaimonColumnHandle> rowId = columns.stream().map(PaimonColumnHandle.class::cast)
@@ -152,25 +157,30 @@ public class PaimonPageSourceProvider
                         fieldToIndex.put(paimonColumnHandle.getColumnName(), i);
                     }
                 }
-                return PaimonMergePageSourceWrapper.wrap(createPageSource(session, table, paimonTableHandle.getFilter(),
-                        (PaimonSplit) split, dataColumns, paimonTableHandle.getLimit()), fieldToIndex);
+                return PaimonMergePageSourceWrapper.wrap(createPageSource(session, table, effectiveFilter,
+                        paimonTableHandle.getLikeFilters(), (PaimonSplit) split, dataColumns,
+                        paimonTableHandle.getLimit()), fieldToIndex);
             }
             else {
-                return createPageSource(session, table, paimonTableHandle.getFilter(), (PaimonSplit) split, columns,
-                        paimonTableHandle.getLimit());
+                return createPageSource(session, table, effectiveFilter, paimonTableHandle.getLikeFilters(),
+                        (PaimonSplit) split, columns, paimonTableHandle.getLimit());
             }
         }, PaimonPageSourceProvider.class.getClassLoader());
     }
 
     private ConnectorPageSource createPageSource(ConnectorSession session, Table table,
-            TupleDomain<PaimonColumnHandle> filter, PaimonSplit split, List<ColumnHandle> columns, OptionalLong limit)
+            TupleDomain<PaimonColumnHandle> filter, List<PaimonLikeFilter> likeFilters, PaimonSplit split,
+            List<ColumnHandle> columns, OptionalLong limit)
     {
         RowType rowType = table.rowType();
         List<String> fieldNames = rowType.getFieldNames();
         List<String> projectedFields = columns.stream().map(PaimonColumnHandle.class::cast)
                 .map(PaimonColumnHandle::getColumnName).toList();
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
-        Optional<Predicate> paimonFilter = new PaimonFilterConverter(rowType).convert(filter);
+        PaimonFilterConverter filterConverter = new PaimonFilterConverter(rowType);
+        Optional<Predicate> tuplePredicate = filterConverter.convert(filter);
+        Optional<Predicate> likePredicate = filterConverter.convertLikeFilters(likeFilters);
+        Optional<Predicate> paimonFilter = PaimonFilterConverter.combinePredicates(tuplePredicate, likePredicate);
 
         try {
             Split paimonSplit = split.decodeSplit();
@@ -348,6 +358,20 @@ public class PaimonPageSourceProvider
                 .forEach((k, v) -> domainMap.put(k.getColumnName(), v)));
 
         return projectedFields.stream().map(name -> domainMap.getOrDefault(name, null)).collect(Collectors.toList());
+    }
+
+    private TupleDomain<PaimonColumnHandle> applyDynamicFilter(
+            TupleDomain<PaimonColumnHandle> filter,
+            DynamicFilter dynamicFilter)
+    {
+        TupleDomain<ColumnHandle> dynamicPredicate = dynamicFilter.getCurrentPredicate();
+        if (dynamicPredicate.isAll()) {
+            return filter;
+        }
+        if (dynamicPredicate.isNone()) {
+            return TupleDomain.none();
+        }
+        return filter.intersect(dynamicPredicate.transformKeys(PaimonColumnHandle.class::cast));
     }
 
     private boolean checkRawFile(Optional<List<RawFile>> optionalRawFiles)

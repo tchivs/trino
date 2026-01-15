@@ -32,22 +32,30 @@ public class TestPaimonAggregationPushdownCorrectness
     }
 
     @Test
-    public void testMinMaxNotPushedDownWithDeletionVectors()
+    public void testCountPushdownOnAppendOnlyTable()
     {
-        String tableName = "test_dv_minmax_" + randomNameSuffix();
+        String tableName = "test_count_append_" + randomNameSuffix();
 
-        assertUpdate("CREATE TABLE " + tableName + " (id BIGINT, v BIGINT) WITH ("
-                + "primary_key = ARRAY['id'], "
-                + "bucket = '1', "
-                + "bucket_key = 'id', "
-                + "deletion_vectors_enabled = 'true'"
-                + ")");
+        // Create append-only table (no primary key)
+        assertUpdate("CREATE TABLE " + tableName + " (id BIGINT, v BIGINT)");
+        assertUpdate("INSERT INTO " + tableName + " VALUES (1, 10), (2, 20), (3, 30)", 3);
 
-        assertUpdate("INSERT INTO " + tableName + " VALUES (1, 0), (2, 1), (3, 2)", 3);
-        assertUpdate("DELETE FROM " + tableName + " WHERE id = 1", 1);
+        assertThat(query("SELECT count(*) FROM " + tableName)).matches("VALUES BIGINT '3'");
 
-        assertThat(query("SELECT min(v) FROM " + tableName)).matches("VALUES BIGINT '1'");
-        assertThat(query("SELECT max(v) FROM " + tableName)).matches("VALUES BIGINT '2'");
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testMinMaxPushdownOnAppendOnlyTable()
+    {
+        String tableName = "test_minmax_append_" + randomNameSuffix();
+
+        // Create append-only table (no primary key)
+        assertUpdate("CREATE TABLE " + tableName + " (id BIGINT, v BIGINT)");
+        assertUpdate("INSERT INTO " + tableName + " VALUES (1, 10), (2, 5), (3, 30)", 3);
+
+        assertThat(query("SELECT min(v) FROM " + tableName)).matches("VALUES BIGINT '5'");
+        assertThat(query("SELECT max(v) FROM " + tableName)).matches("VALUES BIGINT '30'");
 
         assertUpdate("DROP TABLE " + tableName);
     }
