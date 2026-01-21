@@ -104,6 +104,13 @@ public class PaimonFilterExtractor
         if (!likeDomains.isEmpty()) {
             newFilter = newFilter.intersect(TupleDomain.withColumnDomains(likeDomains));
         }
+        // Infer partition filters from timestamp predicates (e.g., jjsj >= '2025-10-01' => dt IN ('2025-10', '2025-11'))
+        newFilter = inferDerivedPartitionFilters(
+                newFilter,
+                rowType,
+                table.partitionKeys(),
+                table.options().get(DERIVED_PARTITION_COLUMNS_OPTION));
+
         newFilter = removeRedundantDerivedPartitionFilters(
                 newFilter,
                 table.partitionKeys(),
@@ -507,6 +514,253 @@ public class PaimonFilterExtractor
         existing.forEach(filter -> merged.put(filter, Boolean.TRUE));
         incoming.forEach(filter -> merged.put(filter, Boolean.TRUE));
         return List.copyOf(merged.keySet());
+    }
+
+    /**
+     * Infer partition filters from timestamp predicates based on derived partition column configuration.
+     * For example, if dt=jjsj:yyyy-MM and query has jjsj >= '2025-10-01' AND jjsj < '2025-12-01',
+     * this method will infer dt IN ('2025-10', '2025-11').
+     */
+    @VisibleForTesting
+    static TupleDomain<PaimonColumnHandle> inferDerivedPartitionFilters(
+            TupleDomain<PaimonColumnHandle> filter,
+            RowType rowType,
+            List<String> partitionKeys,
+            String derivedPartitionColumns)
+    {
+        if (filter.isAll() || filter.isNone() || StringUtils.isNullOrWhitespaceOnly(derivedPartitionColumns)) {
+            return filter;
+        }
+        Optional<Map<PaimonColumnHandle, Domain>> domains = filter.getDomains();
+        if (domains.isEmpty()) {
+            return filter;
+        }
+        List<DerivedPartitionColumn> mappings = parseDerivedPartitionColumns(derivedPartitionColumns);
+        if (mappings.isEmpty()) {
+            return filter;
+        }
+
+        Set<String> normalizedPartitionKeys = partitionKeys.stream()
+                .map(FieldNameUtils::toLowerCase)
+                .collect(java.util.stream.Collectors.toSet());
+
+        Map<PaimonColumnHandle, Domain> updated = new LinkedHashMap<>(domains.get());
+        boolean changed = false;
+
+        for (DerivedPartitionColumn mapping : mappings) {
+            if (!normalizedPartitionKeys.contains(mapping.partitionColumn())) {
+                continue;
+            }
+            // Skip if partition filter already exists
+            Optional<PaimonColumnHandle> existingPartitionHandle = findHandle(updated, mapping.partitionColumn());
+            if (existingPartitionHandle.isPresent()) {
+                continue;
+            }
+            // Find source column handle
+            Optional<PaimonColumnHandle> sourceHandle = findHandle(updated, mapping.sourceColumn());
+            if (sourceHandle.isEmpty()) {
+                continue;
+            }
+            Domain sourceDomain = updated.get(sourceHandle.get());
+            Optional<Domain> inferredPartitionDomain = inferPartitionDomainFromTimestamp(
+                    sourceDomain, mapping.pattern(), rowType, mapping.partitionColumn());
+            if (inferredPartitionDomain.isPresent()) {
+                PaimonColumnHandle partitionHandle = createPartitionColumnHandle(rowType, mapping.partitionColumn());
+                if (partitionHandle != null) {
+                    updated.put(partitionHandle, inferredPartitionDomain.get());
+                    changed = true;
+                }
+            }
+        }
+
+        if (!changed) {
+            return filter;
+        }
+        return TupleDomain.withColumnDomains(updated);
+    }
+
+    private static PaimonColumnHandle createPartitionColumnHandle(RowType rowType, String columnName)
+    {
+        List<String> fieldNames = FieldNameUtils.fieldNames(rowType);
+        List<String> originFieldNames = rowType.getFieldNames();
+        int index = fieldNames.indexOf(columnName);
+        if (index < 0) {
+            return null;
+        }
+        return PaimonColumnHandle.of(originFieldNames.get(index), rowType.getTypeAt(index));
+    }
+
+    private static Optional<Domain> inferPartitionDomainFromTimestamp(
+            Domain sourceDomain,
+            String pattern,
+            RowType rowType,
+            String partitionColumn)
+    {
+        Type sourceType = sourceDomain.getType();
+        if (!(sourceType instanceof TimestampType timestampType)) {
+            return Optional.empty();
+        }
+
+        // Extract all ranges from the source domain
+        if (sourceDomain.getValues().isAll() || sourceDomain.getValues().isNone()) {
+            return Optional.empty();
+        }
+
+        List<Range> ranges = sourceDomain.getValues().getRanges().getOrderedRanges();
+        if (ranges.isEmpty()) {
+            return Optional.empty();
+        }
+
+        // Collect all partition values from all ranges
+        List<String> allPartitionValues = new ArrayList<>();
+        for (Range range : ranges) {
+            List<String> partitionValues = computePartitionValuesFromRange(range, timestampType, pattern);
+            allPartitionValues.addAll(partitionValues);
+        }
+
+        if (allPartitionValues.isEmpty()) {
+            return Optional.empty();
+        }
+
+        // Remove duplicates and create domain
+        List<String> uniqueValues = allPartitionValues.stream().distinct().toList();
+
+        // Find partition column type
+        Type partitionType = findPartitionType(rowType, partitionColumn);
+        if (partitionType == null) {
+            partitionType = VarcharType.VARCHAR;
+        }
+
+        List<Range> partitionRanges = new ArrayList<>();
+        for (String value : uniqueValues) {
+            partitionRanges.add(Range.equal(partitionType, Slices.utf8Slice(value)));
+        }
+
+        return Optional.of(Domain.create(SortedRangeSet.copyOf(partitionType, partitionRanges), false));
+    }
+
+    private static Type findPartitionType(RowType rowType, String columnName)
+    {
+        List<String> fieldNames = FieldNameUtils.fieldNames(rowType);
+        int index = fieldNames.indexOf(columnName);
+        if (index < 0) {
+            return null;
+        }
+        return PaimonTypeUtils.fromPaimonType(rowType.getTypeAt(index));
+    }
+
+    private static List<String> computePartitionValuesFromRange(Range range, TimestampType timestampType, String pattern)
+    {
+        List<String> values = new ArrayList<>();
+
+        OptionalLong lowMicros = OptionalLong.empty();
+        OptionalLong highMicros = OptionalLong.empty();
+
+        if (!range.isLowUnbounded()) {
+            lowMicros = toEpochMicros(timestampType, range.getLowBoundedValue());
+        }
+        if (!range.isHighUnbounded()) {
+            highMicros = toEpochMicros(timestampType, range.getHighBoundedValue());
+        }
+
+        // If both bounds are unbounded, we can't infer partition values
+        if (lowMicros.isEmpty() && highMicros.isEmpty()) {
+            return values;
+        }
+
+        // Convert micros to LocalDateTime
+        LocalDateTime lowDateTime = lowMicros.isPresent()
+                ? LocalDateTime.ofEpochSecond(lowMicros.getAsLong() / MICROSECONDS_PER_SECOND,
+                        (int) ((lowMicros.getAsLong() % MICROSECONDS_PER_SECOND) * 1000),
+                        ZoneOffset.UTC)
+                : null;
+        LocalDateTime highDateTime = highMicros.isPresent()
+                ? LocalDateTime.ofEpochSecond(highMicros.getAsLong() / MICROSECONDS_PER_SECOND,
+                        (int) ((highMicros.getAsLong() % MICROSECONDS_PER_SECOND) * 1000),
+                        ZoneOffset.UTC)
+                : null;
+
+        // Adjust for exclusive bounds
+        if (lowDateTime != null && !range.isLowInclusive()) {
+            lowDateTime = lowDateTime.plusNanos(1);
+        }
+        if (highDateTime != null && range.isHighInclusive()) {
+            highDateTime = highDateTime.plusNanos(1);
+        }
+
+        // Generate partition values based on pattern
+        if ("yyyy-MM".equals(pattern)) {
+            values.addAll(generateYearMonthValues(lowDateTime, highDateTime));
+        }
+        else if ("yyyy-MM-dd".equals(pattern)) {
+            values.addAll(generateDateValues(lowDateTime, highDateTime));
+        }
+
+        return values;
+    }
+
+    private static List<String> generateYearMonthValues(LocalDateTime lowDateTime, LocalDateTime highDateTime)
+    {
+        List<String> values = new ArrayList<>();
+
+        // Default bounds if one side is unbounded (limit to reasonable range)
+        if (lowDateTime == null) {
+            lowDateTime = highDateTime.minusYears(1);
+        }
+        if (highDateTime == null) {
+            highDateTime = lowDateTime.plusYears(1);
+        }
+
+        YearMonth start = YearMonth.from(lowDateTime);
+        // For exclusive upper bound, if highDateTime is exactly at month start, exclude that month
+        YearMonth end = YearMonth.from(highDateTime);
+        if (highDateTime.getDayOfMonth() == 1 && highDateTime.getHour() == 0
+                && highDateTime.getMinute() == 0 && highDateTime.getSecond() == 0
+                && highDateTime.getNano() == 0) {
+            end = end.minusMonths(1);
+        }
+
+        // Limit to prevent excessive partition values (max 24 months)
+        int maxMonths = 24;
+        int count = 0;
+
+        YearMonth current = start;
+        while (!current.isAfter(end) && count < maxMonths) {
+            values.add(current.format(YEAR_MONTH_FORMATTER));
+            current = current.plusMonths(1);
+            count++;
+        }
+
+        return values;
+    }
+
+    private static List<String> generateDateValues(LocalDateTime lowDateTime, LocalDateTime highDateTime)
+    {
+        List<String> values = new ArrayList<>();
+
+        // Default bounds if one side is unbounded (limit to reasonable range)
+        if (lowDateTime == null) {
+            lowDateTime = highDateTime.minusDays(30);
+        }
+        if (highDateTime == null) {
+            highDateTime = lowDateTime.plusDays(30);
+        }
+
+        LocalDate start = lowDateTime.toLocalDate();
+        LocalDate end = highDateTime.toLocalDate();
+
+        // Limit to prevent excessive partition values (max 366 days)
+        int maxDays = 366;
+        int count = 0;
+
+        LocalDate current = start;
+        while (!current.isAfter(end) && count < maxDays) {
+            values.add(current.format(DATE_FORMATTER));
+            current = current.plusDays(1);
+            count++;
+        }
+
+        return values;
     }
 
     static TupleDomain<PaimonColumnHandle> removeRedundantDerivedPartitionFilters(

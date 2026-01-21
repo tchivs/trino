@@ -331,6 +331,96 @@ public class TestPaimonFilterExtractor
         assertThat(PaimonFilterExtractor.computeRemainingExpression(constraint, TupleDomain.none())).isEqualTo(TRUE);
     }
 
+    @Test
+    public void testInferDerivedPartitionFiltersSingleMonth()
+    {
+        RowType rowType = new RowType(List.of(
+                new DataField(0, "dt", DataTypes.STRING()),
+                new DataField(1, "jjsj", DataTypes.TIMESTAMP(6))));
+
+        PaimonColumnHandle jjsj = PaimonColumnHandle.of("jjsj", DataTypes.TIMESTAMP(6));
+
+        // Query: jjsj >= '2025-10-01' AND jjsj < '2025-11-01' (single month)
+        Domain jjsjDomain = Domain.create(ValueSet.ofRanges(Range.range(
+                TimestampType.TIMESTAMP_MICROS,
+                toEpochMicros(LocalDateTime.of(2025, 10, 1, 0, 0)),
+                true,
+                toEpochMicros(LocalDateTime.of(2025, 11, 1, 0, 0)),
+                false)), false);
+
+        TupleDomain<PaimonColumnHandle> filter = TupleDomain.withColumnDomains(Map.of(jjsj, jjsjDomain));
+        TupleDomain<PaimonColumnHandle> inferred = PaimonFilterExtractor.inferDerivedPartitionFilters(
+                filter, rowType, List.of("dt"), "dt=jjsj:yyyy-MM");
+
+        assertThat(inferred.getDomains()).isPresent();
+        assertThat(inferred.getDomains().get()).hasSize(2);
+
+        // Should infer dt = '2025-10'
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        assertThat(inferred.getDomains().get()).containsKey(dt);
+        Domain dtDomain = inferred.getDomains().get().get(dt);
+        assertThat(dtDomain.isSingleValue()).isTrue();
+        assertThat(((io.airlift.slice.Slice) dtDomain.getSingleValue()).toStringUtf8()).isEqualTo("2025-10");
+    }
+
+    @Test
+    public void testInferDerivedPartitionFiltersMultipleMonths()
+    {
+        RowType rowType = new RowType(List.of(
+                new DataField(0, "dt", DataTypes.STRING()),
+                new DataField(1, "jjsj", DataTypes.TIMESTAMP(6))));
+
+        PaimonColumnHandle jjsj = PaimonColumnHandle.of("jjsj", DataTypes.TIMESTAMP(6));
+
+        // Query: jjsj >= '2025-10-01' AND jjsj < '2025-12-01' (two months)
+        Domain jjsjDomain = Domain.create(ValueSet.ofRanges(Range.range(
+                TimestampType.TIMESTAMP_MICROS,
+                toEpochMicros(LocalDateTime.of(2025, 10, 1, 0, 0)),
+                true,
+                toEpochMicros(LocalDateTime.of(2025, 12, 1, 0, 0)),
+                false)), false);
+
+        TupleDomain<PaimonColumnHandle> filter = TupleDomain.withColumnDomains(Map.of(jjsj, jjsjDomain));
+        TupleDomain<PaimonColumnHandle> inferred = PaimonFilterExtractor.inferDerivedPartitionFilters(
+                filter, rowType, List.of("dt"), "dt=jjsj:yyyy-MM");
+
+        assertThat(inferred.getDomains()).isPresent();
+        assertThat(inferred.getDomains().get()).hasSize(2);
+
+        // Should infer dt IN ('2025-10', '2025-11')
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        assertThat(inferred.getDomains().get()).containsKey(dt);
+        Domain dtDomain = inferred.getDomains().get().get(dt);
+        assertThat(dtDomain.getValues().getRanges().getRangeCount()).isEqualTo(2);
+    }
+
+    @Test
+    public void testInferDerivedPartitionFiltersSkipsWhenPartitionExists()
+    {
+        RowType rowType = new RowType(List.of(
+                new DataField(0, "dt", DataTypes.STRING()),
+                new DataField(1, "jjsj", DataTypes.TIMESTAMP(6))));
+
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        PaimonColumnHandle jjsj = PaimonColumnHandle.of("jjsj", DataTypes.TIMESTAMP(6));
+
+        Domain dtDomain = Domain.singleValue(VARCHAR, Slices.utf8Slice("2025-10"));
+        Domain jjsjDomain = Domain.create(ValueSet.ofRanges(Range.range(
+                TimestampType.TIMESTAMP_MICROS,
+                toEpochMicros(LocalDateTime.of(2025, 10, 1, 0, 0)),
+                true,
+                toEpochMicros(LocalDateTime.of(2025, 12, 1, 0, 0)),
+                false)), false);
+
+        // Filter already has dt = '2025-10', should not override
+        TupleDomain<PaimonColumnHandle> filter = TupleDomain.withColumnDomains(Map.of(dt, dtDomain, jjsj, jjsjDomain));
+        TupleDomain<PaimonColumnHandle> inferred = PaimonFilterExtractor.inferDerivedPartitionFilters(
+                filter, rowType, List.of("dt"), "dt=jjsj:yyyy-MM");
+
+        // Should remain unchanged
+        assertThat(inferred).isEqualTo(filter);
+    }
+
     private static ColumnHandle mockColumnHandle()
     {
         // assignments are only required to satisfy Constraint construction for these tests
