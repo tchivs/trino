@@ -51,7 +51,7 @@ public class PaimonSessionProperties
                         InsertExistingPartitionsBehavior::toString))
                 .add(durationProperty(DYNAMIC_FILTERING_WAIT_TIMEOUT,
                         "Duration to wait for completion of dynamic filters during split generation",
-                        new Duration(0, TimeUnit.SECONDS), false))
+                        new Duration(1, TimeUnit.SECONDS), false))
                 .build();
     }
 

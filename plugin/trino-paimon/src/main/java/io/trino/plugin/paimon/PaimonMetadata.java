@@ -1000,16 +1000,15 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
         }
 
+        // Only reject LIMIT pushdown if there are unsupported domains that Paimon cannot handle
+        // Non-partition key filters are acceptable - Paimon can still apply LIMIT after filtering
         if (!tableHandle.getFilter().isAll()) {
             Table paimonTable = tableHandle.table(catalog);
             HashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
             HashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
             new PaimonFilterConverter(paimonTable.rowType()).convert(tableHandle.getFilter(), acceptedDomains,
                     unsupportedDomains);
-            Set<String> acceptedFields = acceptedDomains.keySet().stream().map(PaimonColumnHandle::getColumnName)
-                    .collect(Collectors.toSet());
-            if (!unsupportedDomains.isEmpty()
-                    || !new HashSet<>(paimonTable.partitionKeys()).containsAll(acceptedFields)) {
+            if (!unsupportedDomains.isEmpty()) {
                 return Optional.empty();
             }
         }
