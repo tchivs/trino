@@ -25,10 +25,12 @@ import io.trino.spi.type.Int128;
 import io.trino.spi.type.TypeUtils;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.Blob;
 import org.apache.paimon.data.Decimal;
 import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.data.InternalVector;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.GenericVariantBuilder;
 import org.apache.paimon.data.variant.Variant;
@@ -200,6 +202,15 @@ public class PaimonRow
     }
 
     @Override
+    public Blob getBlob(int i)
+    {
+        if (isNullAt(i)) {
+            return null;
+        }
+        return Blob.fromData(getBinary(i));
+    }
+
+    @Override
     public InternalArray getArray(int i)
     {
         if (isNullAt(i)) {
@@ -207,6 +218,12 @@ public class PaimonRow
         }
         ArrayBlock arrayBlock = (ArrayBlock) singlePage.getBlock(i).getSingleValueBlock(0);
         return new TrinoArray(arrayBlock);
+    }
+
+    @Override
+    public InternalVector getVector(int i)
+    {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -343,6 +360,15 @@ public class PaimonRow
         }
 
         @Override
+        public Blob getBlob(int pos)
+        {
+            if (isNullAt(pos)) {
+                return null;
+            }
+            return Blob.fromData(getBinary(pos));
+        }
+
+        @Override
         public InternalArray getArray(int pos)
         {
             if (isNullAt(pos)) {
@@ -350,6 +376,12 @@ public class PaimonRow
             }
             ArrayBlock nestedBlock = (ArrayBlock) block.getSingleValueBlock(getPosition(pos));
             return new TrinoArray(nestedBlock);
+        }
+
+        @Override
+        public InternalVector getVector(int pos)
+        {
+            throw new UnsupportedOperationException();
         }
 
         @Override
@@ -649,6 +681,15 @@ public class PaimonRow
         }
 
         @Override
+        public Blob getBlob(int pos)
+        {
+            if (isNullAt(pos)) {
+                return null;
+            }
+            return Blob.fromData(getBinary(pos));
+        }
+
+        @Override
         public InternalArray getArray(int pos)
         {
             if (isNullAt(pos)) {
@@ -657,6 +698,12 @@ public class PaimonRow
             Block fieldBlock = rowBlock.getFieldBlock(pos);
             ArrayBlock arrayBlock = (ArrayBlock) fieldBlock.getSingleValueBlock(position);
             return new TrinoArray(arrayBlock);
+        }
+
+        @Override
+        public InternalVector getVector(int pos)
+        {
+            throw new UnsupportedOperationException();
         }
 
         @Override

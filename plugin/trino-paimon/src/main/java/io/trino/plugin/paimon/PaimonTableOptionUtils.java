@@ -23,6 +23,7 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -89,9 +90,6 @@ public class PaimonTableOptionUtils
             case "StartupMode" :
             case "MergeEngine" :
             case "ChangelogProducer" :
-            case "LogConsistency" :
-            case "LogChangelogMode" :
-            case "StreamingReadMode" :
                 return true;
             default :
                 return false;
@@ -107,12 +105,6 @@ public class PaimonTableOptionUtils
                 return CoreOptions.ChangelogProducer.class;
             case "StartupMode" :
                 return CoreOptions.StartupMode.class;
-            case "LogConsistency" :
-                return CoreOptions.LogConsistency.class;
-            case "LogChangelogMode" :
-                return CoreOptions.LogChangelogMode.class;
-            case "StreamingReadMode" :
-                return CoreOptions.StreamingReadMode.class;
             default :
                 return null;
         }
@@ -122,7 +114,7 @@ public class PaimonTableOptionUtils
     {
         String regex = "[.\\-]";
         Pattern pattern = Pattern.compile(regex);
-        Matcher matcher = pattern.matcher(key);
+        Matcher matcher = pattern.matcher(key.toLowerCase(Locale.ENGLISH));
         return matcher.replaceAll("_");
     }
 

@@ -28,22 +28,25 @@ import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
+import org.apache.paimon.catalog.TableQueryAuthResult;
 import org.apache.paimon.function.Function;
 import org.apache.paimon.function.FunctionChange;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.partition.Partition;
 import org.apache.paimon.partition.PartitionStatistics;
+import org.apache.paimon.rest.responses.GetTagResponse;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
-import org.apache.paimon.security.SecurityContext;
 import org.apache.paimon.table.Instant;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableSnapshot;
+import org.apache.paimon.utils.SnapshotNotExistException;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.apache.paimon.options.CatalogOptions.RESOLVING_FILE_IO_ENABLED;
 import static org.apache.paimon.utils.HadoopUtils.HADOOP_LOAD_DEFAULT_CONFIG;
 
 public class PaimonCatalog
@@ -72,19 +75,10 @@ public class PaimonCatalog
                     current = ClassLoaderUtils.runWithContextClassLoader(() -> {
                         TrinoFileSystem trinoFileSystem = paimonFileSystemFactory.create(connectorSession);
                         Options catalogOptions = Options.fromMap(options.toMap());
-                        // Disable loading default Hadoop configuration to minimize dependencies
-                        // We use TrinoFileIOLoader which bypasses Hadoop FileSystem entirely
-                        // catalogOptions.set("hadoop-load-default-config", "false");
-                        CatalogContext catalogContext = CatalogContext.create(catalogOptions,
-                                new PaimonFileIOLoader(trinoFileSystem));
-                        if (catalogOptions.getBoolean(HADOOP_LOAD_DEFAULT_CONFIG.key(), false)) {
-                            try {
-                                SecurityContext.install(catalogContext);
-                            }
-                            catch (Exception e) {
-                                throw new RuntimeException(e);
-                            }
-                        }
+                        catalogOptions.set(HADOOP_LOAD_DEFAULT_CONFIG, false);
+                        catalogOptions.set(RESOLVING_FILE_IO_ENABLED, false);
+                        CatalogContext catalogContext = CatalogContext.createWithoutHadoop(catalogOptions,
+                                new PaimonFileIOLoader(trinoFileSystem), null);
                         return CatalogFactory.createCatalog(catalogContext);
                     }, this.getClass().getClassLoader());
                     inited = true;
@@ -164,6 +158,13 @@ public class PaimonCatalog
     }
 
     @Override
+    public Table getTableById(String tableId)
+            throws TableIdNotExistException
+    {
+        return current.getTableById(tableId);
+    }
+
+    @Override
     public List<String> listTables(String databaseName)
             throws DatabaseNotExistException
     {
@@ -171,19 +172,26 @@ public class PaimonCatalog
     }
 
     @Override
-    public PagedList<String> listTablesPaged(String databaseName, Integer maxResults, String pageToken,
-            String tableNamePattern)
+    public PagedList<String> listTablesPaged(String databaseName, @Nullable Integer maxResults,
+            @Nullable String pageToken, @Nullable String tableNamePattern, @Nullable String tableType)
             throws DatabaseNotExistException
     {
-        return current.listTablesPaged(databaseName, maxResults, pageToken, tableNamePattern);
+        return current.listTablesPaged(databaseName, maxResults, pageToken, tableNamePattern, tableType);
     }
 
     @Override
     public PagedList<Table> listTableDetailsPaged(String databaseName, @Nullable Integer maxResults,
-            @Nullable String pageToken, @Nullable String tableNamePattern)
+            @Nullable String pageToken, @Nullable String tableNamePattern, @Nullable String tableType)
             throws DatabaseNotExistException
     {
-        return current.listTableDetailsPaged(databaseName, maxResults, pageToken, tableNamePattern);
+        return current.listTableDetailsPaged(databaseName, maxResults, pageToken, tableNamePattern, tableType);
+    }
+
+    @Override
+    public List<Table> listTableDetails(String databaseName)
+            throws DatabaseNotExistException
+    {
+        return current.listTableDetails(databaseName);
     }
 
     @Override
@@ -240,6 +248,18 @@ public class PaimonCatalog
     }
 
     @Override
+    public boolean supportsListByPattern()
+    {
+        return current.supportsListByPattern();
+    }
+
+    @Override
+    public boolean supportsListTableByType()
+    {
+        return current.supportsListTableByType();
+    }
+
+    @Override
     public boolean supportsVersionManagement()
     {
         return current.supportsVersionManagement();
@@ -283,6 +303,13 @@ public class PaimonCatalog
     }
 
     @Override
+    public void rollbackTo(Identifier identifier, Instant instant, @Nullable Long fromSnapshot)
+            throws TableNotExistException
+    {
+        current.rollbackTo(identifier, instant, fromSnapshot);
+    }
+
+    @Override
     public void createBranch(Identifier identifier, String branch, @Nullable String fromTag)
             throws TableNotExistException,
             BranchAlreadyExistException,
@@ -299,6 +326,14 @@ public class PaimonCatalog
     }
 
     @Override
+    public void renameBranch(Identifier identifier, String fromBranch, String toBranch)
+            throws BranchNotExistException,
+            BranchAlreadyExistException
+    {
+        current.renameBranch(identifier, fromBranch, toBranch);
+    }
+
+    @Override
     public void fastForward(Identifier identifier, String branch)
             throws BranchNotExistException
     {
@@ -310,6 +345,46 @@ public class PaimonCatalog
             throws TableNotExistException
     {
         return current.listBranches(identifier);
+    }
+
+    @Override
+    public GetTagResponse getTag(Identifier identifier, String tagName)
+            throws TableNotExistException,
+            TagNotExistException
+    {
+        return current.getTag(identifier, tagName);
+    }
+
+    @Override
+    public void createTag(Identifier identifier, String tagName, @Nullable Long snapshotId,
+            @Nullable String timeRetained, boolean ignoreIfExists)
+            throws TableNotExistException,
+            SnapshotNotExistException,
+            TagAlreadyExistException
+    {
+        current.createTag(identifier, tagName, snapshotId, timeRetained, ignoreIfExists);
+    }
+
+    @Override
+    public PagedList<String> listTagsPaged(Identifier identifier, @Nullable Integer maxResults,
+            @Nullable String pageToken, @Nullable String tagNamePrefix)
+            throws TableNotExistException
+    {
+        return current.listTagsPaged(identifier, maxResults, pageToken, tagNamePrefix);
+    }
+
+    @Override
+    public void deleteTag(Identifier identifier, String tagName)
+            throws TableNotExistException,
+            TagNotExistException
+    {
+        current.deleteTag(identifier, tagName);
+    }
+
+    @Override
+    public boolean supportsPartitionModification()
+    {
+        return current.supportsPartitionModification();
     }
 
     @Override
@@ -372,7 +447,7 @@ public class PaimonCatalog
     }
 
     @Override
-    public List<String> authTableQuery(Identifier identifier, @Nullable List<String> select)
+    public TableQueryAuthResult authTableQuery(Identifier identifier, @Nullable List<String> select)
             throws TableNotExistException
     {
         return current.authTableQuery(identifier, select);

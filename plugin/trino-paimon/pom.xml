@@ -15,7 +15,7 @@
 
     <properties>
         <air.main.basedir>${project.parent.basedir}</air.main.basedir>
-        <dep.paimon.version>1.2-SNAPSHOT</dep.paimon.version>
+        <dep.paimon.version>1.5-SNAPSHOT</dep.paimon.version>
     </properties>
     <dependencies>
 
@@ -123,6 +123,10 @@
                 <exclusion>
                     <groupId>org.slf4j</groupId>
                     <artifactId>slf4j-api</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.xerial.snappy</groupId>
+                    <artifactId>snappy-java</artifactId>
                 </exclusion>
             </exclusions>
         </dependency>
@@ -236,6 +240,12 @@
             <groupId>io.trino.hadoop</groupId>
             <artifactId>hadoop-apache</artifactId>
             <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.lz4</groupId>
+                    <artifactId>lz4-java</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>io.trino.tpch</groupId>

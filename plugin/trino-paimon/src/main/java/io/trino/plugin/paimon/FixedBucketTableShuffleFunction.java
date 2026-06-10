@@ -16,15 +16,14 @@ package io.trino.plugin.paimon;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.RowBlock;
-import io.trino.spi.connector.BucketFunction;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.bucket.BucketFunction;
 import org.apache.paimon.codegen.CodeGenUtils;
 import org.apache.paimon.codegen.Projection;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.schema.TableSchema;
-import org.apache.paimon.table.sink.KeyAndBucketExtractor;
 import org.apache.paimon.types.RowKind;
 
 import java.lang.reflect.InvocationTargetException;
@@ -33,19 +32,21 @@ import java.util.List;
 
 public class FixedBucketTableShuffleFunction
         implements
-        BucketFunction
+        io.trino.spi.connector.BucketFunction
 {
     private final int workerCount;
     private final int bucketCount;
     private final boolean isRowId;
     private final ThreadLocal<Projection> projectionContext;
+    private final BucketFunction bucketFunction;
 
     public FixedBucketTableShuffleFunction(List<Type> partitionChannelTypes, PaimonPartitioningHandle partitioningHandle,
             int workerCount)
     {
         TableSchema schema = partitioningHandle.getOriginalSchema();
         this.projectionContext = ThreadLocal
-                .withInitial(() -> CodeGenUtils.newProjection(schema.logicalPrimaryKeysType(), schema.primaryKeys()));
+                .withInitial(() -> CodeGenUtils.newProjection(schema.logicalRowType(), schema.projection(schema.bucketKeys())));
+        this.bucketFunction = BucketFunction.create(new CoreOptions(schema.options()), schema.logicalBucketKeyType());
         this.bucketCount = new CoreOptions(schema.options()).bucket();
         this.workerCount = workerCount;
         this.isRowId = partitionChannelTypes.size() == 1 && partitionChannelTypes.get(0) instanceof RowType;
@@ -73,8 +74,8 @@ public class FixedBucketTableShuffleFunction
         }
 
         PaimonRow paimonRow = new PaimonRow(page.getSingleValuePage(position), RowKind.INSERT);
-        BinaryRow pk = projectionContext.get().apply(paimonRow);
-        int bucket = KeyAndBucketExtractor.bucket(KeyAndBucketExtractor.bucketKeyHashCode(pk), bucketCount);
+        BinaryRow bucketKey = projectionContext.get().apply(paimonRow);
+        int bucket = bucketFunction.bucket(bucketKey, bucketCount);
         return bucket % workerCount;
     }
 }

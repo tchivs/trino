@@ -32,7 +32,7 @@ public class PaimonFileIOLoader
     @Override
     public String getScheme()
     {
-        throw new UnsupportedOperationException();
+        return "trino";
     }
 
     @Override
