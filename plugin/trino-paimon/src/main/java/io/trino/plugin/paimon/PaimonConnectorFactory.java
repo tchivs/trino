@@ -67,6 +67,10 @@ public class PaimonConnectorFactory
     private static final String HADOOP_CONF_FILES_KEY = "hive.config.resources";
     // see org.apache.paimon.utils.HadoopUtils
     private static final String HADOOP_CONF_PREFIX = "hadoop.";
+    private static final String PAIMON_S3_ACCESS_KEY = "s3.access-key";
+    private static final String PAIMON_S3_SECRET_KEY = "s3.secret-key";
+    private static final String TRINO_S3_ACCESS_KEY = "s3.aws-access-key";
+    private static final String TRINO_S3_SECRET_KEY = "s3.aws-secret-key";
 
     private static void readHadoopXml(String path, Map<String, String> config)
             throws Exception
@@ -107,6 +111,7 @@ public class PaimonConnectorFactory
     public Connector create(String catalogName, Map<String, String> config, ConnectorContext context, Module module)
     {
         config = new HashMap<>(config);
+        addTrinoS3CredentialProperties(config);
         if (config.containsKey(HADOOP_CONF_FILES_KEY)) {
             for (String hadoopXml : config.get(HADOOP_CONF_FILES_KEY).split(",")) {
                 try {
@@ -156,6 +161,20 @@ public class PaimonConnectorFactory
                     new ClassLoaderSafeConnectorPageSinkProvider(paimonPageSinkProvider, classLoader),
                     paimonNodePartitioningProvider, paimonTableOptions, paimonSessionProperties, connectorTableFunctions,
                     functionProvider);
+        }
+    }
+
+    static void addTrinoS3CredentialProperties(Map<String, String> config)
+    {
+        copyIfAbsent(config, PAIMON_S3_ACCESS_KEY, TRINO_S3_ACCESS_KEY);
+        copyIfAbsent(config, PAIMON_S3_SECRET_KEY, TRINO_S3_SECRET_KEY);
+    }
+
+    private static void copyIfAbsent(Map<String, String> config, String sourceKey, String targetKey)
+    {
+        String value = config.get(sourceKey);
+        if (!StringUtils.isNullOrWhitespaceOnly(value)) {
+            config.putIfAbsent(targetKey, value);
         }
     }
 

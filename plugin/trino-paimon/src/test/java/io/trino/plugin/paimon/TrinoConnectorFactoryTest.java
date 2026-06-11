@@ -20,6 +20,7 @@ import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -36,5 +37,35 @@ public class TrinoConnectorFactoryTest
         ConnectorFactory factory = new PaimonConnectorFactory();
         Connector connector = factory.create("paimon", config, new TestingConnectorContext());
         assertThat(connector).isNotNull();
+    }
+
+    @Test
+    public void testPaimonS3CredentialsAreMappedToTrinoS3Credentials()
+    {
+        Map<String, String> config = new HashMap<>();
+        config.put("s3.access-key", "paimon-access");
+        config.put("s3.secret-key", "paimon-secret");
+
+        PaimonConnectorFactory.addTrinoS3CredentialProperties(config);
+
+        assertThat(config)
+                .containsEntry("s3.aws-access-key", "paimon-access")
+                .containsEntry("s3.aws-secret-key", "paimon-secret");
+    }
+
+    @Test
+    public void testExplicitTrinoS3CredentialsArePreserved()
+    {
+        Map<String, String> config = new HashMap<>();
+        config.put("s3.access-key", "paimon-access");
+        config.put("s3.secret-key", "paimon-secret");
+        config.put("s3.aws-access-key", "trino-access");
+        config.put("s3.aws-secret-key", "trino-secret");
+
+        PaimonConnectorFactory.addTrinoS3CredentialProperties(config);
+
+        assertThat(config)
+                .containsEntry("s3.aws-access-key", "trino-access")
+                .containsEntry("s3.aws-secret-key", "trino-secret");
     }
 }

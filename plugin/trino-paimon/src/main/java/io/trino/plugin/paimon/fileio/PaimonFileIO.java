@@ -38,6 +38,8 @@ public class PaimonFileIO
         implements
         FileIO
 {
+    private static final String DIRECTORY_MARKER_FILE_NAME = "_trino_paimon_directory_marker";
+
     private final TrinoFileSystem trinoFileSystem;
     private final boolean objectStore;
 
@@ -105,11 +107,12 @@ public class PaimonFileIO
     private FileStatus status(Path path)
             throws IOException
     {
-        if (trinoFileSystem.directoryExists(Location.of(path.toString())).orElse(false)) {
+        Location location = Location.of(path.toString());
+        if (isDirectory(location)) {
             return new PaimonDirectoryFileStatus(path);
         }
         else {
-            TrinoInputFile trinoInputFile = trinoFileSystem.newInputFile(Location.of(path.toString()));
+            TrinoInputFile trinoInputFile = trinoFileSystem.newInputFile(location);
             return new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().getEpochSecond());
         }
     }
@@ -120,12 +123,14 @@ public class PaimonFileIO
     {
         List<FileStatus> fileStatusList = new ArrayList<>();
         Location location = Location.of(path.toString());
-        if (trinoFileSystem.directoryExists(location).orElse(false)) {
+        if (isDirectory(location)) {
             FileIterator fileIterator = trinoFileSystem.listFiles(location);
             while (fileIterator.hasNext()) {
                 FileEntry fileEntry = fileIterator.next();
-                fileStatusList.add(new PaimonFileStatus(fileEntry.length(), new Path(fileEntry.location().toString()),
-                        fileEntry.lastModified().getEpochSecond()));
+                if (!isDirectoryMarker(fileEntry.location())) {
+                    fileStatusList.add(new PaimonFileStatus(fileEntry.length(), new Path(fileEntry.location().toString()),
+                            fileEntry.lastModified().getEpochSecond()));
+                }
             }
             trinoFileSystem.listDirectories(Location.of(path.toString()))
                     .forEach(l -> fileStatusList.add(new PaimonDirectoryFileStatus(new Path(l.toString()))));
@@ -145,8 +150,8 @@ public class PaimonFileIO
     public boolean exists(Path path)
             throws IOException
     {
-        return trinoFileSystem.directoryExists(Location.of(path.toString())).orElse(false)
-                || existFile(Location.of(path.toString()));
+        Location location = Location.of(path.toString());
+        return isDirectory(location) || existFile(location);
     }
 
     private boolean existFile(Location location)
@@ -165,9 +170,9 @@ public class PaimonFileIO
             throws IOException
     {
         Location location = Location.of(path.toString());
-        if (trinoFileSystem.directoryExists(location).orElse(false)) {
+        if (isDirectory(location)) {
             if (!recursive) {
-                if (trinoFileSystem.listFiles(location).hasNext()) {
+                if (hasNonMarkerFile(location)) {
                     throw new IOException("Directory " + location + " is not empty");
                 }
             }
@@ -186,7 +191,11 @@ public class PaimonFileIO
     public boolean mkdirs(Path path)
             throws IOException
     {
-        trinoFileSystem.createDirectory(Location.of(path.toString()));
+        Location location = Location.of(path.toString());
+        trinoFileSystem.createDirectory(location);
+        if (objectStore) {
+            trinoFileSystem.newOutputFile(directoryMarker(location)).createOrOverwrite(new byte[0]);
+        }
         return true;
     }
 
@@ -199,9 +208,50 @@ public class PaimonFileIO
         if (trinoFileSystem.directoryExists(sourceLocation).orElse(false)) {
             trinoFileSystem.renameDirectory(sourceLocation, targetLocation);
         }
+        else if (objectStore) {
+            copyFile(source, target, false);
+            trinoFileSystem.deleteFile(sourceLocation);
+        }
         else {
             trinoFileSystem.renameFile(sourceLocation, targetLocation);
         }
         return true;
+    }
+
+    private boolean isDirectory(Location location)
+            throws IOException
+    {
+        if (trinoFileSystem.directoryExists(location).orElse(false)) {
+            return true;
+        }
+        return objectStore && directoryMarkerExists(location);
+    }
+
+    private boolean directoryMarkerExists(Location location)
+            throws IOException
+    {
+        return trinoFileSystem.newInputFile(directoryMarker(location)).exists();
+    }
+
+    private boolean hasNonMarkerFile(Location location)
+            throws IOException
+    {
+        FileIterator fileIterator = trinoFileSystem.listFiles(location);
+        while (fileIterator.hasNext()) {
+            if (!isDirectoryMarker(fileIterator.next().location())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Location directoryMarker(Location location)
+    {
+        return location.appendPath(DIRECTORY_MARKER_FILE_NAME);
+    }
+
+    private static boolean isDirectoryMarker(Location location)
+    {
+        return location.fileName().equals(DIRECTORY_MARKER_FILE_NAME);
     }
 }

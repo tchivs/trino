@@ -242,6 +242,13 @@ public class PaimonCatalog
     }
 
     @Override
+    public List<Partition> listPartitionsByNames(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException
+    {
+        return current.listPartitionsByNames(identifier, partitions);
+    }
+
+    @Override
     public boolean supportsListObjectsPaged()
     {
         return current.supportsListObjectsPaged();
