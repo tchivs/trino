@@ -66,6 +66,9 @@ public class PaimonTypeTest
         Type varBinaryType = PaimonTypeUtils.fromPaimonType(DataTypes.VARBINARY(10));
         assertThat(requireNonNull(varBinaryType).getDisplayName()).isEqualTo("varbinary");
 
+        Type blobType = PaimonTypeUtils.fromPaimonType(DataTypes.BLOB());
+        assertThat(requireNonNull(blobType).getDisplayName()).isEqualTo("varbinary");
+
         assertThat(PaimonTypeUtils.fromPaimonType(DataTypes.DECIMAL(38, 0)).getDisplayName()).isEqualTo("decimal(38,0)");
 
         org.apache.paimon.types.DecimalType decimal = DataTypes.DECIMAL(2, 2);

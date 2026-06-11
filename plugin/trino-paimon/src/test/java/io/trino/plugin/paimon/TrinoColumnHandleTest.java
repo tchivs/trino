@@ -22,6 +22,7 @@ import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.Test;
 
+import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -50,6 +51,24 @@ public class TrinoColumnHandleTest
 
         assertThat(actual).isEqualTo(expected);
         assertThat(actual.getTrinoType()).isEqualTo(expected.getTrinoType());
+    }
+
+    @Test
+    public void testTrinoColumnHandlePreservesBlobTypeString()
+    {
+        PaimonColumnHandle expected = PaimonColumnHandle.of("blob_value", DataTypes.BLOB());
+
+        ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
+        objectMapperProvider
+                .setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
+        JsonCodec<PaimonColumnHandle> codec = new JsonCodecFactory(objectMapperProvider)
+                .jsonCodec(PaimonColumnHandle.class);
+
+        PaimonColumnHandle actual = codec.fromJson(codec.toJson(expected));
+
+        assertThat(actual).isEqualTo(expected);
+        assertThat(actual.getTypeString()).isEqualTo(expected.getTypeString());
+        assertThat(actual.getTrinoType()).isEqualTo(VARBINARY);
     }
 
     @Test

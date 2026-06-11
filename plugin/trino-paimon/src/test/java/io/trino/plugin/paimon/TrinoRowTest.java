@@ -108,6 +108,7 @@ public class TrinoRowTest
         assertThat(trinoRow.getTimestamp(12, 6))
                 .isEqualTo(Timestamp.fromLocalDateTime(LocalDateTime.parse("2007-12-03T10:15:30")));
         assertThat(trinoRow.getBinary(13)).isEqualTo("varbinary_v".getBytes(StandardCharsets.UTF_8));
+        assertThat(trinoRow.getBlob(13).toData()).isEqualTo("varbinary_v".getBytes(StandardCharsets.UTF_8));
     }
 
     @Test

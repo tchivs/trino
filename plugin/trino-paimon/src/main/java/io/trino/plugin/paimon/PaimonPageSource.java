@@ -40,6 +40,7 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.Blob;
 import org.apache.paimon.data.Decimal;
 import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
@@ -110,7 +111,12 @@ public class PaimonPageSource
             type.writeSlice(output, wrappedBuffer(((BinaryString) value).toBytes()));
         }
         else if (type instanceof VarbinaryType) {
-            type.writeSlice(output, wrappedBuffer((byte[]) value));
+            if (value instanceof Blob blob) {
+                type.writeSlice(output, wrappedBuffer(blob.toData()));
+            }
+            else {
+                type.writeSlice(output, wrappedBuffer((byte[]) value));
+            }
         }
         else {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unhandled type for Slice: " + type.getTypeSignature());

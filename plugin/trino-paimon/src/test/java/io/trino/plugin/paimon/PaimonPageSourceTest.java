@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import io.airlift.slice.Slice;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
@@ -22,13 +23,17 @@ import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TypeUtils;
+import org.apache.paimon.data.Blob;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.reader.RecordReader;
+import org.apache.paimon.table.source.RawFile;
+import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -40,6 +45,7 @@ import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
+import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class PaimonPageSourceTest
@@ -69,6 +75,44 @@ public class PaimonPageSourceTest
                 .isEqualTo(LongTimestampWithTimeZone.fromEpochMillisAndFraction(1_695_645_403_123L,
                         456_000_000, UTC_KEY));
         assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
+    void testBlobValuesReadAsVarbinary()
+    {
+        byte[] bytes = "paimon-blob-data".getBytes(StandardCharsets.UTF_8);
+        GenericRow row = new GenericRow(1);
+        row.setField(0, Blob.fromData(bytes));
+
+        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(row), List.of(
+                PaimonColumnHandle.of("blob_value", DataTypes.BLOB())),
+                OptionalLong.empty());
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(((Slice) TypeUtils.readNativeValue(VARBINARY, page.getBlock(0), 0)).getBytes()).isEqualTo(bytes);
+        assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
+    void testBlobColumnsFallBackFromDirectPageSource()
+    {
+        List<RawFile> rawFiles = List.of(rawFile("orc"));
+
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(rawFiles, List.of(
+                PaimonColumnHandle.of("bytes", DataTypes.VARBINARY(10))))).isTrue();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(rawFiles, List.of(
+                PaimonColumnHandle.of("blob_value", DataTypes.BLOB())))).isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(rawFiles, List.of(
+                PaimonColumnHandle.of("nested_blob", DataTypes.ARRAY(DataTypes.BLOB()))))).isFalse();
+    }
+
+    @Test
+    void testUnsupportedRawFileFormatsFallBackFromDirectPageSource()
+    {
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(rawFile("avro")), List.of(
+                PaimonColumnHandle.of("bytes", DataTypes.VARBINARY(10))))).isFalse();
     }
 
     @Test
@@ -130,6 +174,11 @@ public class PaimonPageSourceTest
             BIGINT.writeLong(builder, value);
         }
         return builder.build();
+    }
+
+    private static RawFile rawFile(String format)
+    {
+        return new RawFile("memory://file." + format, 1, 0, 1, format, 0, 1);
     }
 
     private static class TestingRecordReader

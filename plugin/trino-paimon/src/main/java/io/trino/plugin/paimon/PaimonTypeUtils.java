@@ -26,6 +26,7 @@ import io.trino.spi.type.VarcharType;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.BigIntType;
 import org.apache.paimon.types.BinaryType;
+import org.apache.paimon.types.BlobType;
 import org.apache.paimon.types.BooleanType;
 import org.apache.paimon.types.CharType;
 import org.apache.paimon.types.DataField;
@@ -106,6 +107,12 @@ public class PaimonTypeUtils
 
         @Override
         public Type visit(VarBinaryType varBinaryType)
+        {
+            return VarbinaryType.VARBINARY;
+        }
+
+        @Override
+        public Type visit(BlobType blobType)
         {
             return VarbinaryType.VARBINARY;
         }

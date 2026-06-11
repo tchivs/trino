@@ -64,6 +64,9 @@ import org.apache.paimon.table.source.RawFile;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeChecks;
+import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.RowType;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.hadoop.metadata.FileMetaData;
@@ -166,7 +169,7 @@ public class PaimonPageSourceProvider
         try {
             Split paimonSplit = split.decodeSplit();
             Optional<List<RawFile>> optionalRawFiles = paimonSplit.convertToRawFiles();
-            if (checkRawFile(optionalRawFiles)) {
+            if (checkRawFile(optionalRawFiles, columns)) {
                 FileStoreTable fileStoreTable = (FileStoreTable) table;
                 boolean readIndex = fileStoreTable.coreOptions().fileIndexReadEnabled();
 
@@ -275,13 +278,13 @@ public class PaimonPageSourceProvider
         return projectedFields.stream().map(name -> domainMap.getOrDefault(name, null)).collect(Collectors.toList());
     }
 
-    private boolean checkRawFile(Optional<List<RawFile>> optionalRawFiles)
+    private boolean checkRawFile(Optional<List<RawFile>> optionalRawFiles, List<ColumnHandle> columns)
     {
-        return optionalRawFiles.isPresent() && canUseTrinoPageSource(optionalRawFiles.get());
+        return optionalRawFiles.isPresent() && canUseTrinoPageSource(optionalRawFiles.get(), columns);
     }
 
     // Support ORC and Parquet direct reads. Other formats, including Avro, fall back to Paimon's reader.
-    private boolean canUseTrinoPageSource(List<RawFile> rawFiles)
+    static boolean canUseTrinoPageSource(List<RawFile> rawFiles, List<ColumnHandle> columns)
     {
         for (RawFile rawFile : rawFiles) {
             String format = rawFile.format();
@@ -289,7 +292,24 @@ public class PaimonPageSourceProvider
                 return false;
             }
         }
+        for (ColumnHandle column : columns) {
+            if (containsBlob(((PaimonColumnHandle) column).logicalType())) {
+                return false;
+            }
+        }
         return true;
+    }
+
+    private static boolean containsBlob(DataType type)
+    {
+        if (type.getTypeRoot() == DataTypeRoot.BLOB) {
+            return true;
+        }
+        return switch (type.getTypeRoot()) {
+            case ARRAY, MAP, MULTISET, ROW, VECTOR -> DataTypeChecks.getNestedTypes(type).stream()
+                    .anyMatch(PaimonPageSourceProvider::containsBlob);
+            default -> false;
+        };
     }
 
     // map the table schema column names to data schema column names
