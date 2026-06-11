@@ -145,7 +145,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         createTable(session, tableMetadata,
                 replace ? io.trino.spi.connector.SaveMode.REPLACE : io.trino.spi.connector.SaveMode.FAIL);
-        return getTableHandle(session, tableMetadata.getTable(), Collections.emptyMap());
+        PaimonTableHandle tableHandle = requireNonNull(getTableHandle(session, tableMetadata.getTable(),
+                Collections.emptyMap()));
+        return tableHandle.withWriteColumns(tableMetadata.getColumns().stream()
+                .map(column -> PaimonColumnHandle.of(column.getName(), PaimonTypeUtils.toPaimonType(column.getType())))
+                .collect(toList()));
     }
 
     @Override
@@ -163,7 +167,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle,
             List<ColumnHandle> columns, RetryMode retryMode)
     {
-        return (ConnectorInsertTableHandle) tableHandle;
+        return ((PaimonTableHandle) tableHandle).withWriteColumns(columns);
     }
 
     @Override

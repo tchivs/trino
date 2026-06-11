@@ -93,7 +93,10 @@ public class PaimonTypeTest
         assertThat(requireNonNull(dateType).getDisplayName()).isEqualTo("date");
 
         Type timeType = PaimonTypeUtils.fromPaimonType(new TimeType());
-        assertThat(requireNonNull(timeType).getDisplayName()).isEqualTo("time(3)");
+        assertThat(requireNonNull(timeType).getDisplayName()).isEqualTo("time(0)");
+
+        Type timeType6 = PaimonTypeUtils.fromPaimonType(new TimeType(6));
+        assertThat(requireNonNull(timeType6).getDisplayName()).isEqualTo("time(6)");
 
         Type timestampType6 = PaimonTypeUtils.fromPaimonType(DataTypes.TIMESTAMP());
         assertThat(requireNonNull(timestampType6).getDisplayName()).isEqualTo("timestamp(6)");
@@ -101,8 +104,15 @@ public class PaimonTypeTest
         Type timestampType0 = PaimonTypeUtils.fromPaimonType(new org.apache.paimon.types.TimestampType(3));
         assertThat(requireNonNull(timestampType0).getDisplayName()).isEqualTo("timestamp(3)");
 
+        Type timestampType9 = PaimonTypeUtils.fromPaimonType(new org.apache.paimon.types.TimestampType(9));
+        assertThat(requireNonNull(timestampType9).getDisplayName()).isEqualTo("timestamp(9)");
+
         Type localZonedTimestampType = PaimonTypeUtils.fromPaimonType(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE());
         assertThat(requireNonNull(localZonedTimestampType).getDisplayName()).isEqualTo("timestamp(6) with time zone");
+
+        Type localZonedTimestampType9 = PaimonTypeUtils.fromPaimonType(
+                DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(9));
+        assertThat(requireNonNull(localZonedTimestampType9).getDisplayName()).isEqualTo("timestamp(9) with time zone");
 
         Type arrayType = PaimonTypeUtils.fromPaimonType(DataTypes.ARRAY(DataTypes.STRING()));
         assertThat(requireNonNull(arrayType).getDisplayName()).isEqualTo("array(varchar)");
@@ -158,7 +168,10 @@ public class PaimonTypeTest
         assertThat(dateType.asSQLString()).isEqualTo("DATE");
 
         DataType timeType = PaimonTypeUtils.toPaimonType(io.trino.spi.type.TimeType.TIME_MILLIS);
-        assertThat(timeType.asSQLString()).isEqualTo("TIME(0)");
+        assertThat(timeType.asSQLString()).isEqualTo("TIME(3)");
+
+        DataType timeType6 = PaimonTypeUtils.toPaimonType(io.trino.spi.type.TimeType.TIME_MICROS);
+        assertThat(timeType6.asSQLString()).isEqualTo("TIME(6)");
 
         DataType timestampType0 = PaimonTypeUtils.toPaimonType(TimestampType.TIMESTAMP_SECONDS);
         assertThat(timestampType0.asSQLString()).isEqualTo("TIMESTAMP(0)");
@@ -169,8 +182,15 @@ public class PaimonTypeTest
         DataType timestampType6 = PaimonTypeUtils.toPaimonType(TimestampType.TIMESTAMP_MICROS);
         assertThat(timestampType6.asSQLString()).isEqualTo("TIMESTAMP(6)");
 
+        DataType timestampType9 = PaimonTypeUtils.toPaimonType(TimestampType.TIMESTAMP_NANOS);
+        assertThat(timestampType9.asSQLString()).isEqualTo("TIMESTAMP(9)");
+
         DataType timestampWithTimeZoneType = PaimonTypeUtils.toPaimonType(TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS);
-        assertThat(timestampWithTimeZoneType.asSQLString()).isEqualTo("TIMESTAMP(6) WITH LOCAL TIME ZONE");
+        assertThat(timestampWithTimeZoneType.asSQLString()).isEqualTo("TIMESTAMP(3) WITH LOCAL TIME ZONE");
+
+        DataType timestampWithTimeZoneType9 = PaimonTypeUtils.toPaimonType(
+                TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS);
+        assertThat(timestampWithTimeZoneType9.asSQLString()).isEqualTo("TIMESTAMP(9) WITH LOCAL TIME ZONE");
 
         DataType arrayType = PaimonTypeUtils.toPaimonType(new ArrayType(IntegerType.INTEGER));
         assertThat(arrayType.asSQLString()).isEqualTo("ARRAY<INT>");
@@ -185,5 +205,8 @@ public class PaimonTypeTest
         Type type = RowType.from(fields);
         DataType rowType = PaimonTypeUtils.toPaimonType(type);
         assertThat(rowType.asSQLString()).isEqualTo("ROW<`id` INT, `name` VARCHAR(2147483646)>");
+
+        DataType nextRowType = PaimonTypeUtils.toPaimonType(type);
+        assertThat(nextRowType).isEqualTo(rowType);
     }
 }

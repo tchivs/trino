@@ -26,17 +26,18 @@ import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
-import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
+import io.trino.spi.type.TimeType;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Decimal;
-import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.fileindex.FileIndexOptions;
 import org.apache.paimon.predicate.In;
 import org.apache.paimon.predicate.LeafPredicate;
@@ -52,10 +53,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static io.trino.spi.type.TimeType.TIME_MILLIS;
-import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
-import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.trinoTimePicosToPaimonMillis;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.trinoTimestampToPaimon;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.trinoTimestampWithTimeZoneToPaimon;
 import static java.lang.Float.intBitsToFloat;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
@@ -77,7 +77,12 @@ public class PaimonFilterConverter
 
     public Optional<Predicate> convert(TupleDomain<PaimonColumnHandle> tupleDomain)
     {
-        return convert(tupleDomain, new LinkedHashMap<>(), new LinkedHashMap<>());
+        return convert(tupleDomain, new LinkedHashMap<>(), new LinkedHashMap<>(), false);
+    }
+
+    public Optional<Predicate> convertForFileIndex(TupleDomain<PaimonColumnHandle> tupleDomain)
+    {
+        return convert(tupleDomain, new LinkedHashMap<>(), new LinkedHashMap<>(), true);
     }
 
     // TODO: Enhancement - SUPPORTS_DEREFERENCE_PUSHDOWN
@@ -96,6 +101,13 @@ public class PaimonFilterConverter
     public Optional<Predicate> convert(TupleDomain<PaimonColumnHandle> tupleDomain,
             HashMap<PaimonColumnHandle, Domain> acceptedDomains, HashMap<PaimonColumnHandle, Domain> unsupportedDomains)
     {
+        return convert(tupleDomain, acceptedDomains, unsupportedDomains, false);
+    }
+
+    private Optional<Predicate> convert(TupleDomain<PaimonColumnHandle> tupleDomain,
+            HashMap<PaimonColumnHandle, Domain> acceptedDomains, HashMap<PaimonColumnHandle, Domain> unsupportedDomains,
+            boolean includeFileIndexColumns)
+    {
         if (tupleDomain.isAll()) {
             // alwaysTrue - no filtering needed, return empty to skip filter
             return Optional.empty();
@@ -103,7 +115,7 @@ public class PaimonFilterConverter
 
         if (tupleDomain.isNone()) {
             // alwaysFalse - filter out all rows
-            return Optional.of(AlwaysFalsePredicate.INSTANCE);
+            return Optional.of(PredicateBuilder.alwaysFalse());
         }
 
         Map<PaimonColumnHandle, Domain> domainMap = tupleDomain.getDomains().get();
@@ -115,6 +127,10 @@ public class PaimonFilterConverter
             String field = columnHandle.getColumnName();
             Optional<Integer> nestedColumn = FileIndexOptions.topLevelIndexOfNested(field);
             if (nestedColumn.isPresent()) {
+                if (!includeFileIndexColumns) {
+                    unsupportedDomains.put(columnHandle, domain);
+                    continue;
+                }
                 int position = nestedColumn.get();
                 field = field.substring(0, position);
             }
@@ -151,7 +167,7 @@ public class PaimonFilterConverter
                 return builder.isNull((columnIndex));
             }
             // alwaysFalse - no values match and null not allowed
-            return AlwaysFalsePredicate.INSTANCE;
+            return PredicateBuilder.alwaysFalse();
         }
 
         if (domain.getValues().isAll()) {
@@ -172,7 +188,7 @@ public class PaimonFilterConverter
                 if (domain.isNullAllowed()) {
                     return builder.isNull(columnIndex);
                 }
-                return AlwaysFalsePredicate.INSTANCE;
+                return PredicateBuilder.alwaysFalse();
             }
 
             if (domain.getValues().isAll()) {
@@ -320,19 +336,16 @@ public class PaimonFilterConverter
             return toIntExact(((Long) trinoNativeValue));
         }
 
-        if (type.equals(TIME_MILLIS)) {
-            return (int) ((long) trinoNativeValue / PICOSECONDS_PER_MILLISECOND);
+        if (type instanceof TimeType) {
+            return trinoTimePicosToPaimonMillis((long) trinoNativeValue);
         }
 
-        if (type.equals(TIMESTAMP_MILLIS)) {
-            return Timestamp.fromEpochMillis((long) trinoNativeValue / 1000);
+        if (type instanceof TimestampType) {
+            return trinoTimestampToPaimon(trinoNativeValue);
         }
 
-        if (type.equals(TIMESTAMP_TZ_MILLIS)) {
-            if (trinoNativeValue instanceof Long) {
-                return trinoNativeValue;
-            }
-            return Timestamp.fromEpochMillis(((LongTimestampWithTimeZone) trinoNativeValue).getEpochMillis());
+        if (type instanceof TimestampWithTimeZoneType) {
+            return trinoTimestampWithTimeZoneToPaimon(trinoNativeValue);
         }
 
         if (type instanceof VarcharType || type instanceof CharType) {

@@ -66,7 +66,7 @@ public class PaimonTypeUtils
 
     public static DataType toPaimonType(Type trinoType)
     {
-        return TrinoToPaimonTypeVistor.INSTANCE.visit(trinoType);
+        return new TrinoToPaimonTypeVistor().visit(trinoType);
     }
 
     private static class PaimonToTrinoTypeVistor
@@ -160,7 +160,7 @@ public class PaimonTypeUtils
         @Override
         public Type visit(TimeType timeType)
         {
-            return io.trino.spi.type.TimeType.TIME_MILLIS;
+            return io.trino.spi.type.TimeType.createTimeType(timeType.getPrecision());
         }
 
         @Override
@@ -237,8 +237,6 @@ public class PaimonTypeUtils
 
     private static class TrinoToPaimonTypeVistor
     {
-        private static final TrinoToPaimonTypeVistor INSTANCE = new TrinoToPaimonTypeVistor();
-
         private final AtomicInteger currentIndex = new AtomicInteger(0);
 
         public DataType visit(Type trinoType)
@@ -287,14 +285,14 @@ public class PaimonTypeUtils
                 return DataTypes.DATE();
             }
             else if (trinoType instanceof io.trino.spi.type.TimeType) {
-                return new TimeType();
+                return new TimeType(((io.trino.spi.type.TimeType) trinoType).getPrecision());
             }
             else if (trinoType instanceof io.trino.spi.type.TimestampType) {
                 int precision = ((io.trino.spi.type.TimestampType) trinoType).getPrecision();
                 return new TimestampType(precision);
             }
             else if (trinoType instanceof TimestampWithTimeZoneType) {
-                return DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE();
+                return DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(((TimestampWithTimeZoneType) trinoType).getPrecision());
             }
             else if (trinoType instanceof io.trino.spi.type.ArrayType) {
                 return DataTypes.ARRAY(visit(((io.trino.spi.type.ArrayType) trinoType).getElementType()));

@@ -24,11 +24,15 @@ import io.trino.spi.connector.ConnectorPageSinkId;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.type.Type;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
+
+import java.util.List;
+import java.util.stream.Collectors;
 
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static java.util.Objects.requireNonNull;
@@ -85,7 +89,15 @@ public class PaimonPageSinkProvider
                 batchWriteBuilder.withOverwrite();
             }
             BatchTableWrite write = batchWriteBuilder.newWrite();
-            return new PaimonPageSink(write);
+            List<Type> columnTypes = tableHandle.getWriteColumns()
+                    .map(columns -> columns.stream()
+                            .map(PaimonColumnHandle.class::cast)
+                            .map(PaimonColumnHandle::getTrinoType)
+                            .collect(Collectors.toList()))
+                    .orElseGet(() -> table.rowType().getFieldTypes().stream()
+                            .map(PaimonTypeUtils::fromPaimonType)
+                            .collect(Collectors.toList()));
+            return new PaimonPageSink(write, columnTypes);
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 

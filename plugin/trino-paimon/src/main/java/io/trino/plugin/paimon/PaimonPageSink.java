@@ -16,6 +16,7 @@ package io.trino.plugin.paimon;
 import io.airlift.slice.Slice;
 import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorPageSink;
+import io.trino.spi.type.Type;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
@@ -34,10 +35,12 @@ public class PaimonPageSink
         ConnectorPageSink
 {
     private final BatchTableWrite writer;
+    private final List<Type> columnTypes;
 
-    public PaimonPageSink(BatchTableWrite writer)
+    public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes)
     {
         this.writer = writer;
+        this.columnTypes = columnTypes;
     }
 
     @Override
@@ -56,7 +59,7 @@ public class PaimonPageSink
     {
         try {
             for (int i = 0; i < page.getPositionCount(); i++) {
-                writer.write(new PaimonRow(page.getSingleValuePage(i), rowKind));
+                writer.write(new PaimonRow(page.getSingleValuePage(i), rowKind, columnTypes));
             }
         }
         catch (Exception e) {

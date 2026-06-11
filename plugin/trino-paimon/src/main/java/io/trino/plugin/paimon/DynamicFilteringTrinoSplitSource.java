@@ -134,8 +134,7 @@ public class DynamicFilteringTrinoSplitSource
         Optional<Predicate> paimonPredicate = new PaimonFilterConverter(table.rowType()).convert(combinedPredicate);
         paimonPredicate.ifPresent(readBuilder::withFilter);
 
-        // Apply limit if present
-        tableHandle.getLimit().ifPresent(limit -> readBuilder.withLimit((int) limit));
+        PaimonSplitManager.pushLimit(readBuilder, tableHandle);
 
         // Plan splits
         List<Split> splits = readBuilder.dropStats().newScan().plan().splits();

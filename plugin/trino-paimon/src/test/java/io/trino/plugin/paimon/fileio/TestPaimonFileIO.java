@@ -23,14 +23,30 @@ import org.apache.paimon.fs.Path;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestPaimonFileIO
 {
+    @Test
+    public void testObjectStoreDetectionUsesPaimonSchemes()
+    {
+        TrinoFileSystem fileSystem = new MemoryFileSystem();
+
+        assertThat(new PaimonFileIO(fileSystem, new Path("s3://bucket/warehouse")).isObjectStore()).isTrue();
+        assertThat(new PaimonFileIO(fileSystem, new Path("abfs://container/warehouse")).isObjectStore()).isTrue();
+        assertThat(new PaimonFileIO(fileSystem, new Path("gs://bucket/warehouse")).isObjectStore()).isTrue();
+        assertThat(new PaimonFileIO(fileSystem, new Path("cosn://bucket/warehouse")).isObjectStore()).isTrue();
+        assertThat(new PaimonFileIO(fileSystem, new Path("file:///warehouse")).isObjectStore()).isFalse();
+    }
+
     @Test
     public void testObjectStoreMkdirsCreatesDirectoryMarker()
             throws IOException
@@ -45,6 +61,59 @@ public class TestPaimonFileIO
         assertThat(fileIO.exists(databasePath)).isTrue();
         assertThat(fileIO.getFileStatus(databasePath).isDir()).isTrue();
         assertThat(fileIO.listStatus(databasePath)).isEmpty();
+    }
+
+    @Test
+    public void testListStatusReturnsOnlyDirectChildren()
+            throws IOException
+    {
+        PaimonFileIO fileIO = new PaimonFileIO(new MemoryFileSystem(), null);
+        Path tablePath = new Path("memory:///warehouse/minio_smoke.db/orders");
+        Path nestedPath = new Path(tablePath, "manifest");
+        Path directFile = new Path(tablePath, "schema-0");
+        Path nestedFile = new Path(nestedPath, "manifest-list-0");
+
+        fileIO.mkdirs(tablePath);
+        fileIO.mkdirs(nestedPath);
+        fileIO.writeFile(directFile, "schema", false);
+        fileIO.writeFile(nestedFile, "manifest", false);
+
+        Map<String, Boolean> paths = Arrays.stream(fileIO.listStatus(tablePath))
+                .collect(Collectors.toMap(status -> status.getPath().toString(), status -> status.isDir()));
+        assertThat(paths).containsEntry(directFile.toString(), false);
+        assertThat(paths).containsEntry(nestedPath.toString(), true);
+        assertThat(paths).doesNotContainKey(nestedFile.toString());
+    }
+
+    @Test
+    public void testNonRecursiveDeleteAllowsOnlyDirectoryMarker()
+            throws IOException
+    {
+        PaimonFileIO fileIO = new PaimonFileIO(new MemoryFileSystem(), null);
+        Path emptyDirectory = new Path("memory:///warehouse/minio_smoke.db/empty_table");
+
+        fileIO.mkdirs(emptyDirectory);
+
+        assertThat(fileIO.delete(emptyDirectory, false)).isTrue();
+        assertThat(fileIO.exists(emptyDirectory)).isFalse();
+    }
+
+    @Test
+    public void testNonRecursiveDeleteFailsWhenDirectChildDirectoryExists()
+            throws IOException
+    {
+        PaimonFileIO fileIO = new PaimonFileIO(new MemoryFileSystem(), null);
+        Path tablePath = new Path("memory:///warehouse/minio_smoke.db/orders");
+        Path nestedPath = new Path(tablePath, "manifest");
+
+        fileIO.mkdirs(tablePath);
+        fileIO.mkdirs(nestedPath);
+
+        assertThatThrownBy(() -> fileIO.delete(tablePath, false))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("is not empty");
+        assertThat(fileIO.exists(tablePath)).isTrue();
+        assertThat(fileIO.exists(nestedPath)).isTrue();
     }
 
     @Test

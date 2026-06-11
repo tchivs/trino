@@ -40,6 +40,8 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.stream.Collectors;
 
+import static java.util.Objects.requireNonNull;
+
 public class PaimonTableHandle
         implements
         ConnectorTableHandle,
@@ -50,7 +52,8 @@ public class PaimonTableHandle
     private final String schemaName;
     private final String tableName;
     private final TupleDomain<PaimonColumnHandle> filter;
-    private final Optional<List<ColumnHandle>> projectedColumns;
+    private final Optional<List<PaimonColumnHandle>> projectedColumns;
+    private final Optional<List<PaimonColumnHandle>> writeColumns;
     private final OptionalLong limit;
     private final Map<String, String> dynamicOptions;
 
@@ -58,22 +61,33 @@ public class PaimonTableHandle
 
     public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions)
     {
-        this(schemaName, tableName, dynamicOptions, TupleDomain.all(), Optional.empty(), OptionalLong.empty());
+        this(schemaName, tableName, dynamicOptions, TupleDomain.all(), Optional.empty(), Optional.empty(),
+                OptionalLong.empty());
     }
 
     @JsonCreator
     public PaimonTableHandle(@JsonProperty("schemaName") String schemaName, @JsonProperty("tableName") String tableName,
             @JsonProperty("dynamicOptions") Map<String, String> dynamicOptions,
             @JsonProperty("filter") TupleDomain<PaimonColumnHandle> filter,
-            @JsonProperty("projectedColumns") Optional<List<ColumnHandle>> projectedColumns,
+            @JsonProperty("projectedColumns") Optional<List<PaimonColumnHandle>> projectedColumns,
+            @JsonProperty("writeColumns") Optional<List<PaimonColumnHandle>> writeColumns,
             @JsonProperty("limit") OptionalLong limit)
     {
-        this.schemaName = schemaName;
-        this.tableName = tableName;
-        this.dynamicOptions = dynamicOptions;
-        this.filter = filter;
-        this.projectedColumns = projectedColumns;
-        this.limit = limit;
+        this.schemaName = requireNonNull(schemaName, "schemaName is null");
+        this.tableName = requireNonNull(tableName, "tableName is null");
+        this.dynamicOptions = dynamicOptions == null ? Map.of() : Map.copyOf(dynamicOptions);
+        this.filter = filter == null ? TupleDomain.all() : filter;
+        this.projectedColumns = projectedColumns == null ? Optional.empty() : projectedColumns.map(List::copyOf);
+        this.writeColumns = writeColumns == null ? Optional.empty() : writeColumns.map(List::copyOf);
+        this.limit = limit == null ? OptionalLong.empty() : limit;
+    }
+
+    public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions,
+            TupleDomain<PaimonColumnHandle> filter, Optional<List<ColumnHandle>> projectedColumns,
+            OptionalLong limit)
+    {
+        this(schemaName, tableName, dynamicOptions, filter, toPaimonColumnHandles(projectedColumns), Optional.empty(),
+                limit);
     }
 
     @JsonProperty
@@ -101,9 +115,15 @@ public class PaimonTableHandle
     }
 
     @JsonProperty
-    public Optional<List<ColumnHandle>> getProjectedColumns()
+    public Optional<List<PaimonColumnHandle>> getProjectedColumns()
     {
         return projectedColumns;
+    }
+
+    @JsonProperty
+    public Optional<List<PaimonColumnHandle>> getWriteColumns()
+    {
+        return writeColumns;
     }
 
     public OptionalLong getLimit()
@@ -116,7 +136,7 @@ public class PaimonTableHandle
         Table paimonTable = table(catalog);
 
         // see TrinoConnector.getSessionProperties
-        Map<String, String> dynamicOptions = new HashMap<>();
+        Map<String, String> dynamicOptions = new HashMap<>(this.dynamicOptions);
         Long scanTimestampMills = PaimonSessionProperties.getScanTimestampMillis(session);
         if (scanTimestampMills != null) {
             dynamicOptions.put(CoreOptions.SCAN_TIMESTAMP_MILLIS.key(), scanTimestampMills.toString());
@@ -126,7 +146,7 @@ public class PaimonTableHandle
             dynamicOptions.put(CoreOptions.SCAN_SNAPSHOT_ID.key(), scanSnapshotId.toString());
         }
 
-        return dynamicOptions.size() > 0 ? paimonTable.copy(dynamicOptions) : paimonTable;
+        return !dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable;
     }
 
     public Table table(PaimonCatalog catalog)
@@ -173,17 +193,38 @@ public class PaimonTableHandle
 
     public PaimonTableHandle copy(TupleDomain<PaimonColumnHandle> filter)
     {
-        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit);
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
+                limit);
     }
 
     public PaimonTableHandle copy(Optional<List<ColumnHandle>> projectedColumns)
     {
-        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit);
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter,
+                toPaimonColumnHandles(projectedColumns), writeColumns, limit);
+    }
+
+    public PaimonTableHandle withWriteColumns(List<ColumnHandle> writeColumns)
+    {
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns,
+                Optional.of(toPaimonColumnHandles(writeColumns)), limit);
+    }
+
+    private static Optional<List<PaimonColumnHandle>> toPaimonColumnHandles(Optional<List<ColumnHandle>> columns)
+    {
+        return columns.map(PaimonTableHandle::toPaimonColumnHandles);
+    }
+
+    private static List<PaimonColumnHandle> toPaimonColumnHandles(List<? extends ColumnHandle> columns)
+    {
+        return columns.stream()
+                .map(PaimonColumnHandle.class::cast)
+                .toList();
     }
 
     public PaimonTableHandle copy(OptionalLong limit)
     {
-        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, limit);
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
+                limit);
     }
 
     @Override
@@ -198,12 +239,14 @@ public class PaimonTableHandle
         PaimonTableHandle that = (PaimonTableHandle) o;
         return Objects.equals(dynamicOptions, that.dynamicOptions) && Objects.equals(schemaName, that.schemaName)
                 && Objects.equals(tableName, that.tableName) && Objects.equals(filter, that.filter)
-                && Objects.equals(projectedColumns, that.projectedColumns);
+                && Objects.equals(projectedColumns, that.projectedColumns)
+                && Objects.equals(writeColumns, that.writeColumns)
+                && Objects.equals(limit, that.limit);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(schemaName, tableName, filter, projectedColumns, dynamicOptions);
+        return Objects.hash(schemaName, tableName, filter, projectedColumns, writeColumns, limit, dynamicOptions);
     }
 }

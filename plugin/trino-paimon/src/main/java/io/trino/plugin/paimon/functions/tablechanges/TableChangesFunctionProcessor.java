@@ -17,11 +17,14 @@ import io.trino.plugin.paimon.PaimonPageSourceProvider;
 import io.trino.plugin.paimon.PaimonSplit;
 import io.trino.plugin.paimon.PaimonTableHandle;
 import io.trino.spi.Page;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.function.table.TableFunctionProcessorState;
 import io.trino.spi.function.table.TableFunctionSplitProcessor;
+
+import java.util.List;
 
 import static io.trino.spi.function.table.TableFunctionProcessorState.Finished.FINISHED;
 
@@ -36,8 +39,9 @@ public class TableChangesFunctionProcessor
     public TableChangesFunctionProcessor(ConnectorSession session, PaimonTableHandle handle, PaimonSplit split,
             PaimonPageSourceProvider pageSourceProvider)
     {
+        List<ColumnHandle> projectedColumns = List.copyOf(handle.getProjectedColumns().orElseThrow());
         this.pageSource = pageSourceProvider.createPageSource(null, session, split, handle,
-                handle.getProjectedColumns().get(), DynamicFilter.EMPTY);
+                projectedColumns, DynamicFilter.EMPTY);
     }
 
     @Override

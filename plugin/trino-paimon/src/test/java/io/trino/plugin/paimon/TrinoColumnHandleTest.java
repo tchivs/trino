@@ -34,6 +34,31 @@ public class TrinoColumnHandleTest
         testRoundTrip(expected);
     }
 
+    @Test
+    public void testTrinoColumnHandleIgnoresLegacyTrinoTypeJsonField()
+    {
+        ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
+        objectMapperProvider
+                .setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
+        JsonCodec<PaimonColumnHandle> codec = new JsonCodecFactory(objectMapperProvider)
+                .jsonCodec(PaimonColumnHandle.class);
+        PaimonColumnHandle expected = PaimonColumnHandle.of("name", DataTypes.STRING());
+        String json = codec.toJson(expected);
+        String legacyJson = json.substring(0, json.length() - 1) + ",\"trinoType\":\"varchar\"}";
+
+        PaimonColumnHandle actual = codec.fromJson(legacyJson);
+
+        assertThat(actual).isEqualTo(expected);
+        assertThat(actual.getTrinoType()).isEqualTo(expected.getTrinoType());
+    }
+
+    @Test
+    public void testColumnHandleIdentityIncludesPaimonType()
+    {
+        assertThat(PaimonColumnHandle.of("value", DataTypes.INT()))
+                .isNotEqualTo(PaimonColumnHandle.of("value", DataTypes.STRING()));
+    }
+
     private void testRoundTrip(PaimonColumnHandle expected)
     {
         ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();

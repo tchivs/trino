@@ -25,6 +25,7 @@ import org.apache.paimon.fs.FileStatus;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.fs.SeekableInputStream;
+import org.apache.paimon.utils.FileIOUtils;
 
 import javax.annotation.Nullable;
 
@@ -51,14 +52,10 @@ public class PaimonFileIO
 
     private static boolean checkObjectStore(String scheme)
     {
-        scheme = scheme.toLowerCase(Locale.ENGLISH);
-        if (!scheme.startsWith("s3") && !scheme.startsWith("emr") && !scheme.startsWith("oss")
-                && !scheme.startsWith("wasb")) {
-            return scheme.startsWith("http") || scheme.startsWith("ftp");
+        if (scheme == null) {
+            return false;
         }
-        else {
-            return true;
-        }
+        return FileIOUtils.isObjectStore(scheme.toLowerCase(Locale.ENGLISH));
     }
 
     @Override
@@ -127,7 +124,7 @@ public class PaimonFileIO
             FileIterator fileIterator = trinoFileSystem.listFiles(location);
             while (fileIterator.hasNext()) {
                 FileEntry fileEntry = fileIterator.next();
-                if (!isDirectoryMarker(fileEntry.location())) {
+                if (isDirectChild(location, fileEntry.location()) && !isDirectoryMarker(fileEntry.location())) {
                     fileStatusList.add(new PaimonFileStatus(fileEntry.length(), new Path(fileEntry.location().toString()),
                             fileEntry.lastModified().getEpochSecond()));
                 }
@@ -172,7 +169,7 @@ public class PaimonFileIO
         Location location = Location.of(path.toString());
         if (isDirectory(location)) {
             if (!recursive) {
-                if (hasNonMarkerFile(location)) {
+                if (hasChildForNonRecursiveDelete(location)) {
                     throw new IOException("Directory " + location + " is not empty");
                 }
             }
@@ -233,16 +230,42 @@ public class PaimonFileIO
         return trinoFileSystem.newInputFile(directoryMarker(location)).exists();
     }
 
-    private boolean hasNonMarkerFile(Location location)
+    private boolean hasChildForNonRecursiveDelete(Location location)
             throws IOException
     {
         FileIterator fileIterator = trinoFileSystem.listFiles(location);
         while (fileIterator.hasNext()) {
-            if (!isDirectoryMarker(fileIterator.next().location())) {
+            Location child = fileIterator.next().location();
+            if (isDirectChild(location, child) && !isDirectoryMarker(child)) {
                 return true;
             }
         }
-        return false;
+        return !trinoFileSystem.listDirectories(location).isEmpty();
+    }
+
+    private static boolean isDirectChild(Location parent, Location child)
+    {
+        if (!parent.scheme().equals(child.scheme()) || !parent.host().equals(child.host())) {
+            return false;
+        }
+        String parentPath = normalizeDirectoryPath(parent);
+        String childPath = normalizeDirectoryPath(child);
+        if (parentPath.isEmpty()) {
+            return !childPath.isEmpty() && childPath.indexOf('/') < 0;
+        }
+        if (!childPath.startsWith(parentPath + "/")) {
+            return false;
+        }
+        return childPath.indexOf('/', parentPath.length() + 1) < 0;
+    }
+
+    private static String normalizeDirectoryPath(Location location)
+    {
+        String path = location.path();
+        if (path.endsWith("/") && path.length() > 1) {
+            return path.substring(0, path.length() - 1);
+        }
+        return path;
     }
 
     private static Location directoryMarker(Location location)

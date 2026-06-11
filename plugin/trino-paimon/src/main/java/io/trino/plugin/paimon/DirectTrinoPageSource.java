@@ -20,25 +20,37 @@ import io.trino.spi.metrics.Metrics;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.LinkedList;
+import java.util.OptionalLong;
+
+import static java.lang.Math.toIntExact;
 
 public class DirectTrinoPageSource
         implements
         ConnectorPageSource
 {
     private final LinkedList<ConnectorPageSource> pageSourceQueue;
+    private final OptionalLong limit;
     private ConnectorPageSource current;
     private long completedBytes;
+    private long completedPositions;
+    private boolean closed;
 
     public DirectTrinoPageSource(LinkedList<ConnectorPageSource> pageSourceQueue)
     {
+        this(pageSourceQueue, OptionalLong.empty());
+    }
+
+    public DirectTrinoPageSource(LinkedList<ConnectorPageSource> pageSourceQueue, OptionalLong limit)
+    {
         this.pageSourceQueue = pageSourceQueue;
+        this.limit = limit;
         this.current = pageSourceQueue.poll();
     }
 
     @Override
     public long getCompletedBytes()
     {
-        return completedBytes;
+        return completedBytes + (current == null ? 0 : current.getCompletedBytes());
     }
 
     @Override
@@ -50,27 +62,44 @@ public class DirectTrinoPageSource
     @Override
     public boolean isFinished()
     {
-        return current == null || (current.isFinished() && pageSourceQueue.isEmpty());
+        return closed || limitReached() || current == null || (current.isFinished() && pageSourceQueue.isEmpty());
     }
 
     @Override
     public Page getNextPage()
     {
-        try {
-            if (current == null) {
-                return null;
-            }
+        if (closed || current == null || limitReached()) {
+            close();
+            return null;
+        }
+
+        while (current != null) {
             Page dataPage = current.getNextPage();
             if (dataPage == null) {
+                if (!current.isFinished()) {
+                    return null;
+                }
                 advance();
-                return getNextPage();
+                continue;
             }
 
+            if (limit.isPresent() && completedPositions + dataPage.getPositionCount() > limit.getAsLong()) {
+                int remainingPositions = toIntExact(limit.getAsLong() - completedPositions);
+                Page limitedPage = dataPage.getRegion(0, remainingPositions);
+                completedPositions += limitedPage.getPositionCount();
+                close();
+                return limitedPage;
+            }
+
+            completedPositions += dataPage.getPositionCount();
             return dataPage;
         }
-        catch (RuntimeException e) {
-            throw new RuntimeException(e);
-        }
+        return null;
+    }
+
+    private boolean limitReached()
+    {
+        return limit.isPresent() && completedPositions >= limit.getAsLong();
     }
 
     private void advance()
@@ -81,11 +110,12 @@ public class DirectTrinoPageSource
         try {
             completedBytes += current.getCompletedBytes();
             current.close();
+            current = null;
         }
         catch (IOException e) {
             current = null;
             close();
-            throw new RuntimeException("error happens while advance and close old page source.");
+            throw new UncheckedIOException("error happens while advance and close old page source.", e);
         }
         current = pageSourceQueue.poll();
     }
@@ -93,16 +123,42 @@ public class DirectTrinoPageSource
     @Override
     public void close()
     {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        IOException exception = null;
         try {
             if (current != null) {
+                completedBytes += current.getCompletedBytes();
                 current.close();
-            }
-            for (ConnectorPageSource source : pageSourceQueue) {
-                source.close();
+                current = null;
             }
         }
         catch (IOException e) {
-            throw new UncheckedIOException(e);
+            exception = e;
+        }
+        try {
+            for (ConnectorPageSource source : pageSourceQueue) {
+                try {
+                    completedBytes += source.getCompletedBytes();
+                    source.close();
+                }
+                catch (IOException e) {
+                    if (exception == null) {
+                        exception = e;
+                    }
+                    else {
+                        exception.addSuppressed(e);
+                    }
+                }
+            }
+            pageSourceQueue.clear();
+        }
+        finally {
+            if (exception != null) {
+                throw new UncheckedIOException(exception);
+            }
         }
     }
 

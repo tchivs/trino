@@ -40,7 +40,7 @@ public class TrinoConnectorFactoryTest
     }
 
     @Test
-    public void testPaimonS3CredentialsAreMappedToTrinoS3Credentials()
+    public void testPaimonObjectStoreCredentialsAreMappedToTrinoNativeCredentials()
     {
         Map<String, String> config = new HashMap<>();
         config.put("s3.access-key", "paimon-access");
@@ -54,7 +54,7 @@ public class TrinoConnectorFactoryTest
     }
 
     @Test
-    public void testExplicitTrinoS3CredentialsArePreserved()
+    public void testExplicitTrinoObjectStoreCredentialsArePreserved()
     {
         Map<String, String> config = new HashMap<>();
         config.put("s3.access-key", "paimon-access");

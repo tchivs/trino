@@ -19,7 +19,6 @@ import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.TrinoInputFile;
-import io.trino.hive.formats.avro.AvroTypeException;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.orc.OrcColumn;
 import io.trino.orc.OrcDataSource;
@@ -37,7 +36,6 @@ import io.trino.parquet.reader.MetadataReader;
 import io.trino.parquet.reader.ParquetReader;
 import io.trino.parquet.reader.RowGroupInfo;
 import io.trino.plugin.hive.FileFormatDataSourceStats;
-import io.trino.plugin.hive.avro.AvroPageSource;
 import io.trino.plugin.hive.orc.OrcPageSource;
 import io.trino.plugin.hive.parquet.ParquetPageSource;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
@@ -52,8 +50,6 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
-import org.apache.avro.Schema;
-import org.apache.avro.SchemaBuilder;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.deletionvectors.DeletionVector;
 import org.apache.paimon.fileindex.FileIndexPredicate;
@@ -81,7 +77,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -136,18 +131,19 @@ public class PaimonPageSourceProvider
             if (rowId.isPresent()) {
                 List<ColumnHandle> dataColumns = columns.stream().map(PaimonColumnHandle.class::cast)
                         .filter(column -> !column.isRowId()).collect(Collectors.toList());
-                Set<String> rowIdFileds = ((io.trino.spi.type.RowType) rowId.get().getTrinoType()).getFields().stream()
-                        .map(io.trino.spi.type.RowType.Field::getName).map(Optional::get).collect(Collectors.toSet());
+                List<String> rowIdFields = ((io.trino.spi.type.RowType) rowId.get().getTrinoType()).getFields().stream()
+                        .map(io.trino.spi.type.RowType.Field::getName).map(Optional::get).toList();
+                Set<String> rowIdFieldSet = Set.copyOf(rowIdFields);
 
                 HashMap<String, Integer> fieldToIndex = new HashMap<>();
                 for (int i = 0; i < dataColumns.size(); i++) {
                     PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) dataColumns.get(i);
-                    if (rowIdFileds.contains(paimonColumnHandle.getColumnName())) {
+                    if (rowIdFieldSet.contains(paimonColumnHandle.getColumnName())) {
                         fieldToIndex.put(paimonColumnHandle.getColumnName(), i);
                     }
                 }
                 return PaimonMergePageSourceWrapper.wrap(createPageSource(session, table, paimonTableHandle.getFilter(),
-                        (PaimonSplit) split, dataColumns, paimonTableHandle.getLimit()), fieldToIndex);
+                        (PaimonSplit) split, dataColumns, paimonTableHandle.getLimit()), rowIdFields, fieldToIndex);
             }
             else {
                 return createPageSource(session, table, paimonTableHandle.getFilter(), (PaimonSplit) split, columns,
@@ -165,6 +161,7 @@ public class PaimonPageSourceProvider
                 .map(PaimonColumnHandle::getColumnName).toList();
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
         Optional<Predicate> paimonFilter = new PaimonFilterConverter(rowType).convert(filter);
+        Optional<Predicate> fileIndexFilter = new PaimonFilterConverter(rowType).convertForFileIndex(filter);
 
         try {
             Split paimonSplit = split.decodeSplit();
@@ -188,10 +185,10 @@ public class PaimonPageSourceProvider
                         RawFile rawFile = files.get(i);
                         if (indexFiles.isPresent()) {
                             IndexFile indexFile = indexFiles.get().get(i);
-                            if (indexFile != null && paimonFilter.isPresent()) {
+                            if (indexFile != null && fileIndexFilter.isPresent()) {
                                 try (FileIndexPredicate fileIndexPredicate = new FileIndexPredicate(
                                         new Path(indexFile.path()), table.fileIO(), rowType)) {
-                                    if (!fileIndexPredicate.evaluate(paimonFilter.get()).remain()) {
+                                    if (!fileIndexPredicate.evaluate(fileIndexFilter.get()).remain()) {
                                         continue;
                                     }
                                 }
@@ -234,7 +231,7 @@ public class PaimonPageSourceProvider
                         sources.add(source);
                     }
 
-                    return new DirectTrinoPageSource(sources);
+                    return new DirectTrinoPageSource(sources, limit);
                 }
                 catch (Exception e) {
                     throw new RuntimeException(e);
@@ -283,12 +280,12 @@ public class PaimonPageSourceProvider
         return optionalRawFiles.isPresent() && canUseTrinoPageSource(optionalRawFiles.get());
     }
 
-    // Support orc, parquet and avro formats
+    // Support ORC and Parquet direct reads. Other formats, including Avro, fall back to Paimon's reader.
     private boolean canUseTrinoPageSource(List<RawFile> rawFiles)
     {
         for (RawFile rawFile : rawFiles) {
             String format = rawFile.format();
-            if (!format.equals("orc") && !format.equals("parquet") && !format.equals("avro")) {
+            if (!format.equals("orc") && !format.equals("parquet")) {
                 return false;
             }
         }
@@ -337,7 +334,7 @@ public class PaimonPageSourceProvider
      * bloom filter options).
      *
      * @param format
-     *            the file format (orc, parquet, or avro)
+     *            the file format (orc or parquet)
      * @param inputFile
      *            the input file to read
      * @param coreOptions
@@ -365,17 +362,6 @@ public class PaimonPageSourceProvider
                 }
                 catch (IOException e) {
                     throw new RuntimeException("Failed to get file length for Parquet file", e);
-                }
-            }
-            case "avro" : {
-                try {
-                    return createAvroDataPageSource(inputFile, columns, types, inputFile.length());
-                }
-                catch (IOException e) {
-                    throw new RuntimeException("Failed to create Avro page source", e);
-                }
-                catch (AvroTypeException e) {
-                    throw new RuntimeException("Avro type resolution error", e);
                 }
             }
             default : {
@@ -487,13 +473,14 @@ public class PaimonPageSourceProvider
             for (int i = 0; i < columns.size(); i++) {
                 String columnName = columns.get(i);
                 Type type = types.get(i);
+                String lowerColumnName = columnName == null ? null : FieldNameUtils.toLowerCase(columnName);
 
-                if (columnName == null || !fieldsByName.containsKey(columnName)) {
+                if (lowerColumnName == null || !fieldsByName.containsKey(lowerColumnName)) {
                     // Column doesn't exist in file, return nulls
                     pageSourceBuilder.addNullColumn(type);
                 }
                 else {
-                    org.apache.parquet.schema.Type parquetField = fieldsByName.get(columnName);
+                    org.apache.parquet.schema.Type parquetField = fieldsByName.get(lowerColumnName);
                     org.apache.parquet.io.ColumnIO columnIO = messageColumnIO.getChild(parquetField.getName());
 
                     // Convert Parquet field to Trino Field
@@ -529,7 +516,7 @@ public class PaimonPageSourceProvider
                 .builder();
         for (int i = 0; i < columns.size(); i++) {
             if (columns.get(i) != null && domains.get(i) != null) {
-                String columnName = columns.get(i);
+                String columnName = FieldNameUtils.toLowerCase(columns.get(i));
                 if (fieldsByName.containsKey(columnName)) {
                     org.apache.parquet.schema.Type parquetType = fieldsByName.get(columnName);
                     if (parquetType.isPrimitive()) {
@@ -562,80 +549,5 @@ public class PaimonPageSourceProvider
             return runtimeException;
         }
         return new RuntimeException("Error reading Parquet file: " + dataSourceId, exception);
-    }
-
-    private ConnectorPageSource createAvroDataPageSource(TrinoInputFile inputFile, List<String> columns,
-            List<Type> types, long length)
-            throws IOException,
-            AvroTypeException
-    {
-        // Build Avro schema for requested columns
-        Schema avroSchema = buildAvroSchema(columns, types);
-
-        // Create HiveAvroTypeManager with default timestamp precision
-        io.trino.plugin.hive.avro.HiveAvroTypeManager avroTypeManager = new io.trino.plugin.hive.avro.HiveAvroTypeManager(
-                io.trino.plugin.hive.HiveTimestampPrecision.DEFAULT_PRECISION);
-
-        // Create AvroPageSource
-        return new AvroPageSource(inputFile, avroSchema, avroTypeManager, 0, length);
-    }
-
-    private Schema buildAvroSchema(List<String> columns, List<Type> types)
-    {
-        SchemaBuilder.FieldAssembler<Schema> schemaBuilder = SchemaBuilder.record("paimon_record").fields();
-
-        for (int i = 0; i < columns.size(); i++) {
-            String columnName = columns.get(i);
-            Type trinoType = types.get(i);
-
-            if (columnName == null) {
-                // Skip null column names
-                continue;
-            }
-
-            Schema.Type avroType = mapTrinoTypeToAvroType(trinoType);
-            // Create a nullable union type: [null, actualType]
-            schemaBuilder = schemaBuilder.name(columnName).type().unionOf().nullType().and()
-                    .type(Schema.create(avroType)).endUnion().noDefault();
-        }
-
-        return schemaBuilder.endRecord();
-    }
-
-    private Schema.Type mapTrinoTypeToAvroType(Type trinoType)
-    {
-        String typeName = trinoType.getDisplayName().toLowerCase(Locale.ENGLISH);
-
-        if (typeName.equals("boolean")) {
-            return Schema.Type.BOOLEAN;
-        }
-        else if (typeName.equals("tinyint") || typeName.equals("smallint") || typeName.equals("integer")) {
-            return Schema.Type.INT;
-        }
-        else if (typeName.equals("bigint")) {
-            return Schema.Type.LONG;
-        }
-        else if (typeName.equals("real")) {
-            return Schema.Type.FLOAT;
-        }
-        else if (typeName.equals("double")) {
-            return Schema.Type.DOUBLE;
-        }
-        else if (typeName.startsWith("varchar") || typeName.startsWith("char") || typeName.equals("varbinary")) {
-            return Schema.Type.STRING;
-        }
-        else if (typeName.startsWith("array")) {
-            return Schema.Type.ARRAY;
-        }
-        else if (typeName.startsWith("map")) {
-            return Schema.Type.MAP;
-        }
-        else if (typeName.startsWith("row")) {
-            return Schema.Type.RECORD;
-        }
-        else {
-            // Default to string for unknown types
-            return Schema.Type.STRING;
-        }
     }
 }

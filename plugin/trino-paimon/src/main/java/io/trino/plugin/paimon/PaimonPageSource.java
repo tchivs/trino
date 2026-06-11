@@ -29,9 +29,13 @@ import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
+import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimeType;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
@@ -57,25 +61,18 @@ import java.util.List;
 import java.util.OptionalLong;
 
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimeMillisToTrinoPicos;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampToTrino;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampToTrinoTimestampWithTimeZone;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.Decimals.encodeShortScaledValue;
 import static io.trino.spi.type.IntegerType.INTEGER;
-import static io.trino.spi.type.LongTimestampWithTimeZone.fromEpochMillisAndFraction;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
-import static io.trino.spi.type.TimeType.TIME_MICROS;
-import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
-import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
-import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
-import static io.trino.spi.type.TimestampType.TIMESTAMP_SECONDS;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
-import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static java.lang.String.format;
-import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 public class PaimonPageSource
         implements
@@ -243,17 +240,14 @@ public class PaimonPageSource
                 BigDecimal decimal = ((Decimal) value).toBigDecimal();
                 type.writeLong(output, encodeShortScaledValue(decimal, decimalType.getScale()));
             }
-            else if (type.equals(TIMESTAMP_MILLIS) || type.equals(TIMESTAMP_SECONDS)) {
-                type.writeLong(output, ((Timestamp) value).getMillisecond() * MICROSECONDS_PER_MILLISECOND);
+            else if (type instanceof TimestampType) {
+                type.writeLong(output, (long) paimonTimestampToTrino(type, (Timestamp) value));
             }
-            else if (type.equals(TIMESTAMP_MICROS)) {
-                type.writeLong(output, ((Timestamp) value).toMicros());
+            else if (type instanceof TimestampWithTimeZoneType) {
+                type.writeLong(output, (long) paimonTimestampToTrinoTimestampWithTimeZone(type, (Timestamp) value));
             }
-            else if (type.equals(TIMESTAMP_TZ_MILLIS)) {
-                type.writeLong(output, packDateTimeWithZone(((Timestamp) value).getMillisecond(), UTC_KEY));
-            }
-            else if (type.equals(TIME_MICROS)) {
-                type.writeLong(output, (int) value * MICROSECONDS_PER_MILLISECOND);
+            else if (type instanceof TimeType) {
+                type.writeLong(output, paimonTimeMillisToTrinoPicos((int) value));
             }
             else {
                 throw new TrinoException(GENERIC_INTERNAL_ERROR,
@@ -269,10 +263,11 @@ public class PaimonPageSource
         else if (javaType == Slice.class) {
             writeSlice(output, type, value);
         }
+        else if (javaType == LongTimestamp.class) {
+            type.writeObject(output, paimonTimestampToTrino(type, (Timestamp) value));
+        }
         else if (javaType == LongTimestampWithTimeZone.class) {
-            checkArgument(type.equals(TIMESTAMP_TZ_MILLIS));
-            Timestamp timestamp = (Timestamp) value;
-            type.writeObject(output, fromEpochMillisAndFraction(timestamp.getMillisecond(), 0, UTC_KEY));
+            type.writeObject(output, paimonTimestampToTrinoTimestampWithTimeZone(type, (Timestamp) value));
         }
         else if (type instanceof ArrayType || type instanceof MapType || type instanceof RowType) {
             writeBlock(output, type, logicalType, value);

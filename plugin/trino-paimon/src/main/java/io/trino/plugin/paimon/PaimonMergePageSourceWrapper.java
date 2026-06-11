@@ -20,25 +20,31 @@ import io.trino.spi.connector.ConnectorPageSource;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Optional;
+
+import static java.util.Objects.requireNonNull;
 
 public class PaimonMergePageSourceWrapper
         implements
         ConnectorPageSource
 {
     private final ConnectorPageSource pageSource;
+    private final List<String> rowIdFields;
     private final HashMap<String, Integer> fieldToIndex;
 
-    public PaimonMergePageSourceWrapper(ConnectorPageSource pageSource, HashMap<String, Integer> fieldToIndex)
+    public PaimonMergePageSourceWrapper(ConnectorPageSource pageSource, List<String> rowIdFields,
+            HashMap<String, Integer> fieldToIndex)
     {
         this.pageSource = pageSource;
+        this.rowIdFields = List.copyOf(rowIdFields);
         this.fieldToIndex = fieldToIndex;
     }
 
     public static PaimonMergePageSourceWrapper wrap(ConnectorPageSource pageSource,
-            HashMap<String, Integer> fieldToIndex)
+            List<String> rowIdFields, HashMap<String, Integer> fieldToIndex)
     {
-        return new PaimonMergePageSourceWrapper(pageSource, fieldToIndex);
+        return new PaimonMergePageSourceWrapper(pageSource, rowIdFields, fieldToIndex);
     }
 
     @Override
@@ -69,28 +75,22 @@ public class PaimonMergePageSourceWrapper
         int rowCount = nextPage.getPositionCount();
 
         Block[] newBlocks = new Block[nextPage.getChannelCount() + 1];
-        Block[] rowIdBlocks = new Block[fieldToIndex.size()];
-        int actualRowIdBlockCount = 0;
         for (int i = 0; i < nextPage.getChannelCount(); i++) {
-            Block block = nextPage.getBlock(i);
-            newBlocks[i] = block;
-            if (fieldToIndex.containsValue(i)) {
-                rowIdBlocks[actualRowIdBlockCount] = block;
-                actualRowIdBlockCount++;
-            }
+            newBlocks[i] = nextPage.getBlock(i);
         }
 
-        // Create a properly sized array with only the actual blocks we found
-        // This fixes the "Invalid offset 0 and length 2 in array with 1 elements" error
-        // that occurs when not all expected fields are present in the page
-        Block[] actualRowIdBlocks = new Block[actualRowIdBlockCount];
-        System.arraycopy(rowIdBlocks, 0, actualRowIdBlocks, 0, actualRowIdBlockCount);
+        Block[] rowIdBlocks = new Block[rowIdFields.size()];
+        for (int i = 0; i < rowIdFields.size(); i++) {
+            String fieldName = rowIdFields.get(i);
+            rowIdBlocks[i] = nextPage.getBlock(requireNonNull(fieldToIndex.get(fieldName),
+                    "Missing row id field: " + fieldName));
+        }
 
         // The rowIsNull array size must match rowCount (number of rows), not the number
         // of fields
         // All rows are non-null in this context
         newBlocks[nextPage.getChannelCount()] = RowBlock.fromNotNullSuppressedFieldBlocks(rowCount,
-                Optional.of(new boolean[rowCount]), actualRowIdBlocks);
+                Optional.of(new boolean[rowCount]), rowIdBlocks);
 
         return new Page(rowCount, newBlocks);
     }

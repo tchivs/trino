@@ -14,6 +14,8 @@
 package io.trino.plugin.paimon;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -21,8 +23,11 @@ import io.trino.spi.type.Type;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.utils.JsonSerdeUtil;
 
+import java.util.Objects;
+
 import static java.util.Objects.requireNonNull;
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 public final class PaimonColumnHandle
         implements
         ColumnHandle
@@ -35,18 +40,17 @@ public final class PaimonColumnHandle
 
     @JsonCreator
     public PaimonColumnHandle(@JsonProperty("columnName") String columnName,
-            @JsonProperty("typeString") String typeString, @JsonProperty("trinoType") Type trinoType)
+            @JsonProperty("typeString") String typeString)
     {
         this.columnName = requireNonNull(columnName, "columnName is null");
         this.typeString = requireNonNull(typeString, "columnType is null");
-        this.trinoType = requireNonNull(trinoType, "columnType is null");
+        this.trinoType = PaimonTypeUtils.fromPaimonType(logicalType());
         this.isRowId = TRINO_ROW_ID_NAME.equals(columnName);
     }
 
     public static PaimonColumnHandle of(String columnName, DataType columnType)
     {
-        return new PaimonColumnHandle(columnName, JsonSerdeUtil.toJson(columnType),
-                PaimonTypeUtils.fromPaimonType(columnType));
+        return new PaimonColumnHandle(columnName, JsonSerdeUtil.toJson(columnType));
     }
 
     @JsonProperty
@@ -61,7 +65,7 @@ public final class PaimonColumnHandle
         return typeString;
     }
 
-    @JsonProperty
+    @JsonIgnore
     public Type getTrinoType()
     {
         return trinoType;
@@ -86,7 +90,7 @@ public final class PaimonColumnHandle
     @Override
     public int hashCode()
     {
-        return columnName.hashCode();
+        return Objects.hash(columnName, typeString);
     }
 
     @Override
@@ -100,7 +104,7 @@ public final class PaimonColumnHandle
         }
 
         PaimonColumnHandle other = (PaimonColumnHandle) obj;
-        return columnName.equals(other.columnName);
+        return columnName.equals(other.columnName) && typeString.equals(other.typeString);
     }
 
     @Override

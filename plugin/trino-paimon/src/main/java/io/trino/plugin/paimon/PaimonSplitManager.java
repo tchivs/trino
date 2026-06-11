@@ -31,8 +31,10 @@ import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
 
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.stream.Collectors;
 
+import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 public class PaimonSplitManager
@@ -94,7 +96,7 @@ public class PaimonSplitManager
         Table table = tableHandle.tableWithDynamicOptions(paimonCatalog, session);
         ReadBuilder readBuilder = table.newReadBuilder();
         new PaimonFilterConverter(table.rowType()).convert(tableHandle.getFilter()).ifPresent(readBuilder::withFilter);
-        tableHandle.getLimit().ifPresent(limit -> readBuilder.withLimit((int) limit));
+        pushLimit(readBuilder, tableHandle);
         List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
 
         long maxRowCount = splits.stream().mapToLong(Split::rowCount).max().orElse(0L);
@@ -106,5 +108,13 @@ public class PaimonSplitManager
 
         // Wrap with ClassLoaderSafe wrapper for proper plugin isolation
         return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
+    }
+
+    static void pushLimit(ReadBuilder readBuilder, PaimonTableHandle tableHandle)
+    {
+        OptionalLong limit = tableHandle.getLimit();
+        if (limit.isPresent() && limit.getAsLong() <= Integer.MAX_VALUE) {
+            readBuilder.withLimit(toIntExact(limit.getAsLong()));
+        }
     }
 }

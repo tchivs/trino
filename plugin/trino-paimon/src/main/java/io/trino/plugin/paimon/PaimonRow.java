@@ -17,11 +17,16 @@ import io.airlift.slice.Slice;
 import io.trino.spi.Page;
 import io.trino.spi.block.ArrayBlock;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.MapBlock;
 import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.Int128;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.TimeType;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
+import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeUtils;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.data.BinaryString;
@@ -38,8 +43,13 @@ import org.apache.paimon.types.RowKind;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
-import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.trinoTimePicosToPaimonMillis;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.trinoTimestampToPaimon;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.trinoTimestampWithTimeZoneToPaimon;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.Decimals.MAX_SHORT_PRECISION;
@@ -48,6 +58,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Math.toIntExact;
 import static org.apache.paimon.shade.guava30.com.google.common.base.Verify.verify;
@@ -59,12 +70,20 @@ public class PaimonRow
 {
     private final RowKind rowKind;
     private final Page singlePage;
+    private final List<Type> types;
 
     public PaimonRow(Page singlePage, RowKind rowKind)
     {
+        this(singlePage, rowKind, Collections.nCopies(singlePage.getChannelCount(), null));
+    }
+
+    public PaimonRow(Page singlePage, RowKind rowKind, List<Type> types)
+    {
         verify(singlePage.getPositionCount() == 1, "singlePage must have only one row");
+        verify(types.size() == singlePage.getChannelCount(), "types size must match page channel count");
         this.singlePage = singlePage;
         this.rowKind = rowKind;
+        this.types = Collections.unmodifiableList(new ArrayList<>(types));
     }
 
     /** Helper method to parse Variant from JSON stored in VARCHAR block. */
@@ -78,6 +97,32 @@ public class PaimonRow
         catch (Exception e) {
             throw new RuntimeException("Failed to parse Variant from JSON", e);
         }
+    }
+
+    private static byte readByte(Block block, int position)
+    {
+        long value = (long) TypeUtils.readNativeValue(TINYINT, block, position);
+        return (byte) value;
+    }
+
+    private static int readInt(Block block, int position, Type type)
+    {
+        if (type instanceof TimeType) {
+            return trinoTimePicosToPaimonMillis((long) TypeUtils.readNativeValue(type, block, position));
+        }
+        return toIntExact((long) TypeUtils.readNativeValue(INTEGER, block, position));
+    }
+
+    private static Timestamp readTimestamp(Block block, int position, Type type)
+    {
+        if (type instanceof TimestampType) {
+            return trinoTimestampToPaimon(TypeUtils.readNativeValue(type, block, position));
+        }
+        if (type instanceof TimestampWithTimeZoneType) {
+            return trinoTimestampWithTimeZoneToPaimon(TypeUtils.readNativeValue(type, block, position));
+        }
+        long value = (long) TypeUtils.readNativeValue(TIMESTAMP_MICROS, block, position);
+        return Timestamp.fromMicros(value);
     }
 
     @Override
@@ -113,8 +158,7 @@ public class PaimonRow
     @Override
     public byte getByte(int i)
     {
-        Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, singlePage.getBlock(i), 0);
-        return slice.getByte(0);
+        return readByte(singlePage.getBlock(i), 0);
     }
 
     @Override
@@ -130,11 +174,11 @@ public class PaimonRow
     @Override
     public int getInt(int i)
     {
-        long value = (long) TypeUtils.readNativeValue(INTEGER, singlePage.getBlock(i), 0);
+        long value = readInt(singlePage.getBlock(i), 0, types.get(i));
         if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("Value out of range for int: " + value);
         }
-        return (int) value;
+        return toIntExact(value);
     }
 
     @Override
@@ -170,10 +214,7 @@ public class PaimonRow
             return Decimal.fromUnscaledLong((Long) value, decimalPrecision, decimalScale);
         }
         else {
-            long high = ((Int128) value).getHigh();
-            long low = ((Int128) value).getLow();
-            BigInteger bigIntegerValue = BigInteger.valueOf(high).shiftLeft(64).add(BigInteger.valueOf(low));
-            BigDecimal bigDecimalValue = new BigDecimal(bigIntegerValue, decimalScale);
+            BigDecimal bigDecimalValue = new BigDecimal(DecimalUtils.toBigInteger(value), decimalScale);
             return Decimal.fromBigDecimal(bigDecimalValue, decimalPrecision, decimalScale);
         }
     }
@@ -181,8 +222,7 @@ public class PaimonRow
     @Override
     public Timestamp getTimestamp(int i, int timestampPrecision)
     {
-        long value = (long) TypeUtils.readNativeValue(TIMESTAMP_MICROS, singlePage.getBlock(i), 0);
-        return Timestamp.fromMicros(value);
+        return readTimestamp(singlePage.getBlock(i), 0, types.get(i));
     }
 
     @Override
@@ -216,8 +256,12 @@ public class PaimonRow
         if (isNullAt(i)) {
             return null;
         }
-        ArrayBlock arrayBlock = (ArrayBlock) singlePage.getBlock(i).getSingleValueBlock(0);
-        return new TrinoArray(arrayBlock);
+        Type type = types.get(i);
+        if (type instanceof ArrayType arrayType) {
+            return new TrinoArray(arrayType.getObject(singlePage.getBlock(i), 0), arrayType.getElementType());
+        }
+        ArrayBlock arrayBlock = (ArrayBlock) singlePage.getBlock(i);
+        return new TrinoArray(arrayBlock.getArray(0), null);
     }
 
     @Override
@@ -232,9 +276,12 @@ public class PaimonRow
         if (isNullAt(i)) {
             return null;
         }
-        MapBlock mapBlock = (MapBlock) singlePage.getBlock(i);
-        SqlMap sqlMap = mapBlock.getMap(0);
-        return new TrinoMap(sqlMap);
+        Type type = types.get(i);
+        if (type instanceof MapType mapType) {
+            SqlMap sqlMap = mapType.getObject(singlePage.getBlock(i), 0);
+            return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType());
+        }
+        throw new UnsupportedOperationException("Map type metadata is required");
     }
 
     @Override
@@ -243,8 +290,11 @@ public class PaimonRow
         if (isNullAt(i)) {
             return null;
         }
-        RowBlock rowBlock = (RowBlock) singlePage.getBlock(i).getSingleValueBlock(0);
-        return new TrinoNestedRow(rowBlock, rowKind);
+        Type type = types.get(i);
+        if (type instanceof io.trino.spi.type.RowType rowType) {
+            return new TrinoNestedRow(rowType.getObject(singlePage.getBlock(i), 0), rowKind, rowType.getTypeParameters());
+        }
+        return new TrinoNestedRow((RowBlock) singlePage.getBlock(i).getSingleValueBlock(0), rowKind, null);
     }
 
     /** Base class for InternalArray implementations wrapping Trino Block. */
@@ -253,10 +303,12 @@ public class PaimonRow
             InternalArray
     {
         protected final Block block;
+        protected final Type type;
 
-        AbstractTrinoArray(Block block)
+        AbstractTrinoArray(Block block, Type type)
         {
             this.block = block;
+            this.type = type;
         }
 
         /** Get the actual position in the block for a logical position. */
@@ -277,8 +329,7 @@ public class PaimonRow
         @Override
         public byte getByte(int pos)
         {
-            Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, block, getPosition(pos));
-            return slice.getByte(0);
+            return readByte(block, getPosition(pos));
         }
 
         @Override
@@ -291,8 +342,7 @@ public class PaimonRow
         @Override
         public int getInt(int pos)
         {
-            long value = (long) TypeUtils.readNativeValue(INTEGER, block, getPosition(pos));
-            return (int) value;
+            return readInt(block, getPosition(pos), type);
         }
 
         @Override
@@ -328,10 +378,7 @@ public class PaimonRow
                 return Decimal.fromUnscaledLong((Long) value, precision, scale);
             }
             else {
-                long high = ((Int128) value).getHigh();
-                long low = ((Int128) value).getLow();
-                BigInteger bigIntegerValue = BigInteger.valueOf(high).shiftLeft(64).add(BigInteger.valueOf(low));
-                BigDecimal bigDecimalValue = new BigDecimal(bigIntegerValue, scale);
+                BigDecimal bigDecimalValue = new BigDecimal(DecimalUtils.toBigInteger(value), scale);
                 return Decimal.fromBigDecimal(bigDecimalValue, precision, scale);
             }
         }
@@ -339,8 +386,7 @@ public class PaimonRow
         @Override
         public Timestamp getTimestamp(int pos, int precision)
         {
-            long value = (long) TypeUtils.readNativeValue(TIMESTAMP_MICROS, block, getPosition(pos));
-            return Timestamp.fromMicros(value);
+            return readTimestamp(block, getPosition(pos), type);
         }
 
         @Override
@@ -374,8 +420,11 @@ public class PaimonRow
             if (isNullAt(pos)) {
                 return null;
             }
-            ArrayBlock nestedBlock = (ArrayBlock) block.getSingleValueBlock(getPosition(pos));
-            return new TrinoArray(nestedBlock);
+            if (type instanceof ArrayType arrayType) {
+                return new TrinoArray(arrayType.getObject(block, getPosition(pos)), arrayType.getElementType());
+            }
+            ArrayBlock nestedBlock = (ArrayBlock) block;
+            return new TrinoArray(nestedBlock.getArray(getPosition(pos)), null);
         }
 
         @Override
@@ -390,9 +439,11 @@ public class PaimonRow
             if (isNullAt(pos)) {
                 return null;
             }
-            MapBlock mapBlock = (MapBlock) block;
-            SqlMap sqlMap = mapBlock.getMap(getPosition(pos));
-            return new TrinoMap(sqlMap);
+            if (type instanceof MapType mapType) {
+                SqlMap sqlMap = mapType.getObject(block, getPosition(pos));
+                return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType());
+            }
+            throw new UnsupportedOperationException("Map type metadata is required");
         }
 
         @Override
@@ -401,8 +452,11 @@ public class PaimonRow
             if (isNullAt(pos)) {
                 return null;
             }
-            RowBlock rowBlock = (RowBlock) block.getSingleValueBlock(getPosition(pos));
-            return new TrinoNestedRow(rowBlock, RowKind.INSERT);
+            if (type instanceof io.trino.spi.type.RowType rowType) {
+                return new TrinoNestedRow(rowType.getObject(block, getPosition(pos)), RowKind.INSERT,
+                        rowType.getTypeParameters());
+            }
+            return new TrinoNestedRow((RowBlock) block.getSingleValueBlock(getPosition(pos)), RowKind.INSERT, null);
         }
 
         @Override
@@ -483,7 +537,12 @@ public class PaimonRow
     {
         TrinoArray(Block block)
         {
-            super(block);
+            this(block, null);
+        }
+
+        TrinoArray(Block block, Type type)
+        {
+            super(block, type);
         }
 
         @Override
@@ -500,7 +559,7 @@ public class PaimonRow
     }
 
     /** TrinoMap implementation for {@link InternalMap}. */
-    private record TrinoMap(SqlMap sqlMap) implements InternalMap
+    private record TrinoMap(SqlMap sqlMap, Type keyType, Type valueType) implements InternalMap
     {
         @Override
         public int size()
@@ -514,7 +573,7 @@ public class PaimonRow
             Block keyBlock = sqlMap.getRawKeyBlock();
             int offset = sqlMap.getRawOffset();
             int count = sqlMap.getSize();
-            return new TrinoArrayView(keyBlock, offset, count);
+            return new TrinoArrayView(keyBlock, offset, count, keyType);
         }
 
         @Override
@@ -523,7 +582,7 @@ public class PaimonRow
             Block valueBlock = sqlMap.getRawValueBlock();
             int offset = sqlMap.getRawOffset();
             int count = sqlMap.getSize();
-            return new TrinoArrayView(valueBlock, offset, count);
+            return new TrinoArrayView(valueBlock, offset, count, valueType);
         }
     }
 
@@ -532,31 +591,26 @@ public class PaimonRow
             implements
             InternalRow
     {
-        private final RowBlock rowBlock;
+        private final SqlRow sqlRow;
         private final RowKind rowKind;
-        private final int position;
+        private final List<Type> types;
 
-        TrinoNestedRow(RowBlock rowBlock, RowKind rowKind)
+        TrinoNestedRow(RowBlock rowBlock, RowKind rowKind, List<Type> types)
         {
-            this.rowBlock = rowBlock;
+            this(rowBlock.getRow(0), rowKind, types);
+        }
+
+        TrinoNestedRow(SqlRow sqlRow, RowKind rowKind, List<Type> types)
+        {
+            this.sqlRow = sqlRow;
             this.rowKind = rowKind;
-            this.position = 0;
+            this.types = types == null ? Collections.nCopies(sqlRow.getFieldCount(), null) : types;
         }
 
         @Override
         public int getFieldCount()
         {
-            // Count field blocks by iterating until we get an exception
-            int count = 0;
-            try {
-                while (true) {
-                    rowBlock.getFieldBlock(count);
-                    count++;
-                }
-            }
-            catch (Exception e) {
-                return count;
-            }
+            return sqlRow.getFieldCount();
         }
 
         @Override
@@ -574,60 +628,58 @@ public class PaimonRow
         @Override
         public boolean isNullAt(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            return fieldBlock.isNull(position);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            return fieldBlock.isNull(sqlRow.getRawIndex());
         }
 
         @Override
         public boolean getBoolean(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            return (boolean) TypeUtils.readNativeValue(BOOLEAN, fieldBlock, position);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            return (boolean) TypeUtils.readNativeValue(BOOLEAN, fieldBlock, sqlRow.getRawIndex());
         }
 
         @Override
         public byte getByte(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, fieldBlock, position);
-            return slice.getByte(0);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            return readByte(fieldBlock, sqlRow.getRawIndex());
         }
 
         @Override
         public short getShort(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            long value = (long) TypeUtils.readNativeValue(SMALLINT, fieldBlock, position);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            long value = (long) TypeUtils.readNativeValue(SMALLINT, fieldBlock, sqlRow.getRawIndex());
             return (short) value;
         }
 
         @Override
         public int getInt(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            long value = (long) TypeUtils.readNativeValue(INTEGER, fieldBlock, position);
-            return (int) value;
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            return readInt(fieldBlock, sqlRow.getRawIndex(), types.get(pos));
         }
 
         @Override
         public long getLong(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            return (long) TypeUtils.readNativeValue(BIGINT, fieldBlock, position);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            return (long) TypeUtils.readNativeValue(BIGINT, fieldBlock, sqlRow.getRawIndex());
         }
 
         @Override
         public float getFloat(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            return Float.intBitsToFloat(toIntExact((long) TypeUtils.readNativeValue(REAL, fieldBlock, position)));
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            return Float.intBitsToFloat(toIntExact((long) TypeUtils.readNativeValue(REAL, fieldBlock, sqlRow.getRawIndex())));
         }
 
         @Override
         public double getDouble(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            return (double) TypeUtils.readNativeValue(DOUBLE, fieldBlock, position);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            return (double) TypeUtils.readNativeValue(DOUBLE, fieldBlock, sqlRow.getRawIndex());
         }
 
         @Override
@@ -639,17 +691,14 @@ public class PaimonRow
         @Override
         public Decimal getDecimal(int pos, int precision, int scale)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
             Object value = TypeUtils.readNativeValue(DecimalType.createDecimalType(precision, scale), fieldBlock,
-                    position);
+                    sqlRow.getRawIndex());
             if (precision <= MAX_SHORT_PRECISION) {
                 return Decimal.fromUnscaledLong((Long) value, precision, scale);
             }
             else {
-                long high = ((Int128) value).getHigh();
-                long low = ((Int128) value).getLow();
-                BigInteger bigIntegerValue = BigInteger.valueOf(high).shiftLeft(64).add(BigInteger.valueOf(low));
-                BigDecimal bigDecimalValue = new BigDecimal(bigIntegerValue, scale);
+                BigDecimal bigDecimalValue = new BigDecimal(DecimalUtils.toBigInteger(value), scale);
                 return Decimal.fromBigDecimal(bigDecimalValue, precision, scale);
             }
         }
@@ -657,16 +706,15 @@ public class PaimonRow
         @Override
         public Timestamp getTimestamp(int pos, int precision)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            long value = (long) TypeUtils.readNativeValue(TIMESTAMP_MICROS, fieldBlock, position);
-            return Timestamp.fromMicros(value);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            return readTimestamp(fieldBlock, sqlRow.getRawIndex(), types.get(pos));
         }
 
         @Override
         public byte[] getBinary(int pos)
         {
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, fieldBlock, position);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, fieldBlock, sqlRow.getRawIndex());
             return slice.getBytes();
         }
 
@@ -676,8 +724,8 @@ public class PaimonRow
             if (isNullAt(pos)) {
                 return null;
             }
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            return parseVariantFromBlock(fieldBlock, position);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            return parseVariantFromBlock(fieldBlock, sqlRow.getRawIndex());
         }
 
         @Override
@@ -695,9 +743,13 @@ public class PaimonRow
             if (isNullAt(pos)) {
                 return null;
             }
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            ArrayBlock arrayBlock = (ArrayBlock) fieldBlock.getSingleValueBlock(position);
-            return new TrinoArray(arrayBlock);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            Type type = types.get(pos);
+            if (type instanceof ArrayType arrayType) {
+                return new TrinoArray(arrayType.getObject(fieldBlock, sqlRow.getRawIndex()), arrayType.getElementType());
+            }
+            ArrayBlock arrayBlock = (ArrayBlock) fieldBlock;
+            return new TrinoArray(arrayBlock.getArray(sqlRow.getRawIndex()), null);
         }
 
         @Override
@@ -712,10 +764,13 @@ public class PaimonRow
             if (isNullAt(pos)) {
                 return null;
             }
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            MapBlock mapBlock = (MapBlock) fieldBlock;
-            SqlMap sqlMap = mapBlock.getMap(position);
-            return new TrinoMap(sqlMap);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            Type type = types.get(pos);
+            if (type instanceof MapType mapType) {
+                SqlMap sqlMap = mapType.getObject(fieldBlock, sqlRow.getRawIndex());
+                return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType());
+            }
+            throw new UnsupportedOperationException("Map type metadata is required");
         }
 
         @Override
@@ -724,9 +779,13 @@ public class PaimonRow
             if (isNullAt(pos)) {
                 return null;
             }
-            Block fieldBlock = rowBlock.getFieldBlock(pos);
-            RowBlock nestedRowBlock = (RowBlock) fieldBlock.getSingleValueBlock(position);
-            return new TrinoNestedRow(nestedRowBlock, rowKind);
+            Block fieldBlock = sqlRow.getRawFieldBlock(pos);
+            Type type = types.get(pos);
+            if (type instanceof io.trino.spi.type.RowType rowType) {
+                return new TrinoNestedRow(rowType.getObject(fieldBlock, sqlRow.getRawIndex()), rowKind,
+                        rowType.getTypeParameters());
+            }
+            return new TrinoNestedRow((RowBlock) fieldBlock.getSingleValueBlock(sqlRow.getRawIndex()), rowKind, null);
         }
     }
 
@@ -743,7 +802,12 @@ public class PaimonRow
 
         TrinoArrayView(Block block, int offset, int length)
         {
-            super(block);
+            this(block, offset, length, null);
+        }
+
+        TrinoArrayView(Block block, int offset, int length, Type type)
+        {
+            super(block, type);
             this.offset = offset;
             this.length = length;
         }

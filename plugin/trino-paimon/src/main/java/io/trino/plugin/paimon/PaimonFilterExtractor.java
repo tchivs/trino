@@ -98,8 +98,9 @@ public class PaimonFilterExtractor
         TupleDomain<ColumnHandle> remain = (TupleDomain) TupleDomain.withColumnDomains(unsupportedDomains)
                 .intersect(TupleDomain.withColumnDomains(unenforcedDomains));
 
-        // Determine remaining expression based on whether all filters were pushed down
-        ConnectorExpression remainingExpression = remain.isAll() ? Constant.TRUE : constraint.getExpression();
+        ConnectorExpression remainingExpression = trinoColumnHandleForExpressionFilter.isEmpty() && remain.isAll()
+                ? Constant.TRUE
+                : constraint.getExpression();
 
         return Optional
                 .of(new TrinoFilter(TupleDomain.withColumnDomains(acceptedDomains), remain, remainingExpression));
@@ -248,7 +249,7 @@ public class PaimonFilterExtractor
         Type trinoType = paimonColumnHandle.getTrinoType();
         if (trinoType instanceof MapType) {
             expressionPredicates.put(
-                    PaimonColumnHandle.of(toMapKey(columnName, nestedName), PaimonTypeUtils.toPaimonType(trinoType)),
+                    PaimonColumnHandle.of(toMapKey(columnName, nestedName), paimonColumnHandle.logicalType()),
                     Domain.create(SortedRangeSet.copyOf(elementType, ranges), false));
         }
         return expressionPredicates;

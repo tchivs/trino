@@ -39,10 +39,12 @@ public class FixedBucketTableShuffleFunction
     private final boolean isRowId;
     private final ThreadLocal<Projection> projectionContext;
     private final BucketFunction bucketFunction;
+    private final List<Type> partitionChannelTypes;
 
     public FixedBucketTableShuffleFunction(List<Type> partitionChannelTypes, PaimonPartitioningHandle partitioningHandle,
             int workerCount)
     {
+        this.partitionChannelTypes = partitionChannelTypes;
         TableSchema schema = partitioningHandle.getOriginalSchema();
         this.projectionContext = ThreadLocal
                 .withInitial(() -> CodeGenUtils.newProjection(schema.logicalRowType(), schema.projection(schema.bucketKeys())));
@@ -73,7 +75,7 @@ public class FixedBucketTableShuffleFunction
             }
         }
 
-        PaimonRow paimonRow = new PaimonRow(page.getSingleValuePage(position), RowKind.INSERT);
+        PaimonRow paimonRow = new PaimonRow(page.getSingleValuePage(position), RowKind.INSERT, partitionChannelTypes);
         BinaryRow bucketKey = projectionContext.get().apply(paimonRow);
         int bucket = bucketFunction.bucket(bucketKey, bucketCount);
         return bucket % workerCount;
