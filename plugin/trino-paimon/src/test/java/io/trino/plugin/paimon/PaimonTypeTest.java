@@ -208,5 +208,10 @@ public class PaimonTypeTest
 
         DataType nextRowType = PaimonTypeUtils.toPaimonType(type);
         assertThat(nextRowType).isEqualTo(rowType);
+
+        DataType anonymousRowType = PaimonTypeUtils.toPaimonType(RowType.anonymous(List.of(
+                IntegerType.INTEGER,
+                VarcharType.createUnboundedVarcharType())));
+        assertThat(anonymousRowType.asSQLString()).isEqualTo("ROW<`f0` INT, `f1` VARCHAR(2147483646)>");
     }
 }

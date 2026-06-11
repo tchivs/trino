@@ -48,6 +48,7 @@ import org.apache.paimon.types.TinyIntType;
 import org.apache.paimon.types.VarBinaryType;
 import org.apache.paimon.types.VarCharType;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -302,10 +303,12 @@ public class PaimonTypeUtils
                         visit(((io.trino.spi.type.MapType) trinoType).getValueType()));
             }
             else if (trinoType instanceof io.trino.spi.type.RowType rowType) {
-                List<DataField> dataFields = rowType.getFields().stream()
-                        .map(field -> new DataField(currentIndex.getAndIncrement(), field.getName().get(),
-                                visit(field.getType())))
-                        .collect(Collectors.toList());
+                List<DataField> dataFields = new ArrayList<>();
+                for (int fieldIndex = 0; fieldIndex < rowType.getFields().size(); fieldIndex++) {
+                    io.trino.spi.type.RowType.Field field = rowType.getFields().get(fieldIndex);
+                    dataFields.add(new DataField(currentIndex.getAndIncrement(),
+                            field.getName().orElse("f" + fieldIndex), visit(field.getType())));
+                }
                 return new RowType(true, dataFields);
             }
             else {

@@ -133,6 +133,41 @@ public class TestPaimonFileIO
         assertThat(fileIO.readFileUtf8(target)).isEqualTo("schema");
     }
 
+    @Test
+    public void testObjectStoreRenameMarkerDirectoryFails()
+            throws IOException
+    {
+        PaimonFileIO fileIO = new PaimonFileIO(new NoRenameFileSystem(), null);
+        Path source = new Path("memory:///warehouse/minio_smoke.db/orders");
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders_renamed");
+
+        fileIO.mkdirs(source);
+
+        assertThatThrownBy(() -> fileIO.rename(source, target))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("does not support directory renames");
+        assertThat(fileIO.exists(source)).isTrue();
+        assertThat(fileIO.exists(target)).isFalse();
+    }
+
+    @Test
+    public void testObjectStoreRenameRealDirectoryFails()
+            throws IOException
+    {
+        PaimonFileIO fileIO = new PaimonFileIO(new NoRenameFileSystem(), null);
+        Path source = new Path("memory:///warehouse/minio_smoke.db/orders");
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders_renamed");
+
+        fileIO.mkdirs(source);
+        fileIO.writeFile(new Path(source, "schema-0"), "schema", false);
+
+        assertThatThrownBy(() -> fileIO.rename(source, target))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("does not support directory renames");
+        assertThat(fileIO.exists(source)).isTrue();
+        assertThat(fileIO.exists(target)).isFalse();
+    }
+
     private static class NoRenameFileSystem
             implements TrinoFileSystem
     {

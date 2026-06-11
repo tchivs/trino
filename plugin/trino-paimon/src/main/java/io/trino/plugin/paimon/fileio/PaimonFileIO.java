@@ -202,7 +202,10 @@ public class PaimonFileIO
     {
         Location sourceLocation = Location.of(source.toString());
         Location targetLocation = Location.of(target.toString());
-        if (trinoFileSystem.directoryExists(sourceLocation).orElse(false)) {
+        if (isDirectory(sourceLocation)) {
+            if (objectStore) {
+                throw new IOException("S3 does not support directory renames");
+            }
             trinoFileSystem.renameDirectory(sourceLocation, targetLocation);
         }
         else if (objectStore) {
