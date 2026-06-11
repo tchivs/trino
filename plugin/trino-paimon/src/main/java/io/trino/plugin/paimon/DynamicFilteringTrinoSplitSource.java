@@ -147,7 +147,7 @@ public class DynamicFilteringTrinoSplitSource
 
         return new PaimonSplitSource(splits.stream()
                 .map(split -> PaimonSplit.fromSplit(split,
-                        Math.min(Math.max((double) split.rowCount() / maxRowCount, minimumSplitWeight), 1.0)))
+                        PaimonSplitManager.calculateSplitWeight(split, maxRowCount, minimumSplitWeight)))
                 .collect(Collectors.toList()), tableHandle.getLimit());
     }
 

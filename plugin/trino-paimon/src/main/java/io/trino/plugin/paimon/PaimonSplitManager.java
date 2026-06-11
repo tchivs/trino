@@ -103,7 +103,7 @@ public class PaimonSplitManager
         double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
         PaimonSplitSource splitSource = new PaimonSplitSource(splits.stream()
                 .map(split -> PaimonSplit.fromSplit(split,
-                        Math.min(Math.max((double) split.rowCount() / maxRowCount, minimumSplitWeight), 1.0)))
+                        calculateSplitWeight(split, maxRowCount, minimumSplitWeight)))
                 .collect(Collectors.toList()), tableHandle.getLimit());
 
         // Wrap with ClassLoaderSafe wrapper for proper plugin isolation
@@ -116,5 +116,14 @@ public class PaimonSplitManager
         if (limit.isPresent() && limit.getAsLong() <= Integer.MAX_VALUE) {
             readBuilder.withLimit(toIntExact(limit.getAsLong()));
         }
+    }
+
+    static double calculateSplitWeight(Split split, long maxRowCount, double minimumSplitWeight)
+    {
+        requireNonNull(split, "split is null");
+        if (maxRowCount <= 0 || split.rowCount() <= 0) {
+            return minimumSplitWeight;
+        }
+        return Math.min(Math.max((double) split.rowCount() / maxRowCount, minimumSplitWeight), 1.0);
     }
 }

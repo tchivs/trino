@@ -26,11 +26,13 @@ import java.util.List;
 
 public record PaimonSplit(String splitSerialized, Double weight) implements ConnectorSplit
 {
+    private static final double STANDARD_WEIGHT = 1.0;
+
     @JsonCreator
     public PaimonSplit(@JsonProperty("splitSerialized") String splitSerialized, @JsonProperty("weight") Double weight)
     {
         this.splitSerialized = splitSerialized;
-        this.weight = weight;
+        this.weight = weight == null ? STANDARD_WEIGHT : weight;
     }
 
     public static PaimonSplit fromSplit(Split split, Double weight)
