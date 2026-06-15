@@ -137,29 +137,31 @@ public class PaimonSplitManager
                     PaimonSplitManager.class.getClassLoader());
         }
 
-        Catalog catalog = paimonCatalog.forSession(session);
-        Table table = PaimonTableHandle.schemaAwareReadTable(
-                tableHandle.tableWithDynamicOptions(catalog, session),
-                !tableHandle.usesHistoricalReadSchema(session));
-        List<Split> splits;
         try {
+            Catalog catalog = paimonCatalog.forSession(session);
+            Table table = PaimonTableHandle.schemaAwareReadTable(
+                    tableHandle.tableWithDynamicOptions(catalog, session),
+                    !tableHandle.usesHistoricalReadSchema(session));
             ReadBuilder readBuilder = table.newReadBuilder();
             pushPredicate(readBuilder, table, predicate);
             pushLimit(readBuilder, tableHandle);
-            splits = readBuilder.dropStats().newScan().plan().splits();
+            List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
+
+            long maxRowCount = splits.stream().mapToLong(PaimonSplitManager::splitWeightRowCount).max().orElse(0L);
+            double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
+            PaimonSplitSource splitSource = new PaimonSplitSource(splits.stream()
+                    .map(split -> PaimonSplit.fromSplit(split,
+                            calculateSplitWeight(split, maxRowCount, minimumSplitWeight)))
+                    .collect(Collectors.toList()), tableHandle.getLimit());
+
+            return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
         }
         catch (UnsupportedOperationException e) {
             throw unsupportedReadOperation(tableHandle, e);
         }
-
-        long maxRowCount = splits.stream().mapToLong(PaimonSplitManager::splitWeightRowCount).max().orElse(0L);
-        double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
-        PaimonSplitSource splitSource = new PaimonSplitSource(splits.stream()
-                .map(split -> PaimonSplit.fromSplit(split,
-                        calculateSplitWeight(split, maxRowCount, minimumSplitWeight)))
-                .collect(Collectors.toList()), tableHandle.getLimit());
-
-        return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
+        catch (RuntimeException e) {
+            throw splitPlanningException(tableHandle, e);
+        }
     }
 
     static TrinoException unsupportedReadOperation(PaimonTableHandle tableHandle, UnsupportedOperationException cause)
@@ -171,6 +173,17 @@ public class PaimonSplitManager
                 ? "Paimon system.table_changes uses features which are not supported by the Trino connector"
                 : "Paimon table read uses features which are not supported by the Trino connector";
         return new TrinoException(NOT_SUPPORTED, message, cause);
+    }
+
+    static RuntimeException splitPlanningException(PaimonTableHandle tableHandle, Exception cause)
+    {
+        requireNonNull(tableHandle, "tableHandle is null");
+        requireNonNull(cause, "cause is null");
+
+        String message = tableHandle.hasIncrementalReadWindow()
+                ? "Failed to plan Paimon table_changes splits"
+                : "Failed to plan Paimon splits";
+        return PaimonPageSourceProvider.wrapPaimonReadException(message, cause);
     }
 
     static void pushLimit(ReadBuilder readBuilder, PaimonTableHandle tableHandle)

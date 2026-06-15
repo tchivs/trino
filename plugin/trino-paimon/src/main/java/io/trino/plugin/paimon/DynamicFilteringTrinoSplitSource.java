@@ -142,35 +142,37 @@ public class DynamicFilteringTrinoSplitSource
             return PaimonSplitManager.emptySplitSource(tableHandle);
         }
 
-        Catalog catalog = paimonCatalog.forSession(session);
-
-        // Apply combined predicate to table scan
-        Table table = PaimonTableHandle.schemaAwareReadTable(
-                tableHandle.tableWithDynamicOptions(catalog, session),
-                !tableHandle.usesHistoricalReadSchema(session));
-        List<Split> splits;
         try {
+            Catalog catalog = paimonCatalog.forSession(session);
+
+            // Apply combined predicate to table scan
+            Table table = PaimonTableHandle.schemaAwareReadTable(
+                    tableHandle.tableWithDynamicOptions(catalog, session),
+                    !tableHandle.usesHistoricalReadSchema(session));
             ReadBuilder readBuilder = table.newReadBuilder();
             PaimonSplitManager.pushPredicate(readBuilder, table, combinedPredicate);
             PaimonSplitManager.pushLimit(readBuilder, tableHandle);
 
             // Plan splits
-            splits = readBuilder.dropStats().newScan().plan().splits();
+            List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
+
+            LOG.debug("Planned %s splits after applying dynamic filters", splits.size());
+
+            // Calculate split weights
+            long maxRowCount = splits.stream().mapToLong(PaimonSplitManager::splitWeightRowCount).max().orElse(0L);
+            double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
+
+            return new PaimonSplitSource(splits.stream()
+                    .map(split -> PaimonSplit.fromSplit(split,
+                            PaimonSplitManager.calculateSplitWeight(split, maxRowCount, minimumSplitWeight)))
+                    .collect(Collectors.toList()), tableHandle.getLimit());
         }
         catch (UnsupportedOperationException e) {
             throw PaimonSplitManager.unsupportedReadOperation(tableHandle, e);
         }
-
-        LOG.debug("Planned %s splits after applying dynamic filters", splits.size());
-
-        // Calculate split weights
-        long maxRowCount = splits.stream().mapToLong(PaimonSplitManager::splitWeightRowCount).max().orElse(0L);
-        double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
-
-        return new PaimonSplitSource(splits.stream()
-                .map(split -> PaimonSplit.fromSplit(split,
-                        PaimonSplitManager.calculateSplitWeight(split, maxRowCount, minimumSplitWeight)))
-                .collect(Collectors.toList()), tableHandle.getLimit());
+        catch (RuntimeException e) {
+            throw PaimonSplitManager.splitPlanningException(tableHandle, e);
+        }
     }
 
     static TupleDomain<PaimonColumnHandle> combinePredicates(TupleDomain<PaimonColumnHandle> staticPredicate,

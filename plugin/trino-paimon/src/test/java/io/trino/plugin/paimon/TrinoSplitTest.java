@@ -35,6 +35,8 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
@@ -44,6 +46,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -419,6 +422,49 @@ public class TrinoSplitTest
                     assertThat(exception).hasMessage("Paimon system.table_changes uses features which are not supported by the Trino connector");
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
                             .hasMessage("unsupported scan mode");
+                });
+    }
+
+    @Test
+    public void testSplitPlanningMapsWrappedRuntimeIoFailuresToCannotOpenSplit()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, failingPlanningTable("split planning failed"));
+        PaimonSplitManager splitManager = splitManager(catalog);
+
+        assertThatThrownBy(() -> splitManager.getSplits(
+                null,
+                SESSION,
+                new PaimonTableHandle("schema", "table", Map.of()),
+                DynamicFilter.EMPTY,
+                Constraint.alwaysTrue()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to plan Paimon splits");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class)
+                            .hasMessage("split planning failed");
+                });
+    }
+
+    @Test
+    public void testTableChangesSplitPlanningMapsWrappedRuntimeIoFailuresToCannotOpenSplit()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, failingPlanningTable("table_changes planning failed"));
+        PaimonSplitManager splitManager = splitManager(catalog);
+        PaimonTableHandle tableChangesHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(org.apache.paimon.CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThatThrownBy(() -> splitManager.getSplits(null, SESSION, tableChangesHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class)
+                            .hasMessage("table_changes planning failed");
                 });
     }
 
@@ -825,6 +871,20 @@ public class TrinoSplitTest
                 });
     }
 
+    private static Table failingPlanningTable(String message)
+    {
+        return (Table) Proxy.newProxyInstance(
+                TrinoSplitTest.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
+                    case "newReadBuilder" -> failingPlanningReadBuilder(message);
+                    case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+                    case "toString" -> "failing-planning-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
     private static ReadBuilder unsupportedPlanningReadBuilder()
     {
         return (ReadBuilder) Proxy.newProxyInstance(
@@ -838,6 +898,21 @@ public class TrinoSplitTest
                     case "readType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
                     case "tableName" -> "unsupported-planning-table";
                     case "toString" -> "unsupported-planning-read-builder";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder failingPlanningReadBuilder(String message)
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                TrinoSplitTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "dropStats", "withFilter", "withLimit" -> proxy;
+                    case "newScan" -> throw new UncheckedIOException(new IOException(message));
+                    case "readType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+                    case "tableName" -> "failing-planning-table";
+                    case "toString" -> "failing-planning-read-builder";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
