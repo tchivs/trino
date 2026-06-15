@@ -1209,6 +1209,52 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testApplyFilterSkipsNonEmptyPushdownAfterAcceptedLimitBeforeCatalogInitialization()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(5));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(
+                id, Domain.singleValue(INTEGER, 1L))));
+
+        assertThat(metadata.applyFilter(SESSION, tableHandle, constraint)).isEmpty();
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
+    public void testApplyFilterStillShortCircuitsAlwaysFalseAfterAcceptedLimitBeforeCatalogInitialization()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(5));
+
+        assertThat(metadata.applyFilter(SESSION, tableHandle, Constraint.alwaysFalse()))
+                .isPresent()
+                .get()
+                .satisfies(result -> {
+                    assertThat(((PaimonTableHandle) result.getHandle()).getFilter()).isEqualTo(TupleDomain.none());
+                    assertThat(result.getRemainingFilter()).isEqualTo(TupleDomain.all());
+                    assertThat(result.getRemainingExpression()).contains(TRUE);
+                });
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
     public void testApplyProjectionValidatesInputsBeforeCatalogInitialization()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());

@@ -1283,6 +1283,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return Optional.of(new ConstraintApplicationResult<>(paimonTableHandle.copy(TupleDomain.none()),
                     TupleDomain.all(), TRUE, false));
         }
+        if (paimonTableHandle.getLimit().isPresent()) {
+            return Optional.empty();
+        }
         if (constraint.getSummary().isAll() && constraint.getExpression().equals(TRUE)) {
             return Optional.empty();
         }
