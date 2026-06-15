@@ -148,13 +148,18 @@ public class DynamicFilteringTrinoSplitSource
         Table table = PaimonTableHandle.schemaAwareReadTable(
                 tableHandle.tableWithDynamicOptions(catalog, session),
                 !tableHandle.usesHistoricalReadSchema(session));
-        ReadBuilder readBuilder = table.newReadBuilder();
-        PaimonSplitManager.pushPredicate(readBuilder, table, combinedPredicate);
+        List<Split> splits;
+        try {
+            ReadBuilder readBuilder = table.newReadBuilder();
+            PaimonSplitManager.pushPredicate(readBuilder, table, combinedPredicate);
+            PaimonSplitManager.pushLimit(readBuilder, tableHandle);
 
-        PaimonSplitManager.pushLimit(readBuilder, tableHandle);
-
-        // Plan splits
-        List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
+            // Plan splits
+            splits = readBuilder.dropStats().newScan().plan().splits();
+        }
+        catch (UnsupportedOperationException e) {
+            throw PaimonSplitManager.unsupportedReadOperation(tableHandle, e);
+        }
 
         LOG.debug("Planned %s splits after applying dynamic filters", splits.size());
 

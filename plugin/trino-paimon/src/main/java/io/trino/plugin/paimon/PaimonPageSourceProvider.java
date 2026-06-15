@@ -454,6 +454,10 @@ public class PaimonPageSourceProvider
         if (exception instanceof TrinoException trinoException) {
             return trinoException;
         }
+        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+            return unsupportedReadException("Paimon page read uses features which are not supported by the Trino connector",
+                    unsupportedOperationException);
+        }
         if (exception instanceof RuntimeException runtimeException) {
             return runtimeException;
         }
@@ -465,10 +469,19 @@ public class PaimonPageSourceProvider
         if (exception instanceof TrinoException trinoException) {
             return trinoException;
         }
+        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+            return unsupportedReadException(message, unsupportedOperationException);
+        }
         if (exception instanceof RuntimeException runtimeException) {
             return runtimeException;
         }
         return new RuntimeException(message, exception);
+    }
+
+    static TrinoException unsupportedReadException(String message, UnsupportedOperationException exception)
+    {
+        requireNonNull(message, "message is null");
+        return new TrinoException(NOT_SUPPORTED, message, requireNonNull(exception, "exception is null"));
     }
 
     static ConnectorPageSource emptyPageSource()

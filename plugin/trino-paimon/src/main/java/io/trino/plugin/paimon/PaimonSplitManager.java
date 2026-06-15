@@ -162,7 +162,7 @@ public class PaimonSplitManager
         return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
     }
 
-    private static TrinoException unsupportedReadOperation(PaimonTableHandle tableHandle, UnsupportedOperationException cause)
+    static TrinoException unsupportedReadOperation(PaimonTableHandle tableHandle, UnsupportedOperationException cause)
     {
         requireNonNull(tableHandle, "tableHandle is null");
         requireNonNull(cause, "cause is null");

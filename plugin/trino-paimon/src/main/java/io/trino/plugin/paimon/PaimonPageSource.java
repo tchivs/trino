@@ -179,6 +179,11 @@ public class PaimonPageSource
             catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
+            catch (UnsupportedOperationException e) {
+                throw PaimonPageSourceProvider.unsupportedReadException(
+                        "Paimon page read uses features which are not supported by the Trino connector",
+                        e);
+            }
         }, PaimonPageSource.class.getClassLoader());
     }
 

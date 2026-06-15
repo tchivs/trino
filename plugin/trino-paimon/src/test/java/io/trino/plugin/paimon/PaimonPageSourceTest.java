@@ -1047,16 +1047,29 @@ public class PaimonPageSourceTest
     {
         TrinoException unsupported = new TrinoException(NOT_SUPPORTED, "unsupported direct read");
         IllegalStateException contractViolation = new IllegalStateException("metadata mismatch");
+        UnsupportedOperationException unsupportedRead = new UnsupportedOperationException("unsupported logical type");
         IOException ioException = new IOException("cannot read");
 
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(unsupported)).isSameAs(unsupported);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(contractViolation)).isSameAs(contractViolation);
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(unsupportedRead))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon page read uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(unsupportedRead);
+                });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(ioException))
                 .isInstanceOf(RuntimeException.class)
                 .hasCause(ioException);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", unsupported)).isSameAs(unsupported);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", contractViolation))
                 .isSameAs(contractViolation);
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", unsupportedRead))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("reader failed");
+                    assertThat(exception.getCause()).isSameAs(unsupportedRead);
+                });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", ioException))
                 .isInstanceOf(RuntimeException.class)
                 .hasMessage("reader failed")
@@ -1157,6 +1170,29 @@ public class PaimonPageSourceTest
                 new GenericMap(Map.of(BinaryString.fromString("red"), 2))))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("Paimon MULTISET requires Trino integer count type metadata");
+    }
+
+    @Test
+    void testGetNextPageMapsUnsupportedReadFeaturesToNotSupported()
+    {
+        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(GenericRow.of(1)), List.of(
+                PaimonColumnHandle.of("payload", DataTypes.INT())),
+                OptionalLong.empty())
+        {
+            @Override
+            protected void appendTo(Type type, DataType logicalType, Object value, BlockBuilder output)
+            {
+                throw new UnsupportedOperationException("Paimon MULTISET requires Trino integer count type metadata");
+            }
+        };
+
+        assertThatThrownBy(pageSource::getNextPage)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon page read uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage("Paimon MULTISET requires Trino integer count type metadata");
+                });
     }
 
     @Test

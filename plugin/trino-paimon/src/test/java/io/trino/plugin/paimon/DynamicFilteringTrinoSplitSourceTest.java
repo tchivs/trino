@@ -15,6 +15,7 @@ package io.trino.plugin.paimon;
 
 import io.airlift.units.Duration;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.DynamicFilter;
@@ -45,6 +46,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.LongStream;
 
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.DynamicFilter.NOT_BLOCKED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -260,6 +262,64 @@ public class DynamicFilteringTrinoSplitSourceTest
     }
 
     @Test
+    public void testDynamicSplitPlanningMapsUnsupportedReadFeaturesToNotSupported()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, unsupportedPlanningTable());
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Collections.emptyMap(),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.empty()),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                dynamicFilter(TupleDomain.all(), false),
+                new Duration(0, MILLISECONDS));
+
+        assertThatThrownBy(() -> splitSource.getNextBatch(100))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon table read uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage("unsupported scan mode");
+                });
+    }
+
+    @Test
+    public void testDynamicTableChangesSplitPlanningMapsUnsupportedReadFeaturesToNotSupported()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, unsupportedPlanningTable());
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Map.of(org.apache.paimon.CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.empty()),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                dynamicFilter(TupleDomain.all(), false),
+                new Duration(0, MILLISECONDS));
+
+        assertThatThrownBy(() -> splitSource.getNextBatch(100))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon system.table_changes uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage("unsupported scan mode");
+                });
+    }
+
+    @Test
     public void testEmptyPlanningDoesNotInitializeCatalog()
             throws Exception
     {
@@ -455,6 +515,35 @@ public class DynamicFilteringTrinoSplitSourceTest
                     case "readType" -> rowType;
                     case "tableName" -> "testing-table";
                     case "toString" -> "testing-read-builder";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Table unsupportedPlanningTable()
+    {
+        return (Table) Proxy.newProxyInstance(
+                DynamicFilteringTrinoSplitSourceTest.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
+                    case "newReadBuilder" -> unsupportedPlanningReadBuilder();
+                    case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+                    case "toString" -> "unsupported-dynamic-planning-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder unsupportedPlanningReadBuilder()
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                DynamicFilteringTrinoSplitSourceTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "dropStats", "withFilter", "withLimit" -> proxy;
+                    case "newScan" -> throw new UnsupportedOperationException("unsupported scan mode");
+                    case "readType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+                    case "tableName" -> "unsupported-dynamic-planning-table";
+                    case "toString" -> "unsupported-dynamic-planning-read-builder";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
