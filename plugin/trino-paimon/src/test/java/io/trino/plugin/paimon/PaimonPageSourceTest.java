@@ -354,6 +354,10 @@ public class PaimonPageSourceTest
                 PaimonColumnHandle.of("bytes", DataTypes.VARBINARY(10))))).isFalse();
         assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(rawFile("avro")), List.of(
                 PaimonColumnHandle.of("bytes", DataTypes.VARBINARY(10))))).isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(rawFile("csv")), List.of(
+                PaimonColumnHandle.of("bytes", DataTypes.VARBINARY(10))))).isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(rawFile("json")), List.of(
+                PaimonColumnHandle.of("bytes", DataTypes.VARBINARY(10))))).isFalse();
         assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(rawFile("lance")), List.of(
                 PaimonColumnHandle.of("bytes", DataTypes.VARBINARY(10))))).isFalse();
         assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(rawFile("vortex")), List.of(

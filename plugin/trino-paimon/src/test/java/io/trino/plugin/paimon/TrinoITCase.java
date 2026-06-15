@@ -90,6 +90,7 @@ public class TrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.t5");
             sql("DROP TABLE IF EXISTS paimon.default.t6");
             sql("DROP TABLE IF EXISTS paimon.default.json_values");
+            sql("DROP TABLE IF EXISTS paimon.default.csv_values");
             sql("DROP TABLE IF EXISTS paimon.default.vector_directive_values");
             sql("DROP TABLE IF EXISTS paimon.default.vector_directive_add_column");
             sql("DROP TABLE IF EXISTS paimon.default.blob_directive_values");
@@ -1056,6 +1057,26 @@ public class TrinoITCase
         assertThat(sql("SELECT id, json_extract_scalar(nested[1], '$.kind'), json_format(nested[2]) "
                 + "FROM paimon.default.json_values ORDER BY id"))
                 .isEqualTo("[[1, home, 42], [2, work, null]]");
+    }
+
+    @Test
+    public void testCsvFileFormatReadWrite()
+    {
+        sql("CREATE TABLE paimon.default.csv_values ("
+                + "id integer, "
+                + "name varchar, "
+                + "score bigint) "
+                + "WITH (file_format = 'csv')");
+        sql("INSERT INTO paimon.default.csv_values VALUES "
+                + "(1, 'alice', 10), "
+                + "(2, 'bob', 20)");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.csv_values")).isEqualTo(
+                "[[id, integer, , ], [name, varchar, , ], [score, bigint, , ]]");
+        assertThat(sql("SELECT * FROM paimon.default.csv_values ORDER BY id"))
+                .isEqualTo("[[1, alice, 10], [2, bob, 20]]");
+        assertThat(sql("SELECT name FROM paimon.default.csv_values WHERE score = 20"))
+                .isEqualTo("[[bob]]");
     }
 
     @Test
