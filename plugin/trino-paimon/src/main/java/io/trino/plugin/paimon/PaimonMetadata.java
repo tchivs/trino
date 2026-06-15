@@ -41,7 +41,9 @@ import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.type.LongTimestampWithTimeZone;
@@ -52,7 +54,6 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryString;
-import org.apache.paimon.fs.Path;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.table.BucketMode;
@@ -81,13 +82,22 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static io.trino.plugin.paimon.PaimonColumnHandle.TRINO_ROW_ID_NAME;
+import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
+import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.SCHEMA_ALREADY_EXISTS;
+import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.TABLE_ALREADY_EXISTS;
+import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.trino.spi.connector.RetryMode.NO_RETRIES;
 import static io.trino.spi.connector.RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
+import static io.trino.spi.expression.Constant.TRUE;
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -97,22 +107,20 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
 public record PaimonMetadata(PaimonCatalog catalog,
                              io.trino.spi.type.TypeManager typeManager) implements ConnectorMetadata
 {
-    private static final String TAG_PREFIX = "tag-";
-
-    private static boolean containSameElements(List<? extends ColumnHandle> first, List<? extends ColumnHandle> second)
+    public PaimonMetadata
     {
-        return new HashSet<>(first).equals(new HashSet<>(second));
+        catalog = requireNonNull(catalog, "catalog is null");
+        typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 
-    // todo support dynamic bucket table
     @Override
     public Optional<ConnectorTableLayout> getInsertLayout(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
-        Table table = paimonTableHandle.table(catalog);
-        if (!(table instanceof FileStoreTable storeTable)) {
-            throw new IllegalArgumentException(table.getClass() + " is not supported");
-        }
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("insert layout", tableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        Table table = paimonTableHandle.table(sessionCatalog);
+        FileStoreTable storeTable = latestFileStoreTable(table, "insert layout");
         BucketMode bucketMode = storeTable.bucketMode();
         switch (bucketMode) {
             case HASH_FIXED :
@@ -127,7 +135,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             case BUCKET_UNAWARE :
                 return Optional.empty();
             default :
-                throw new IllegalArgumentException("Unknown table bucket mode: " + bucketMode);
+                throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
         }
     }
 
@@ -135,7 +143,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata,
             Optional<ConnectorTableLayout> layout, RetryMode retryMode)
     {
-        // Deprecated method - delegate to the new version with replace parameter
         return beginCreateTable(session, tableMetadata, layout, retryMode, false);
     }
 
@@ -143,13 +150,52 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata,
             Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
+        requireNonNull(session, "session is null");
+        requireNonNull(tableMetadata, "tableMetadata is null");
+        requireNonNull(layout, "layout is null");
+        requireNonNull(retryMode, "retryMode is null");
+        validateNoQueryRetries(retryMode);
         createTable(session, tableMetadata,
                 replace ? io.trino.spi.connector.SaveMode.REPLACE : io.trino.spi.connector.SaveMode.FAIL);
         PaimonTableHandle tableHandle = requireNonNull(getTableHandle(session, tableMetadata.getTable(),
                 Collections.emptyMap()));
+        Catalog sessionCatalog = catalog.forSession(session);
+        Table table = tableHandle.table(sessionCatalog);
+        validateNoCaseInsensitiveDuplicateCreatedFieldNames(table.rowType().getFields(), tableMetadata.getTable());
         return tableHandle.withWriteColumns(tableMetadata.getColumns().stream()
-                .map(column -> PaimonColumnHandle.of(column.getName(), PaimonTypeUtils.toPaimonType(column.getType())))
+                .map(column -> {
+                    DataField field = createdTableField(table.rowType().getFields(), column.getName(),
+                            tableMetadata.getTable());
+                    return PaimonColumnHandle.of(field.name(), field.type(), typeManager);
+                })
                 .collect(toList()));
+    }
+
+    private static void validateNoCaseInsensitiveDuplicateCreatedFieldNames(List<DataField> fields,
+            SchemaTableName tableName)
+    {
+        Set<String> fieldNames = new HashSet<>();
+        for (DataField field : fields) {
+            String lowerFieldName = FieldNameUtils.toLowerCase(field.name());
+            if (!fieldNames.add(lowerFieldName)) {
+                throw new IllegalStateException(
+                        "Created Paimon table '%s' schema contains case-insensitive duplicate field name '%s'"
+                                .formatted(tableName, lowerFieldName));
+            }
+        }
+    }
+
+    private static DataField createdTableField(List<DataField> fields, String columnName, SchemaTableName tableName)
+    {
+        String lowerColumnName = FieldNameUtils.toLowerCase(columnName);
+        for (DataField field : fields) {
+            if (FieldNameUtils.toLowerCase(field.name()).equals(lowerColumnName)) {
+                return field;
+            }
+        }
+        throw new IllegalStateException(format(
+                "Created Paimon table '%s' is missing write column '%s'",
+                tableName, columnName));
     }
 
     @Override
@@ -157,17 +203,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
             ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments,
             Collection<ComputedStatistics> computedStatistics)
     {
-        if (fragments.isEmpty()) {
-            return Optional.empty();
-        }
-        return commit(session, (PaimonTableHandle) tableHandle, fragments);
+        return commit(session, getOutputTableHandle(tableHandle), fragments);
     }
 
     @Override
     public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle,
             List<ColumnHandle> columns, RetryMode retryMode)
     {
-        return ((PaimonTableHandle) tableHandle).withWriteColumns(columns);
+        requireNonNull(session, "session is null");
+        requireNonNull(retryMode, "retryMode is null");
+        validateNoQueryRetries(retryMode);
+        return getTableHandle("begin insert", tableHandle).withWriteColumns(columns);
     }
 
     @Override
@@ -175,7 +221,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
             ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments,
             Collection<ComputedStatistics> computedStatistics)
     {
-        // Deprecated method - delegate to new version with sourceTableHandles
         return finishInsert(session, insertHandle, Collections.emptyList(), fragments, computedStatistics);
     }
 
@@ -184,70 +229,99 @@ public record PaimonMetadata(PaimonCatalog catalog,
             ConnectorInsertTableHandle insertHandle, List<ConnectorTableHandle> sourceTableHandles,
             Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
-        return commit(session, (PaimonTableHandle) insertHandle, fragments);
+        return commit(session, getInsertTableHandle(insertHandle), fragments);
     }
 
     private Optional<ConnectorOutputMetadata> commit(ConnectorSession session, PaimonTableHandle insertHandle,
             Collection<Slice> fragments)
     {
+        requireNonNull(session, "session is null");
+        List<Slice> fragmentsList = copyFragments(fragments);
+        if (fragmentsList.isEmpty()) {
+            return Optional.empty();
+        }
+
         CommitMessageSerializer serializer = new CommitMessageSerializer();
-        List<CommitMessage> commitMessages = fragments.stream().map(slice -> {
+        List<CommitMessage> commitMessages = fragmentsList.stream().map(slice -> {
             try {
                 return serializer.deserialize(serializer.getVersion(), slice.getBytes());
             }
             catch (IOException e) {
-                throw new RuntimeException(e);
+                throw new RuntimeException("Failed to deserialize Paimon commit fragment", e);
             }
         }).collect(toList());
 
-        if (commitMessages.isEmpty()) {
-            return Optional.empty();
-        }
-
+        Catalog sessionCatalog = catalog.forSession(session);
         PaimonTableHandle table = insertHandle;
-        BatchWriteBuilder batchWriteBuilder = table.tableWithDynamicOptions(catalog, session).newBatchWriteBuilder();
+        FileStoreTable fileStoreTable = latestFileStoreTable(table.tableWithWriteDynamicOptions(sessionCatalog),
+                "commit writes");
+        BatchWriteBuilder batchWriteBuilder = fileStoreTable.newBatchWriteBuilder();
         if (PaimonSessionProperties.enableInsertOverwrite(session)) {
             batchWriteBuilder.withOverwrite();
         }
-        batchWriteBuilder.newCommit().commit(commitMessages);
+        try (BatchTableCommit commit = batchWriteBuilder.newCommit()) {
+            commit.commit(commitMessages);
+        }
+        catch (Exception e) {
+            if (e instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            throw new RuntimeException("Failed to commit Paimon write fragments", e);
+        }
         return Optional.empty();
+    }
+
+    private static List<Slice> copyFragments(Collection<Slice> fragments)
+    {
+        requireNonNull(fragments, "fragments is null");
+        fragments.forEach(fragment -> requireNonNull(fragment, "fragments contains null fragment"));
+        return List.copyOf(fragments);
     }
 
     @Override
     public RowChangeParadigm getRowChangeParadigm(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
+        requireNonNull(session, "session is null");
+        getTableHandle("row change paradigm", tableHandle);
         return DELETE_ROW_AND_INSERT_ROW;
     }
 
-    // todo support dynamic bucket table
     @Override
     public ColumnHandle getMergeRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
-        Table table = paimonTableHandle.table(catalog);
-        if (!(table instanceof FileStoreTable storeTable)) {
-            throw new IllegalArgumentException(table.getClass() + " is not supported");
-        }
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("merge row id", tableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        Table table = paimonTableHandle.table(sessionCatalog);
+        FileStoreTable storeTable = requireFileStoreTable(table, "merge row id").copyWithLatestSchema();
         BucketMode bucketMode = storeTable.bucketMode();
         if (bucketMode != BucketMode.HASH_FIXED) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
         }
-        Set<String> pkSet = new HashSet<>(table.primaryKeys());
-        DataField[] row = table.rowType().getFields().stream().filter(dataField -> pkSet.contains(dataField.name()))
+        if (storeTable.primaryKeys().isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Paimon merge row id requires primary keys");
+        }
+        DataField[] row = storeTable.primaryKeys().stream()
+                .map(primaryKey -> {
+                    if (!storeTable.rowType().containsField(primaryKey)) {
+                        throw new IllegalStateException("Paimon primary key '%s' is not present in table schema %s"
+                                .formatted(primaryKey, storeTable.rowType().getFieldNames()));
+                    }
+                    return storeTable.rowType().getField(primaryKey);
+                })
                 .toArray(DataField[]::new);
-        return PaimonColumnHandle.of(TRINO_ROW_ID_NAME, DataTypes.ROW(row));
+        return PaimonColumnHandle.of(TRINO_ROW_ID_NAME, DataTypes.ROW(row), typeManager);
     }
 
-    // todo support dynamic bucket table
     @Override
     public Optional<ConnectorPartitioningHandle> getUpdateLayout(ConnectorSession session,
             ConnectorTableHandle tableHandle)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
-        Table table = paimonTableHandle.table(catalog);
-        if (!(table instanceof FileStoreTable storeTable)) {
-            throw new IllegalArgumentException(table.getClass() + " is not supported");
-        }
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("update layout", tableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        Table table = paimonTableHandle.table(sessionCatalog);
+        FileStoreTable storeTable = requireFileStoreTable(table, "update layout").copyWithLatestSchema();
         BucketMode bucketMode = storeTable.bucketMode();
         if (bucketMode != BucketMode.HASH_FIXED) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
@@ -260,26 +334,110 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
+    private static FileStoreTable requireFileStoreTable(Table table, String operation)
+    {
+        requireNonNull(table, "table is null");
+        if (!(table instanceof FileStoreTable fileStoreTable)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon " + operation + " requires FileStoreTable, but got: " + table.getClass().getName());
+        }
+        return fileStoreTable;
+    }
+
+    private static FileStoreTable latestFileStoreTable(Table table, String operation)
+    {
+        return requireFileStoreTable(table, operation).copyWithLatestSchema();
+    }
+
     @Override
     public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle,
             RetryMode retryMode)
     {
-        return new PaimonMergeTableHandle((PaimonTableHandle) tableHandle);
+        requireNonNull(session, "session is null");
+        requireNonNull(retryMode, "retryMode is null");
+        validateNoQueryRetries(retryMode);
+        PaimonTableHandle paimonTableHandle = getTableHandle("begin merge", tableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        Table table = paimonTableHandle.table(sessionCatalog);
+        FileStoreTable storeTable = latestFileStoreTable(table, "merge");
+        BucketMode bucketMode = storeTable.bucketMode();
+        if (bucketMode != BucketMode.HASH_FIXED) {
+            throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
+        }
+        List<ColumnHandle> writeColumns = storeTable.rowType().getFields().stream()
+                .map(column -> PaimonColumnHandle.of(column.name(), column.type(), typeManager))
+                .collect(toList());
+        return new PaimonMergeTableHandle(paimonTableHandle.withWriteColumns(writeColumns));
+    }
+
+    private static void validateNoQueryRetries(RetryMode retryMode)
+    {
+        if (retryMode != NO_RETRIES) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support query retries");
+        }
     }
 
     @Override
     public void finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle,
             Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
-        commit(session, (PaimonTableHandle) mergeTableHandle.getTableHandle(), fragments);
+        commit(session, getMergeTableHandle(mergeTableHandle), fragments);
+    }
+
+    static PaimonTableHandle getOutputTableHandle(ConnectorOutputTableHandle tableHandle)
+    {
+        if (!(requireNonNull(tableHandle, "tableHandle is null") instanceof PaimonTableHandle paimonTableHandle)) {
+            throw new IllegalStateException("Paimon finish create table requires PaimonTableHandle, got: "
+                    + tableHandle.getClass().getName());
+        }
+        return paimonTableHandle;
+    }
+
+    static PaimonTableHandle getInsertTableHandle(ConnectorInsertTableHandle insertHandle)
+    {
+        if (!(requireNonNull(insertHandle, "insertHandle is null") instanceof PaimonTableHandle paimonTableHandle)) {
+            throw new IllegalStateException("Paimon finish insert requires PaimonTableHandle, got: "
+                    + insertHandle.getClass().getName());
+        }
+        return paimonTableHandle;
+    }
+
+    static PaimonTableHandle getMergeTableHandle(ConnectorMergeTableHandle mergeTableHandle)
+    {
+        ConnectorTableHandle tableHandle = requireNonNull(mergeTableHandle, "mergeTableHandle is null").getTableHandle();
+        if (!(requireNonNull(tableHandle, "mergeTableHandle tableHandle is null") instanceof PaimonTableHandle paimonTableHandle)) {
+            throw new IllegalStateException("Paimon finish merge requires PaimonTableHandle, got: "
+                    + tableHandle.getClass().getName());
+        }
+        return paimonTableHandle;
+    }
+
+    static PaimonTableHandle getTableHandle(String operation, ConnectorTableHandle tableHandle)
+    {
+        if (!(requireNonNull(tableHandle, "tableHandle is null") instanceof PaimonTableHandle paimonTableHandle)) {
+            throw new IllegalStateException("Paimon " + operation + " requires PaimonTableHandle, got: "
+                    + tableHandle.getClass().getName());
+        }
+        return paimonTableHandle;
+    }
+
+    static PaimonColumnHandle getColumnHandle(String operation, ColumnHandle columnHandle)
+    {
+        if (!(requireNonNull(columnHandle, "columnHandle is null") instanceof PaimonColumnHandle paimonColumnHandle)) {
+            throw new IllegalStateException("Paimon " + operation + " requires PaimonColumnHandle, got: "
+                    + columnHandle.getClass().getName());
+        }
+        return paimonColumnHandle;
     }
 
     @Override
     public boolean schemaExists(ConnectorSession session, String schemaName)
     {
-        catalog.initSession(session);
+        requireNonNull(session, "session is null");
+        checkArgument(!StringUtils.isNullOrWhitespaceOnly(schemaName), "schemaName cannot be null or empty");
+        Catalog sessionCatalog = catalog.forSession(session);
         try {
-            catalog.getDatabase(schemaName);
+            sessionCatalog.getDatabase(schemaName);
             return true;
         }
         catch (Catalog.DatabaseNotExistException e) {
@@ -290,35 +448,39 @@ public record PaimonMetadata(PaimonCatalog catalog,
     @Override
     public List<String> listSchemaNames(ConnectorSession session)
     {
-        catalog.initSession(session);
-        return catalog.listDatabases();
+        requireNonNull(session, "session is null");
+        Catalog sessionCatalog = catalog.forSession(session);
+        return sessionCatalog.listDatabases();
     }
 
     @Override
     public void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties,
             TrinoPrincipal owner)
     {
+        requireNonNull(session, "session is null");
+        requireNonNull(properties, "properties is null");
         checkArgument(!StringUtils.isNullOrWhitespaceOnly(schemaName), "schemaName cannot be null or empty");
 
         try {
-            catalog.initSession(session);
-            catalog.createDatabase(schemaName, true);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.createDatabase(schemaName, false);
         }
         catch (Catalog.DatabaseAlreadyExistException e) {
-            throw new RuntimeException(format("database already existed: '%s'", schemaName));
+            throw new TrinoException(SCHEMA_ALREADY_EXISTS, format("Schema '%s' already exists", schemaName), e);
         }
     }
 
     @Override
     public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
     {
+        requireNonNull(session, "session is null");
         checkArgument(!StringUtils.isNullOrWhitespaceOnly(schemaName), "schemaName cannot be null or empty");
         try {
-            catalog.initSession(session);
-            catalog.dropDatabase(schemaName, false, true);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.dropDatabase(schemaName, false, cascade);
         }
         catch (Catalog.DatabaseNotEmptyException e) {
-            throw new RuntimeException(format("database is not empty: '%s'", schemaName));
+            throw new TrinoException(SCHEMA_NOT_EMPTY, format("Schema '%s' is not empty", schemaName), e);
         }
         catch (Catalog.DatabaseNotExistException e) {
             throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schemaName));
@@ -329,6 +491,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName,
             Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
     {
+        requireNonNull(session, "session is null");
+        requireNonNull(tableName, "tableName is null");
+        requireNonNull(startVersion, "startVersion is null");
+        requireNonNull(endVersion, "endVersion is null");
         if (startVersion.isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "Read paimon table with start version is not supported");
         }
@@ -350,37 +516,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     break;
                 }
                 case TARGET_ID : {
-                    String tagOrVersion;
+                    String versionValue;
                     if (versionType instanceof VarcharType) {
-                        tagOrVersion = BinaryString.fromBytes(((Slice) version.getVersion()).getBytes()).toString();
+                        versionValue = BinaryString.fromBytes(((Slice) version.getVersion()).getBytes()).toString();
                     }
                     else {
-                        tagOrVersion = version.getVersion().toString();
+                        versionValue = version.getVersion().toString();
                     }
-
-                    // if value is not number, set tag option
-                    boolean isNumber = StringUtils.isNumeric(tagOrVersion);
-                    if (!isNumber) {
-                        dynamicOptions.put(CoreOptions.SCAN_TAG_NAME.key(), tagOrVersion);
+                    if (versionValue.isBlank()) {
+                        throw new TrinoException(INVALID_ARGUMENTS, "Paimon table version may not be blank");
                     }
-                    else {
-                        try {
-                            catalog.initSession(session);
-                            Table table = catalog
-                                    .getTable(new Identifier(tableName.getSchemaName(), tableName.getTableName()));
-                            String path = table.options().get("path");
-
-                            if (table.fileIO().exists(new Path(path + "/tag/" + TAG_PREFIX + tagOrVersion))) {
-                                dynamicOptions.put(CoreOptions.SCAN_TAG_NAME.key(), tagOrVersion);
-                            }
-                            else {
-                                dynamicOptions.put(CoreOptions.SCAN_SNAPSHOT_ID.key(), tagOrVersion);
-                            }
-                        }
-                        catch (IOException | Catalog.TableNotExistException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }
+                    dynamicOptions.put(CoreOptions.SCAN_VERSION.key(), versionValue);
                     break;
                 }
             }
@@ -392,23 +538,29 @@ public record PaimonMetadata(PaimonCatalog catalog,
     @Override
     public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName)
     {
-        // Deprecated method - delegate to the version with table versions
         return getTableHandle(session, tableName, Optional.empty(), Optional.empty());
     }
 
     @Override
     public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
     {
+        requireNonNull(session, "session is null");
+        getTableHandle("table properties", table);
         return new ConnectorTableProperties();
     }
 
     public PaimonTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName,
             Map<String, String> dynamicOptions)
     {
-        catalog.initSession(session);
+        requireNonNull(session, "session is null");
+        requireNonNull(tableName, "tableName is null");
+        requireNonNull(dynamicOptions, "dynamicOptions is null");
+        PaimonTableHandle tableHandle = new PaimonTableHandle(tableName.getSchemaName(), tableName.getTableName(),
+                dynamicOptions);
+        Catalog sessionCatalog = catalog.forSession(session);
         try {
-            catalog.getTable(Identifier.create(tableName.getSchemaName(), tableName.getTableName()));
-            return new PaimonTableHandle(tableName.getSchemaName(), tableName.getTableName(), dynamicOptions);
+            sessionCatalog.getTable(Identifier.create(tableName.getSchemaName(), tableName.getTableName()));
+            return tableHandle;
         }
         catch (Catalog.TableNotExistException e) {
             return null;
@@ -418,27 +570,39 @@ public record PaimonMetadata(PaimonCatalog catalog,
     @Override
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        catalog.initSession(session);
-        return ((PaimonTableHandle) tableHandle).tableMetadata(catalog);
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("table metadata", tableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        return paimonTableHandle.tableMetadata(sessionCatalog, typeManager, session);
     }
 
     @Override
     public void setTableProperties(ConnectorSession session, ConnectorTableHandle tableHandle,
             Map<String, Optional<Object>> properties)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        requireNonNull(properties, "properties is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("set table properties", tableHandle);
+        if (properties.isEmpty()) {
+            return;
+        }
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
+        rejectUnsupportedTablePropertyUpdates(properties);
         List<SchemaChange> changes = new ArrayList<>();
 
         // Handle both setting and removing options
         // When SET PROPERTIES x = DEFAULT is used, the value will be Optional.empty()
         for (Map.Entry<String, Optional<Object>> entry : properties.entrySet()) {
-            String key = entry.getKey();
-            Optional<Object> value = entry.getValue();
+            String propertyName = requireNonNull(entry.getKey(), "properties contains null property name");
+            checkArgument(!StringUtils.isNullOrWhitespaceOnly(propertyName), "properties contains blank property name");
+            String key = PaimonTableOptionUtils.toPaimonOptionKey(propertyName);
+            Optional<Object> value = requireNonNull(entry.getValue(),
+                    "properties contains null value for property '%s'".formatted(propertyName));
 
             if (value.isPresent()) {
                 // Set the property to the specified value
-                changes.add(SchemaChange.setOption(key, (String) value.get()));
+                changes.add(SchemaChange.setOption(key,
+                        PaimonTableOptionUtils.requireNonBlankStringOptionValue(propertyName, value.get())));
             }
             else {
                 // Remove the property (SET PROPERTIES x = DEFAULT)
@@ -447,39 +611,54 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
 
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to alter table: '%s'", paimonTableHandle.getTableName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
+        }
+    }
+
+    private static void rejectUnsupportedTablePropertyUpdates(Map<String, Optional<Object>> properties)
+    {
+        List<String> unsupportedProperties = properties.keySet().stream()
+                .filter(property -> PaimonTableOptions.PRIMARY_KEY_IDENTIFIER.equals(property)
+                        || PaimonTableOptions.PARTITIONED_BY_PROPERTY.equals(property))
+                .sorted()
+                .toList();
+        if (!unsupportedProperties.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "The following properties cannot be updated: " + String.join(", ", unsupportedProperties));
         }
     }
 
     @Override
     public List<SchemaTableName> listTables(ConnectorSession session, Optional<String> schemaName)
     {
-        catalog.initSession(session);
+        requireNonNull(session, "session is null");
+        requireNonNull(schemaName, "schemaName is null");
+        schemaName.ifPresent(schema -> checkArgument(!StringUtils.isNullOrWhitespaceOnly(schema),
+                "schemaName cannot be null or empty"));
+        Catalog sessionCatalog = catalog.forSession(session);
         List<SchemaTableName> tables = new ArrayList<>();
-        schemaName.map(Collections::singletonList).orElseGet(catalog::listDatabases)
-                .forEach(schema -> tables.addAll(listTables(schema)));
+        schemaName.map(Collections::singletonList).orElseGet(sessionCatalog::listDatabases)
+                .forEach(schema -> tables.addAll(listTables(sessionCatalog, schema)));
         return tables;
     }
 
-    private List<SchemaTableName> listTables(String schema)
+    private List<SchemaTableName> listTables(Catalog sessionCatalog, String schema)
     {
         try {
-            return catalog.listTables(schema).stream().map(table -> new SchemaTableName(schema, table))
+            return sessionCatalog.listTables(schema).stream().map(table -> new SchemaTableName(schema, table))
                     .collect(toList());
         }
         catch (Catalog.DatabaseNotExistException e) {
-            throw new RuntimeException(e);
+            throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schema), e);
         }
     }
 
     @Override
     public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean ignoreExisting)
     {
-        // Deprecated method - delegate to the new SaveMode version
         createTable(session, tableMetadata,
                 ignoreExisting ? io.trino.spi.connector.SaveMode.IGNORE : io.trino.spi.connector.SaveMode.FAIL);
     }
@@ -488,31 +667,34 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata,
             io.trino.spi.connector.SaveMode saveMode)
     {
+        requireNonNull(session, "session is null");
+        requireNonNull(tableMetadata, "tableMetadata is null");
+        requireNonNull(saveMode, "saveMode is null");
         SchemaTableName table = tableMetadata.getTable();
         Identifier identifier = Identifier.create(table.getSchemaName(), table.getTableName());
+        Schema schema = prepareSchema(tableMetadata);
 
         try {
-            catalog.initSession(session);
+            Catalog sessionCatalog = catalog.forSession(session);
             if (saveMode == io.trino.spi.connector.SaveMode.REPLACE) {
                 // For REPLACE mode, drop the table if it exists first
                 try {
-                    catalog.dropTable(identifier, false);
+                    sessionCatalog.dropTable(identifier, false);
                 }
                 catch (Catalog.TableNotExistException e) {
                     // Table doesn't exist, continue with creation
                 }
             }
-            catalog.createTable(identifier, prepareSchema(tableMetadata),
-                    saveMode == io.trino.spi.connector.SaveMode.IGNORE);
+            sessionCatalog.createTable(identifier, schema, saveMode == io.trino.spi.connector.SaveMode.IGNORE);
         }
         catch (Catalog.DatabaseNotExistException e) {
             throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", table.getSchemaName()));
         }
         catch (Catalog.TableAlreadyExistException e) {
-            if (saveMode == io.trino.spi.connector.SaveMode.FAIL) {
-                throw new RuntimeException(format("table already existed: '%s'", table.getTableName()));
+            if (saveMode == io.trino.spi.connector.SaveMode.IGNORE) {
+                return;
             }
-            // For IGNORE mode, silently ignore the error
+            throw new TrinoException(TABLE_ALREADY_EXISTS, format("Table '%s' already exists", table), e);
         }
     }
 
@@ -520,10 +702,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         Map<String, Object> properties = new HashMap<>(tableMetadata.getProperties());
         Schema.Builder builder = Schema.newBuilder().primaryKey(PaimonTableOptions.getPrimaryKeys(properties))
-                .partitionKeys(PaimonTableOptions.getPartitionedKeys(properties));
+                .partitionKeys(PaimonTableOptions.getPartitionedKeys(properties))
+                .comment(tableMetadata.getComment().orElse(null));
 
         for (ColumnMetadata column : tableMetadata.getColumns()) {
-            builder.column(column.getName(), PaimonTypeUtils.toPaimonType(column.getType()), column.getComment());
+            builder.column(column.getName(), toPaimonType(column), column.getComment());
         }
 
         PaimonTableOptionUtils.buildOptions(builder, properties);
@@ -531,43 +714,88 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return builder.build();
     }
 
+    private static DataType toPaimonType(ColumnMetadata column)
+    {
+        return PaimonTypeUtils.toPaimonType(column.getType()).copy(column.isNullable());
+    }
+
+    private static RuntimeException paimonAlterTableException(SchemaTableName tableName, Exception exception)
+    {
+        if (exception instanceof TrinoException trinoException) {
+            return trinoException;
+        }
+        if (exception instanceof Catalog.TableNotExistException) {
+            return new TrinoException(TABLE_NOT_FOUND, format("Table '%s' does not exist", tableName), exception);
+        }
+        if (exception instanceof Catalog.ColumnAlreadyExistException columnAlreadyExistException) {
+            return new TrinoException(COLUMN_ALREADY_EXISTS,
+                    format("Column '%s' already exists in table '%s'", columnAlreadyExistException.column(), tableName),
+                    exception);
+        }
+        if (exception instanceof Catalog.ColumnNotExistException columnNotExistException) {
+            return new TrinoException(COLUMN_NOT_FOUND,
+                    format("Column '%s' does not exist in table '%s'", columnNotExistException.column(), tableName),
+                    exception);
+        }
+        if (exception instanceof Catalog.DatabaseNotExistException) {
+            return new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", tableName.getSchemaName()),
+                    exception);
+        }
+        if (exception instanceof RuntimeException runtimeException) {
+            return runtimeException;
+        }
+        return new RuntimeException(format("Failed to alter Paimon table '%s'", tableName), exception);
+    }
+
+    private static SchemaTableName schemaTableName(PaimonTableHandle tableHandle)
+    {
+        return new SchemaTableName(tableHandle.getSchemaName(), tableHandle.getTableName());
+    }
+
     @Override
     public void renameTable(ConnectorSession session, ConnectorTableHandle tableHandle, SchemaTableName newTableName)
     {
-        PaimonTableHandle oldTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle oldTableHandle = getTableHandle("rename table", tableHandle);
+        requireNonNull(newTableName, "newTableName is null");
         try {
-            catalog.initSession(session);
-            catalog.renameTable(new Identifier(oldTableHandle.getSchemaName(), oldTableHandle.getTableName()),
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.renameTable(new Identifier(oldTableHandle.getSchemaName(), oldTableHandle.getTableName()),
                     new Identifier(newTableName.getSchemaName(), newTableName.getTableName()), false);
         }
         catch (Catalog.TableNotExistException e) {
-            throw new RuntimeException(format("table not exists: '%s'", oldTableHandle.getTableName()));
+            throw new TrinoException(TABLE_NOT_FOUND, format("Table '%s.%s' does not exist",
+                    oldTableHandle.getSchemaName(), oldTableHandle.getTableName()), e);
         }
         catch (Catalog.TableAlreadyExistException e) {
-            throw new RuntimeException(format("table already existed: '%s'", newTableName.getTableName()));
+            throw new TrinoException(TABLE_ALREADY_EXISTS, format("Table '%s' already exists", newTableName), e);
         }
     }
 
     @Override
     public void dropTable(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("drop table", tableHandle);
         try {
-            catalog.initSession(session);
-            catalog.dropTable(new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName()), false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.dropTable(new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName()), false);
         }
         catch (Catalog.TableNotExistException e) {
-            throw new RuntimeException(format("table not exists: '%s'", paimonTableHandle.getTableName()));
+            throw new TrinoException(TABLE_NOT_FOUND, format("Table '%s.%s' does not exist",
+                    paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName()), e);
         }
     }
 
     @Override
     public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        PaimonTableHandle table = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle table = getTableHandle("column handles", tableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
         Map<String, ColumnHandle> handleMap = new HashMap<>();
-        for (ColumnMetadata column : table.columnMetadatas(catalog)) {
-            handleMap.put(column.getName(), table.columnHandle(catalog, column.getName()));
+        for (ColumnMetadata column : table.columnMetadatas(sessionCatalog, typeManager, session)) {
+            handleMap.put(column.getName(), table.columnHandle(sessionCatalog, typeManager, session, column.getName()));
         }
         return handleMap;
     }
@@ -576,57 +804,85 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public ColumnMetadata getColumnMetadata(ConnectorSession session, ConnectorTableHandle tableHandle,
             ColumnHandle columnHandle)
     {
-        return ((PaimonColumnHandle) columnHandle).getColumnMetadata();
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("column metadata", tableHandle);
+        PaimonColumnHandle paimonColumnHandle = getColumnHandle("column metadata", columnHandle);
+        if (paimonColumnHandle.isRowId()) {
+            return paimonColumnHandle.getColumnMetadata();
+        }
+        Catalog sessionCatalog = catalog.forSession(session);
+        Table table = PaimonTableHandle.schemaAwareReadTable(
+                paimonTableHandle.tableWithDynamicOptions(sessionCatalog, session),
+                !paimonTableHandle.usesHistoricalReadSchema(session));
+        return PaimonTableHandle.columnMetadata(
+                table,
+                paimonColumnHandle.getColumnName(),
+                typeManager);
     }
 
     @Override
     public Map<SchemaTableName, List<ColumnMetadata>> listTableColumns(ConnectorSession session,
             SchemaTablePrefix prefix)
     {
+        requireNonNull(session, "session is null");
         requireNonNull(prefix, "prefix is null");
-        List<SchemaTableName> tableNames;
-        if (prefix.getTable().isPresent()) {
-            tableNames = Collections.singletonList(prefix.toSchemaTableName());
-        }
-        else {
-            tableNames = listTables(session, prefix.getSchema());
-        }
+        List<SchemaTableName> tableNames = prefix.getTable()
+                .map(ignored -> Collections.singletonList(prefix.toSchemaTableName()))
+                .orElseGet(() -> listTables(session, prefix.getSchema()));
 
-        return tableNames.stream().collect(Collectors.toMap(Function.identity(),
-                table -> ((PaimonTableHandle) requireNonNull(getTableHandle(session, table))).columnMetadatas(catalog)));
+        return tableNames.stream()
+                .map(tableName -> getTableColumnsMetadata(session, tableName)
+                        .map(columns -> Map.entry(tableName, columns)))
+                .flatMap(Optional::stream)
+                .collect(Collectors.toMap(Map.Entry::getKey, entry -> List.copyOf(entry.getValue())));
     }
 
     @Override
     public Iterator<io.trino.spi.connector.TableColumnsMetadata> streamTableColumns(ConnectorSession session,
             SchemaTablePrefix prefix)
     {
+        requireNonNull(session, "session is null");
         requireNonNull(prefix, "prefix is null");
-        List<SchemaTableName> tableNames;
-        if (prefix.getTable().isPresent()) {
-            tableNames = Collections.singletonList(prefix.toSchemaTableName());
-        }
-        else {
-            tableNames = listTables(session, prefix.getSchema());
-        }
+        List<SchemaTableName> tableNames = prefix.getTable()
+                .map(ignored -> Collections.singletonList(prefix.toSchemaTableName()))
+                .orElseGet(() -> listTables(session, prefix.getSchema()));
 
-        return tableNames.stream().map(tableName -> io.trino.spi.connector.TableColumnsMetadata.forTable(tableName,
-                ((PaimonTableHandle) requireNonNull(getTableHandle(session, tableName))).columnMetadatas(catalog)))
+        return tableNames.stream()
+                .map(tableName -> getTableColumnsMetadata(session, tableName)
+                        .map(columns -> io.trino.spi.connector.TableColumnsMetadata.forTable(tableName, columns)))
+                .flatMap(Optional::stream)
                 .iterator();
+    }
+
+    private Optional<List<ColumnMetadata>> getTableColumnsMetadata(ConnectorSession session, SchemaTableName tableName)
+    {
+        PaimonTableHandle tableHandle = getTableHandle(session, tableName, Collections.emptyMap());
+        if (tableHandle == null) {
+            return Optional.empty();
+        }
+        Catalog sessionCatalog = catalog.forSession(session);
+        return Optional.of(tableHandle.columnMetadatas(sessionCatalog, typeManager, session));
     }
 
     @Override
     public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("add column", tableHandle);
+        requireNonNull(column, "column is null");
+        if (!column.isNullable()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support adding not null columns");
+        }
+
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.addColumn(column.getName(), PaimonTypeUtils.toPaimonType(column.getType())));
+        changes.add(SchemaChange.addColumn(column.getName(), toPaimonType(column), column.getComment(), null));
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to alter table: '%s'", paimonTableHandle.getTableName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
@@ -634,50 +890,55 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void renameColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle source,
             String target)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("rename column", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
-        PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) source;
+        PaimonColumnHandle paimonColumnHandle = getColumnHandle("rename column", source);
+        validateFieldName("target", target);
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.renameColumn(paimonColumnHandle.getColumnName(), target));
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to alter table: '%s'", paimonTableHandle.getTableName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
     @Override
     public void dropColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("drop column", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
-        PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) column;
+        PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop column", column);
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.dropColumn(paimonColumnHandle.getColumnName()));
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to alter table: '%s'", paimonTableHandle.getTableName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
     @Override
     public void setTableComment(ConnectorSession session, ConnectorTableHandle tableHandle, Optional<String> comment)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("set table comment", tableHandle);
+        requireNonNull(comment, "comment is null");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.updateComment(comment.orElse(null)));
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to set table comment: '%s'", paimonTableHandle.getTableName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
@@ -685,19 +946,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void setColumnComment(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column,
             Optional<String> comment)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("set column comment", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
-        PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) column;
+        PaimonColumnHandle paimonColumnHandle = getColumnHandle("set column comment", column);
+        requireNonNull(comment, "comment is null");
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(new SchemaChange.UpdateColumnComment(new String[]{paimonColumnHandle.getColumnName()},
-                comment.orElse(null)));
+        changes.add(SchemaChange.updateColumnComment(paimonColumnHandle.getColumnName(), comment.orElse(null)));
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to set column comment for '%s'.'%s'",
-                    paimonTableHandle.getTableName(), paimonColumnHandle.getColumnName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
@@ -705,43 +966,43 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void setColumnType(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column,
             Type type)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("set column type", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
-        PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) column;
+        PaimonColumnHandle paimonColumnHandle = getColumnHandle("set column type", column);
 
-        // Convert Trino Type to Paimon DataType
-        DataType paimonType = PaimonTypeUtils.toPaimonType(type);
+        DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"))
+                .copy(paimonColumnHandle.logicalType().isNullable());
 
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.updateColumnType(paimonColumnHandle.getColumnName(), paimonType));
+        changes.add(SchemaChange.updateColumnType(paimonColumnHandle.getColumnName(), paimonType, true));
 
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to set column type for '%s'.'%s' to '%s'",
-                    paimonTableHandle.getTableName(), paimonColumnHandle.getColumnName(), type), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
     @Override
     public void dropNotNullConstraint(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("drop not null constraint", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
-        PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) column;
+        PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop not null constraint", column);
 
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.updateColumnNullability(paimonColumnHandle.getColumnName(), true));
 
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to drop NOT NULL constraint on column '%s'.'%s'",
-                    paimonTableHandle.getTableName(), paimonColumnHandle.getColumnName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
@@ -749,27 +1010,28 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void addField(ConnectorSession session, ConnectorTableHandle tableHandle, List<String> parentPath,
             String fieldName, Type type, boolean ignoreExisting)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("add field", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
 
         // Build field path: parentPath + fieldName
         String[] fieldNames = buildFieldNamesArray(parentPath, fieldName);
 
         // Convert Trino Type to Paimon DataType
-        DataType paimonType = PaimonTypeUtils.toPaimonType(type);
+        DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"));
 
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.addColumn(fieldNames, paimonType, null, null));
 
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            if (!ignoreExisting) {
-                throw new RuntimeException(format("failed to add field '%s' to '%s'", String.join(".", fieldNames),
-                        paimonTableHandle.getTableName()), e);
+            if (ignoreExisting && e instanceof Catalog.ColumnAlreadyExistException) {
+                return;
             }
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
@@ -777,9 +1039,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void dropField(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column,
             List<String> fieldPath)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("drop field", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
-        PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) column;
+        PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop field", column);
+        validateRelativeFieldPath("drop field", fieldPath);
 
         // Build full field path: columnName + fieldPath
         String[] fieldNames = buildFieldNamesArray(List.of(paimonColumnHandle.getColumnName()), fieldPath);
@@ -788,12 +1052,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         changes.add(SchemaChange.dropColumn(fieldNames));
 
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to drop field '%s' from '%s'", String.join(".", fieldNames),
-                    paimonTableHandle.getTableName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
@@ -801,8 +1064,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void renameField(ConnectorSession session, ConnectorTableHandle tableHandle, List<String> fieldPath,
             String target)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("rename field", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
+        validateAbsoluteFieldPath("rename field", fieldPath);
+        validateFieldName("target", target);
 
         // fieldPath includes column name and nested path
         String[] fieldNames = fieldPath.toArray(new String[0]);
@@ -811,12 +1077,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         changes.add(SchemaChange.renameColumn(fieldNames, target));
 
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to rename field '%s' to '%s' in table '%s'",
-                    String.join(".", fieldNames), target, paimonTableHandle.getTableName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
@@ -824,25 +1089,26 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void setFieldType(ConnectorSession session, ConnectorTableHandle tableHandle, List<String> fieldPath,
             Type type)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("set field type", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
+        validateAbsoluteFieldPath("set field type", fieldPath);
 
         // fieldPath includes column name and nested path
         String[] fieldNames = fieldPath.toArray(new String[0]);
 
         // Convert Trino Type to Paimon DataType
-        DataType paimonType = PaimonTypeUtils.toPaimonType(type);
+        DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"));
 
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.updateColumnType(fieldNames, paimonType, false));
+        changes.add(SchemaChange.updateColumnType(fieldNames, paimonType, true));
 
         try {
-            catalog.initSession(session);
-            catalog.alterTable(identifier, changes, false);
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to set field type '%s' to '%s' in table '%s'",
-                    String.join(".", fieldNames), type, paimonTableHandle.getTableName()), e);
+            throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
         }
     }
 
@@ -852,6 +1118,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
      */
     private String[] buildFieldNamesArray(List<String> parentPath, String fieldName)
     {
+        requireNonNull(parentPath, "parentPath is null");
+        parentPath.forEach(field -> validateFieldName("parentPath", field));
+        validateFieldName("fieldName", fieldName);
         List<String> fullPath = new ArrayList<>(parentPath);
         fullPath.add(fieldName);
         return fullPath.toArray(new String[0]);
@@ -864,56 +1133,84 @@ public record PaimonMetadata(PaimonCatalog catalog,
      */
     private String[] buildFieldNamesArray(List<String> columnList, List<String> fieldPath)
     {
+        requireNonNull(columnList, "columnList is null");
+        requireNonNull(fieldPath, "fieldPath is null");
+        columnList.forEach(field -> validateFieldName("columnList", field));
         List<String> fullPath = new ArrayList<>(columnList);
         fullPath.addAll(fieldPath);
         return fullPath.toArray(new String[0]);
     }
 
+    private static void validateRelativeFieldPath(String operation, List<String> fieldPath)
+    {
+        requireNonNull(fieldPath, operation + " fieldPath is null");
+        checkArgument(!fieldPath.isEmpty(), operation + " fieldPath is empty");
+        fieldPath.forEach(field -> validateFieldName(operation + " fieldPath", field));
+    }
+
+    private static void validateAbsoluteFieldPath(String operation, List<String> fieldPath)
+    {
+        requireNonNull(fieldPath, operation + " fieldPath is null");
+        checkArgument(fieldPath.size() >= 2, operation + " fieldPath must include a column name and nested field");
+        fieldPath.forEach(field -> validateFieldName(operation + " fieldPath", field));
+    }
+
+    private static void validateFieldName(String label, String fieldName)
+    {
+        requireNonNull(fieldName, label + " contains null field");
+        checkArgument(!StringUtils.isNullOrWhitespaceOnly(fieldName), label + " contains blank field");
+    }
+
     @Override
     public void truncateTable(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) tableHandle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("truncate table", tableHandle);
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
 
         try {
-            catalog.initSession(session);
-            Table table = catalog.getTable(identifier);
-            if (!(table instanceof FileStoreTable fileStoreTable)) {
-                throw new IllegalArgumentException("Table is not a FileStoreTable: " + table.getClass());
-            }
+            Catalog sessionCatalog = catalog.forSession(session);
+            Table table = sessionCatalog.getTable(identifier);
+            FileStoreTable fileStoreTable = latestFileStoreTable(table, "truncate table");
 
             // Use BatchTableCommit to truncate the table
             try (BatchTableCommit commit = fileStoreTable.newBatchWriteBuilder().newCommit()) {
                 commit.truncateTable();
             }
         }
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (Catalog.TableNotExistException e) {
+            throw new TrinoException(TABLE_NOT_FOUND,
+                    format("Table '%s' does not exist", schemaTableName(paimonTableHandle)), e);
+        }
         catch (Exception e) {
             throw new RuntimeException(format("failed to truncate table '%s'", paimonTableHandle.getTableName()), e);
         }
     }
 
-    // TODO: Enhancement - SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN
-    // Current implementation only supports column-based predicates via TupleDomain.
-    // To support expression predicates (e.g., WHERE lower(name) = 'alice'):
-    // 1. Implement applyFilter() to accept ConnectorExpression parameters (Trino
-    // SPI enhancement)
-    // 2. Convert Trino expressions to Paimon expressions (if Paimon supports)
-    // 3. Identify which functions are pushdown-safe (deterministic, supported by
-    // Paimon)
-    // Reference:
-    // tmp-docs/PUSHDOWN_OPTIMIZATION_GUIDE.md#3-supports_predicate_expression_pushdown
-    // Note: Iceberg and Hudi connectors also don't support this - indicates high
-    // complexity
-    // Estimated effort: 12-16 hours
-    // Priority: P2 (Medium value, high cost)
     @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session,
             ConnectorTableHandle handle, Constraint constraint)
     {
-        catalog.initSession(session);
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) handle;
-        Optional<PaimonFilterExtractor.TrinoFilter> extract = PaimonFilterExtractor.extract(catalog, paimonTableHandle,
-                constraint);
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("filter pushdown", handle);
+        requireNonNull(constraint, "constraint is null");
+        validateFilterColumns(constraint);
+        if (constraint.getSummary().isNone()) {
+            if (paimonTableHandle.getFilter().isNone()) {
+                return Optional.empty();
+            }
+            return Optional.of(new ConstraintApplicationResult<>(paimonTableHandle.copy(TupleDomain.none()),
+                    TupleDomain.all(), TRUE, false));
+        }
+        if (constraint.getSummary().isAll() && constraint.getExpression().equals(TRUE)) {
+            return Optional.empty();
+        }
+        Catalog sessionCatalog = catalog.forSession(session);
+        Optional<PaimonFilterExtractor.TrinoFilter> extract = PaimonFilterExtractor.extract(sessionCatalog,
+                paimonTableHandle, session, constraint);
         if (extract.isPresent()) {
             PaimonFilterExtractor.TrinoFilter trinoFilter = extract.get();
             return Optional.of(new ConstraintApplicationResult<>(paimonTableHandle.copy(trinoFilter.filter()),
@@ -924,54 +1221,95 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
+    private static void validateFilterColumns(Constraint constraint)
+    {
+        constraint.getSummary().transformKeys(column -> getColumnHandle("filter pushdown", column));
+        constraint.getPredicateColumns().ifPresent(columns -> columns.forEach(column ->
+                getColumnHandle("filter pushdown", column)));
+        constraint.getAssignments().values().forEach(column -> getColumnHandle("filter pushdown", column));
+    }
+
     @Override
     public Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(ConnectorSession session,
             ConnectorTableHandle handle, List<ConnectorExpression> projections, Map<String, ColumnHandle> assignments)
     {
-        PaimonTableHandle paimonTableHandle = (PaimonTableHandle) handle;
-        List<ColumnHandle> newColumns = new ArrayList<>(assignments.values());
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("projection pushdown", handle);
+        requireNonNull(projections, "projections is null");
+        requireNonNull(assignments, "assignments is null");
+        assignments.forEach((name, column) -> {
+            requireNonNull(name, "assignments contains null variable");
+            getColumnHandle("projection pushdown", column);
+        });
+        LinkedHashMap<String, PaimonColumnHandle> projectedAssignments = projectedAssignments(projections,
+                assignments);
+        if (projectedAssignments.isEmpty()) {
+            return Optional.empty();
+        }
+
+        List<ColumnHandle> newColumns = new ArrayList<>(projectedAssignments.values());
 
         if (paimonTableHandle.getProjectedColumns().isPresent()
-                && containSameElements(newColumns, paimonTableHandle.getProjectedColumns().get())) {
+                && newColumns.equals(paimonTableHandle.getProjectedColumns().get())) {
             return Optional.empty();
         }
 
         List<Assignment> assignmentList = new ArrayList<>();
-        assignments.forEach((name, column) -> assignmentList
-                .add(new Assignment(name, column, ((PaimonColumnHandle) column).getTrinoType())));
+        projectedAssignments.forEach((name, column) -> assignmentList
+                .add(new Assignment(name, column, column.getTrinoType())));
 
         return Optional.of(new ProjectionApplicationResult<>(paimonTableHandle.copy(Optional.of(newColumns)),
                 projections, assignmentList, false));
+    }
+
+    private static LinkedHashMap<String, PaimonColumnHandle> projectedAssignments(
+            List<ConnectorExpression> projections,
+            Map<String, ColumnHandle> assignments)
+    {
+        LinkedHashMap<String, PaimonColumnHandle> projectedAssignments = new LinkedHashMap<>();
+        projections.forEach(projection -> collectProjectionVariables(projection, assignments, projectedAssignments));
+        return projectedAssignments;
+    }
+
+    private static void collectProjectionVariables(
+            ConnectorExpression projection,
+            Map<String, ColumnHandle> assignments,
+            LinkedHashMap<String, PaimonColumnHandle> projectedAssignments)
+    {
+        requireNonNull(projection, "projections contains null expression");
+        if (projection instanceof Variable variable) {
+            if (!assignments.containsKey(variable.getName())) {
+                throw new IllegalStateException("Paimon projection pushdown assignments missing variable: "
+                        + variable.getName());
+            }
+            projectedAssignments.putIfAbsent(variable.getName(),
+                    getColumnHandle("projection pushdown", assignments.get(variable.getName())));
+            return;
+        }
+        projection.getChildren().forEach(child -> collectProjectionVariables(child, assignments, projectedAssignments));
     }
 
     @Override
     public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(ConnectorSession session,
             ConnectorTableHandle handle, long limit)
     {
-        // TODO: Enhancement - SUPPORTS_TOPN_PUSHDOWN_WITH_VARCHAR
-        // Current implementation supports basic TOP-N pushdown but not with VARCHAR
-        // sorting keys.
-        // To implement VARCHAR support:
-        // 1. Add logic to check if sorting columns contain VARCHAR types
-        // 2. Verify Paimon supports VARCHAR-based sorting at storage level
-        // 3. May need to implement sorting logic in SplitManager
-        // Reference:
-        // tmp-docs/PUSHDOWN_OPTIMIZATION_GUIDE.md#1-supports_topn_pushdown_with_varchar
-        // Estimated effort: 4-6 hours
-        // Priority: P1 (High value, moderate cost)
-
-        PaimonTableHandle table = (PaimonTableHandle) handle;
+        requireNonNull(session, "session is null");
+        PaimonTableHandle table = getTableHandle("limit pushdown", handle);
+        checkArgument(limit >= 0, "limit must be non-negative");
 
         if (table.getLimit().isPresent() && table.getLimit().getAsLong() <= limit) {
             return Optional.empty();
         }
 
         if (!table.getFilter().isAll()) {
-            Table paimonTable = table.table(catalog);
+            Catalog sessionCatalog = catalog.forSession(session);
+            Table paimonTable = PaimonTableHandle.schemaAwareReadTable(
+                    table.tableWithDynamicOptions(sessionCatalog, session),
+                    !table.usesHistoricalReadSchema(session));
             HashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
             HashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
-            new PaimonFilterConverter(paimonTable.rowType()).convert(table.getFilter(), acceptedDomains,
-                    unsupportedDomains);
+            new PaimonFilterConverter(PaimonTableHandle.effectiveReadRowType(paimonTable)).convert(
+                    table.getFilter(), acceptedDomains, unsupportedDomains);
             Set<String> acceptedFields = acceptedDomains.keySet().stream().map(PaimonColumnHandle::getColumnName)
                     .collect(Collectors.toSet());
             if (!unsupportedDomains.isEmpty()
@@ -985,189 +1323,240 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return Optional.of(new LimitApplicationResult<>(table, false, false));
     }
 
-    // TODO: Long-term Enhancement - SUPPORTS_AGGREGATION_PUSHDOWN
-    // Aggregation pushdown (COUNT, SUM, AVG, etc.) to storage layer is a complex
-    // feature.
-    // Current status: Not implemented (Iceberg and Hudi also don't support this)
-    //
-    // Implementation path:
-    // 1. Research if Paimon supports aggregation at storage level
-    // - Check:
-    // /opt/source/paimon/paimon-core/src/main/java/org/apache/paimon/table/
-    // - Look for: Statistics, Aggregation-related interfaces
-    // 2. If supported, implement applyAggregation() method:
-    // @Override
-    // public Optional<AggregationApplicationResult<ConnectorTableHandle>>
-    // applyAggregation(
-    // ConnectorSession session,
-    // ConnectorTableHandle handle,
-    // List<AggregateFunction> aggregates,
-    // Map<String, ColumnHandle> assignments,
-    // List<List<ColumnHandle>> groupingSets)
-    // {
-    // // Convert Trino aggregates to Paimon API
-    // // Return partial aggregation results
-    // }
-    // 3. Handle edge cases: NULL values, precision, type conversions
-    // 4. Performance benchmarking - pushdown not always faster
-    //
-    // Reference:
-    // tmp-docs/PUSHDOWN_OPTIMIZATION_GUIDE.md#5-supports_aggregation_pushdown
-    // Estimated effort: 40-60 hours (requires dedicated research)
-    // Priority: P3 (High uncertainty, major implementation effort)
-    //
-    // ========== View Support ==========
-
     @Override
     public void createView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition definition,
             boolean replace)
     {
-        catalog.initSession(session);
+        requireNonNull(session, "session is null");
+        requireNonNull(viewName, "viewName is null");
+        requireNonNull(definition, "definition is null");
         Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
+        org.apache.paimon.view.View paimonView = toPaimonView(identifier, definition);
 
         try {
-            // Build Paimon View from Trino ViewDefinition
-            List<DataField> fields = definition.getColumns().stream().map(column -> new DataField(0, // id will be
-                                                                                                     // auto-assigned
-                    column.getName(), PaimonTypeUtils.toPaimonType(typeManager.getType(column.getType()))))
-                    .collect(toList());
-
-            // Store Trino dialect SQL
-            Map<String, String> dialects = new HashMap<>();
-            dialects.put("trino", definition.getOriginalSql());
-
-            // Build options from view metadata
-            Map<String, String> options = new HashMap<>();
-            definition.getComment().ifPresent(c -> options.put("comment", c));
-
-            // Create ViewImpl
-            org.apache.paimon.view.View paimonView = new org.apache.paimon.view.ViewImpl(identifier, fields,
-                    definition.getOriginalSql(), dialects, definition.getComment().orElse(null), options);
-
-            // Create the view in catalog
-            catalog.createView(identifier, paimonView, replace);
+            Catalog sessionCatalog = catalog.forSession(session);
+            if (replace) {
+                sessionCatalog.dropView(identifier, true);
+            }
+            sessionCatalog.createView(identifier, paimonView, false);
         }
         catch (Catalog.ViewAlreadyExistException e) {
-            if (!replace) {
-                throw new TrinoException(io.trino.spi.StandardErrorCode.ALREADY_EXISTS,
-                        format("View '%s' already exists", viewName));
-            }
+            throw new TrinoException(io.trino.spi.StandardErrorCode.ALREADY_EXISTS,
+                    format("View '%s' already exists", viewName));
         }
         catch (Catalog.DatabaseNotExistException e) {
             throw new TrinoException(io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND,
                     format("Schema '%s' does not exist", viewName.getSchemaName()));
         }
-        catch (Exception e) {
-            throw new RuntimeException(format("Failed to create view '%s'", viewName), e);
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("create", e);
         }
+        catch (Exception e) {
+            throw paimonViewException(format("Failed to create view '%s'", viewName), e);
+        }
+    }
+
+    private org.apache.paimon.view.View toPaimonView(Identifier identifier, ConnectorViewDefinition definition)
+    {
+        List<DataField> fields = IntStream.range(0, definition.getColumns().size())
+                .mapToObj(index -> {
+                    ConnectorViewDefinition.ViewColumn column = definition.getColumns().get(index);
+                    return new DataField(index, column.getName(),
+                            PaimonTypeUtils.toPaimonType(typeManager.getType(column.getType())),
+                            column.getComment().orElse(null));
+                })
+                .collect(toList());
+
+        Map<String, String> dialects = new HashMap<>();
+        dialects.put("trino", definition.getOriginalSql());
+
+        Map<String, String> options = new HashMap<>();
+        definition.getComment().ifPresent(c -> options.put("comment", c));
+
+        return new org.apache.paimon.view.ViewImpl(identifier, fields, definition.getOriginalSql(), dialects,
+                definition.getComment().orElse(null), options);
     }
 
     @Override
     public void dropView(ConnectorSession session, SchemaTableName viewName)
     {
-        catalog.initSession(session);
+        requireNonNull(session, "session is null");
+        requireNonNull(viewName, "viewName is null");
+        Catalog sessionCatalog = catalog.forSession(session);
         Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
 
         try {
-            catalog.dropView(identifier, false);
+            sessionCatalog.dropView(identifier, false);
         }
         catch (Catalog.ViewNotExistException e) {
             throw new TrinoException(io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND,
                     format("View '%s' does not exist", viewName));
         }
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("drop", e);
+        }
         catch (Exception e) {
-            throw new RuntimeException(format("Failed to drop view '%s'", viewName), e);
+            throw paimonViewException(format("Failed to drop view '%s'", viewName), e);
+        }
+    }
+
+    @Override
+    public void renameView(ConnectorSession session, SchemaTableName source, SchemaTableName target)
+    {
+        requireNonNull(session, "session is null");
+        requireNonNull(source, "source is null");
+        requireNonNull(target, "target is null");
+        Catalog sessionCatalog = catalog.forSession(session);
+        Identifier sourceIdentifier = new Identifier(source.getSchemaName(), source.getTableName());
+        Identifier targetIdentifier = new Identifier(target.getSchemaName(), target.getTableName());
+
+        try {
+            sessionCatalog.renameView(sourceIdentifier, targetIdentifier, false);
+        }
+        catch (Catalog.ViewNotExistException e) {
+            throw new TrinoException(io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND,
+                    format("View '%s' does not exist", source));
+        }
+        catch (Catalog.ViewAlreadyExistException e) {
+            throw new TrinoException(io.trino.spi.StandardErrorCode.ALREADY_EXISTS,
+                    format("View '%s' already exists", target));
+        }
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("rename", e);
+        }
+        catch (Exception e) {
+            throw paimonViewException(format("Failed to rename view '%s' to '%s'", source, target), e);
         }
     }
 
     @Override
     public Optional<ConnectorViewDefinition> getView(ConnectorSession session, SchemaTableName viewName)
     {
-        catalog.initSession(session);
+        requireNonNull(session, "session is null");
+        requireNonNull(viewName, "viewName is null");
+        Catalog sessionCatalog = catalog.forSession(session);
         Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
 
+        org.apache.paimon.view.View paimonView;
         try {
-            org.apache.paimon.view.View paimonView = catalog.getView(identifier);
-
-            // Convert Paimon View to Trino ConnectorViewDefinition
-            List<ConnectorViewDefinition.ViewColumn> columns = paimonView.rowType().getFields().stream()
-                    .map(field -> new ConnectorViewDefinition.ViewColumn(field.name(),
-                            PaimonTypeUtils.fromPaimonType(field.type()).getTypeId(), Optional.empty()))
-                    .collect(toList());
-
-            // Get Trino-specific SQL from dialects, fallback to default query
-            String originalSql = paimonView.dialects().getOrDefault("trino", paimonView.query());
-
-            return Optional.of(new ConnectorViewDefinition(originalSql, Optional.empty(), // catalog
-                    Optional.of(viewName.getSchemaName()), // schema
-                    columns, paimonView.comment(), // comment
-                    Optional.empty(), // owner
-                    false, // runAsInvoker
-                    List.of())); // path
+            paimonView = sessionCatalog.getView(identifier);
         }
         catch (Catalog.ViewNotExistException e) {
             return Optional.empty();
         }
-        catch (Exception e) {
-            throw new RuntimeException(format("Failed to get view '%s'", viewName), e);
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("read", e);
         }
+        catch (Exception e) {
+            throw paimonViewException(format("Failed to get view '%s'", viewName), e);
+        }
+
+        // Convert Paimon View to Trino ConnectorViewDefinition
+        List<ConnectorViewDefinition.ViewColumn> columns = paimonView.rowType().getFields().stream()
+                .map(field -> new ConnectorViewDefinition.ViewColumn(field.name(),
+                        PaimonTypeUtils.fromPaimonType(field.type(), typeManager).getTypeId(),
+                        Optional.ofNullable(field.description()).filter(comment -> !comment.isEmpty())))
+                .collect(toList());
+
+        String originalSql = paimonView.dialects().get("trino");
+        if (originalSql == null) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    format("Paimon view '%s' does not contain a Trino SQL dialect", viewName));
+        }
+
+        return Optional.of(new ConnectorViewDefinition(originalSql, Optional.empty(), // catalog
+                Optional.empty(), // schema
+                columns, paimonView.comment(), // comment
+                Optional.empty(), // owner
+                false, // runAsInvoker
+                List.of())); // path
     }
 
     @Override
     public Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session, Optional<String> schemaName)
     {
-        catalog.initSession(session);
+        requireNonNull(session, "session is null");
+        requireNonNull(schemaName, "schemaName is null");
+        schemaName.ifPresent(schema -> checkArgument(!StringUtils.isNullOrWhitespaceOnly(schema),
+                "schemaName cannot be null or empty"));
+        Catalog sessionCatalog = catalog.forSession(session);
 
-        if (schemaName.isEmpty()) {
-            // If no schema specified, return empty map
-            return Map.of();
+        List<String> schemas = schemaName.map(Collections::singletonList).orElseGet(sessionCatalog::listDatabases);
+        Map<SchemaTableName, ConnectorViewDefinition> views = new HashMap<>();
+        for (String schema : schemas) {
+            views.putAll(getViews(sessionCatalog, session, schema));
         }
+        return views;
+    }
 
+    private Map<SchemaTableName, ConnectorViewDefinition> getViews(Catalog sessionCatalog, ConnectorSession session, String schemaName)
+    {
+        List<String> viewNames;
         try {
-            List<String> viewNames = catalog.listViews(schemaName.get());
-            Map<SchemaTableName, ConnectorViewDefinition> views = new HashMap<>();
-
-            for (String viewName : viewNames) {
-                SchemaTableName tableName = new SchemaTableName(schemaName.get(), viewName);
-                getView(session, tableName).ifPresent(def -> views.put(tableName, def));
-            }
-
-            return views;
+            viewNames = sessionCatalog.listViews(schemaName);
         }
         catch (Catalog.DatabaseNotExistException e) {
             throw new TrinoException(io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND,
-                    format("Schema '%s' does not exist", schemaName.get()));
+                    format("Schema '%s' does not exist", schemaName));
+        }
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("list", e);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("Failed to list views in schema '%s'", schemaName.orElse("ALL")), e);
+            throw paimonViewException(format("Failed to list views in schema '%s'", schemaName), e);
         }
+
+        Map<SchemaTableName, ConnectorViewDefinition> views = new HashMap<>();
+        for (String viewName : viewNames) {
+            SchemaTableName tableName = new SchemaTableName(schemaName, viewName);
+            getView(session, tableName).ifPresent(def -> views.put(tableName, def));
+        }
+        return views;
     }
 
     @Override
     public void setViewComment(ConnectorSession session, SchemaTableName viewName, Optional<String> comment)
     {
-        catalog.initSession(session);
+        requireNonNull(session, "session is null");
+        requireNonNull(viewName, "viewName is null");
+        requireNonNull(comment, "comment is null");
+        Catalog sessionCatalog = catalog.forSession(session);
         Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
 
         try {
             List<org.apache.paimon.view.ViewChange> changes = List
                     .of(org.apache.paimon.view.ViewChange.updateComment(comment.orElse(null)));
-            catalog.alterView(identifier, changes, false);
+            sessionCatalog.alterView(identifier, changes, false);
         }
         catch (Catalog.ViewNotExistException e) {
             throw new TrinoException(io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND,
                     format("View '%s' does not exist", viewName));
         }
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("alter", e);
+        }
         catch (Exception e) {
-            throw new RuntimeException(format("Failed to set comment on view '%s'", viewName), e);
+            throw paimonViewException(format("Failed to set comment on view '%s'", viewName), e);
         }
     }
 
-    // TODO: Long-term Enhancement - SUPPORTS_JOIN_PUSHDOWN
-    // Join pushdown to storage layer is extremely rare and not recommended.
-    // Status: Not implemented (almost no Trino connectors support this)
-    // Recommendation: Do NOT implement - storage layers are not designed for JOIN
-    // operations
-    // Trino's distributed JOIN is already highly optimized
-    // Reference: tmp-docs/PUSHDOWN_OPTIMIZATION_GUIDE.md#6-supports_join_pushdown
+    private static RuntimeException paimonViewException(String message, Exception exception)
+    {
+        if (exception instanceof TrinoException trinoException) {
+            return trinoException;
+        }
+        if (exception instanceof RuntimeException runtimeException) {
+            return runtimeException;
+        }
+        return new RuntimeException(message, exception);
+    }
+
+    private static TrinoException unsupportedViewOperation(String operation, UnsupportedOperationException cause)
+    {
+        String message = "Paimon catalog does not support view " + operation + " operations";
+        if (operation.equals("create")) {
+            message = "This connector does not support creating views: " + message;
+        }
+        return new TrinoException(NOT_SUPPORTED, message, cause);
+    }
 }
