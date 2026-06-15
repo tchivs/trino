@@ -62,6 +62,7 @@ import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
 import org.apache.paimon.table.system.AuditLogTable;
 import org.apache.paimon.table.system.RowTrackingTable;
+import org.apache.paimon.table.system.SystemTableLoader;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.DataTypes;
@@ -97,6 +98,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -117,6 +119,103 @@ public class PaimonMetadataTableModeTest
         assertThatThrownBy(() -> new PaimonMetadata(new TestingPaimonCatalog(table()), null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("typeManager is null");
+    }
+
+    @Test
+    public void testSystemSchemaIsExposed()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new SchemaQueryCatalog(), TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.schemaExists(SESSION, SYSTEM_DATABASE_NAME)).isTrue();
+        assertThat(metadata.listSchemaNames(SESSION)).containsExactly("alpha", "beta", SYSTEM_DATABASE_NAME);
+    }
+
+    @Test
+    public void testSystemSchemaListsGlobalSystemTables()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new SchemaQueryCatalog(), TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.listTables(SESSION, Optional.of(SYSTEM_DATABASE_NAME)))
+                .containsExactlyElementsOf(SystemTableLoader.loadGlobalTableNames().stream()
+                        .map(table -> new SchemaTableName(SYSTEM_DATABASE_NAME, table))
+                        .toList());
+    }
+
+    @Test
+    public void testSystemSchemaWritesAreRejected()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new CapturingDdlCatalog(), TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName(SYSTEM_DATABASE_NAME, "all_tables"),
+                List.of(new ColumnMetadata("id", BIGINT)));
+        PaimonTableHandle systemTableHandle = new PaimonTableHandle(SYSTEM_DATABASE_NAME, "all_tables", Map.of());
+
+        assertTrinoError(() -> metadata.createTable(SESSION, tableMetadata, io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon create table is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.renameTable(
+                        SESSION,
+                        systemTableHandle,
+                        new SchemaTableName(SYSTEM_DATABASE_NAME, "catalog_options")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename table is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.dropTable(SESSION, systemTableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop table is not supported for the system schema 'sys'");
+    }
+
+    @Test
+    public void testSystemSchemaDdlAndAlterOperationsAreRejected()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new CapturingDdlCatalog(), TESTING_TYPE_MANAGER);
+        PaimonTableHandle systemTableHandle = new PaimonTableHandle(SYSTEM_DATABASE_NAME, "all_tables", Map.of());
+        PaimonColumnHandle columnHandle = PaimonColumnHandle.of("database_name", DataTypes.STRING());
+
+        assertTrinoError(() -> metadata.createSchema(SESSION, SYSTEM_DATABASE_NAME, Map.of(), null),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon create schema is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.dropSchema(SESSION, SYSTEM_DATABASE_NAME, false),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop schema is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, systemTableHandle, Map.of("bucket", Optional.of("4"))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set table properties is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.addColumn(SESSION, systemTableHandle, new ColumnMetadata("extra", INTEGER)),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon add column is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.renameColumn(SESSION, systemTableHandle, columnHandle, "renamed"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.dropColumn(SESSION, systemTableHandle, columnHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop column is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.setTableComment(SESSION, systemTableHandle, Optional.of("comment")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set table comment is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.setColumnComment(SESSION, systemTableHandle, columnHandle, Optional.of("comment")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set column comment is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.setColumnType(SESSION, systemTableHandle, columnHandle, VARCHAR),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set column type is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.dropNotNullConstraint(SESSION, systemTableHandle, columnHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop not null constraint is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.addField(SESSION, systemTableHandle, List.of("database_name"), "nested", VARCHAR, false),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon add field is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.dropField(SESSION, systemTableHandle, columnHandle, List.of("nested")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop field is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.renameField(SESSION, systemTableHandle, List.of("database_name", "nested"), "renamed"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename field is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.setFieldType(SESSION, systemTableHandle, List.of("database_name", "nested"), VARCHAR),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set field type is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.truncateTable(SESSION, systemTableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon truncate table is not supported for the system schema 'sys'");
     }
 
     @Test
@@ -1999,7 +2098,7 @@ public class PaimonMetadataTableModeTest
         SchemaQueryCatalog catalog = new SchemaQueryCatalog();
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
 
-        assertThat(metadata.listSchemaNames(SESSION)).containsExactly("alpha", "beta");
+        assertThat(metadata.listSchemaNames(SESSION)).containsExactly("alpha", "beta", SYSTEM_DATABASE_NAME);
     }
 
     @Test
@@ -2167,7 +2266,11 @@ public class PaimonMetadataTableModeTest
         assertThat(tables).containsExactly(
                 new SchemaTableName("alpha", "t1"),
                 new SchemaTableName("alpha", "t2"),
-                new SchemaTableName("beta", "t3"));
+                new SchemaTableName("beta", "t3"),
+                new SchemaTableName(SYSTEM_DATABASE_NAME, "tables"),
+                new SchemaTableName(SYSTEM_DATABASE_NAME, "partitions"),
+                new SchemaTableName(SYSTEM_DATABASE_NAME, "all_table_options"),
+                new SchemaTableName(SYSTEM_DATABASE_NAME, "catalog_options"));
     }
 
     @Test
@@ -3428,6 +3531,9 @@ public class PaimonMetadataTableModeTest
         public Database getDatabase(String name)
                 throws Catalog.DatabaseNotExistException
         {
+            if (name.equals(SYSTEM_DATABASE_NAME)) {
+                return Database.of(name);
+            }
             if (name.equals("existing_schema")) {
                 return Database.of(name);
             }
@@ -3447,6 +3553,7 @@ public class PaimonMetadataTableModeTest
             return switch (databaseName) {
                 case "alpha" -> List.of("t1", "t2");
                 case "beta" -> List.of("t3");
+                case SYSTEM_DATABASE_NAME -> SystemTableLoader.loadGlobalTableNames();
                 default -> List.of();
             };
         }

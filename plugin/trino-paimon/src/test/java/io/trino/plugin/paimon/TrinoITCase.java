@@ -585,7 +585,7 @@ public class TrinoITCase
     public void testCreateSchema()
     {
         sql("CREATE SCHEMA paimon.test");
-        assertThat(sql("SHOW SCHEMAS FROM paimon")).isEqualTo("[[default], [information_schema], [test]]");
+        assertThat(sql("SHOW SCHEMAS FROM paimon")).isEqualTo("[[default], [information_schema], [sys], [test]]");
         sql("DROP SCHEMA paimon.test");
     }
 
@@ -594,7 +594,16 @@ public class TrinoITCase
     {
         sql("CREATE SCHEMA paimon.tpch");
         sql("DROP SCHEMA paimon.tpch");
-        assertThat(sql("SHOW SCHEMAS FROM paimon")).isEqualTo("[[default], [information_schema]]");
+        assertThat(sql("SHOW SCHEMAS FROM paimon")).isEqualTo("[[default], [information_schema], [sys]]");
+    }
+
+    @Test
+    public void testGlobalSystemTables()
+    {
+        assertThat(sql("SHOW TABLES FROM paimon.sys"))
+                .isEqualTo("[[all_table_options], [catalog_options], [partitions], [tables]]");
+        assertThat(sql("SHOW COLUMNS FROM paimon.sys.catalog_options"))
+                .isEqualTo("[[key, varchar, , ], [value, varchar, , ]]");
     }
 
     @Test
