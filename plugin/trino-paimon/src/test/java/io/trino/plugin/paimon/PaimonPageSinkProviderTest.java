@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import io.airlift.slice.Slices;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
@@ -42,9 +43,12 @@ import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_CLOSE_ERROR;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_DATA_ERROR;
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_SNAPSHOT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -516,15 +520,43 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
-    public void testPageSinkWriteExceptionsAreNotRewrapped()
+    public void testPageSinkWriteExceptionsUsePaimonErrorCodes()
     {
         IllegalArgumentException contractViolation = new IllegalArgumentException("metadata mismatch");
         IOException writeFailure = new IOException("write failed");
+        TrinoException alreadyMapped = new TrinoException(PAIMON_WRITER_DATA_ERROR, "already mapped");
+        UnsupportedOperationException unsupported = new UnsupportedOperationException("unsupported nested type");
+        RuntimeException runtimeFailure = new RuntimeException("runtime write failed");
 
         assertThat(PaimonPageSink.wrapWriteException(contractViolation)).isSameAs(contractViolation);
+        assertThat(PaimonPageSink.wrapWriteException(alreadyMapped)).isSameAs(alreadyMapped);
+        assertThat(PaimonPageSink.wrapWriteException(unsupported))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(unsupported);
+                });
+        assertThat(PaimonPageSink.wrapWriteException(runtimeFailure))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception.getCause()).isSameAs(runtimeFailure);
+                });
         assertThat(PaimonPageSink.wrapWriteException(writeFailure))
-                .isInstanceOf(RuntimeException.class)
-                .hasCause(writeFailure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception.getCause()).isSameAs(writeFailure);
+                });
+
+        assertThat(PaimonPageSink.wrapWriterCloseException(contractViolation)).isSameAs(contractViolation);
+        assertThat(PaimonPageSink.wrapWriterCloseException(alreadyMapped)).isSameAs(alreadyMapped);
+        assertThat(PaimonPageSink.wrapWriterCloseException(writeFailure))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_CLOSE_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to close Paimon writer");
+                    assertThat(exception.getCause()).isSameAs(writeFailure);
+                });
     }
 
     @Test
@@ -547,6 +579,76 @@ public class PaimonPageSinkProviderTest
         RuntimeException actual = PaimonPageSink.closeWriter(writer(closeFailure), null);
 
         assertThat(actual).isSameAs(closeFailure);
+    }
+
+    @Test
+    public void testPageSinkAbortWrapsCheckedCloseFailures()
+    {
+        PaimonPageSink pageSink = new PaimonPageSink(writer(List.of(), null, null, new IOException("close failed")),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()));
+
+        assertThatThrownBy(pageSink::abort)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_CLOSE_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to close Paimon writer");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class)
+                            .hasMessage("close failed");
+                });
+    }
+
+    @Test
+    public void testPageSinkWriteAndFinishWrapCheckedFailures()
+    {
+        IOException writeFailure = new IOException("write failed");
+        PaimonPageSink failingWriteSink = new PaimonPageSink(writer(List.of(), writeFailure, null, null),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()));
+
+        assertThatThrownBy(() -> failingWriteSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 1L))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception.getCause()).isSameAs(writeFailure);
+                });
+
+        IOException prepareFailure = new IOException("prepare failed");
+        PaimonPageSink failingFinishSink = new PaimonPageSink(writer(List.of(), null, prepareFailure, null),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()));
+
+        assertThatThrownBy(() -> failingFinishSink.finish().join())
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception.getCause()).isSameAs(prepareFailure);
+                });
+    }
+
+    @Test
+    public void testVariantWriteFailuresUseStableConnectorErrors()
+    {
+        io.trino.spi.type.Type jsonType = TESTING_TYPE_MANAGER.getType(new io.trino.spi.type.TypeSignature(JSON));
+        PaimonPageSink pageSink = new PaimonPageSink(variantValidatingWriter(), List.of(jsonType), List.of(DataTypes.VARIANT()));
+
+        assertThatThrownBy(() -> pageSink.appendPage(new io.trino.spi.Page(1,
+                writeNativeValue(jsonType, Slices.utf8Slice("{broken")))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception.getCause()).isInstanceOf(RuntimeException.class)
+                            .hasMessage("Failed to parse Variant from JSON");
+                    assertThat(exception.getCause().getCause()).isInstanceOf(IOException.class);
+                });
+
+        PaimonPageSink unsupportedVariantSink = new PaimonPageSink(variantValidatingWriter(), List.of(INTEGER), List.of(DataTypes.VARIANT()));
+        assertThatThrownBy(() -> unsupportedVariantSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 1L))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage("Paimon VARIANT requires Trino JSON type metadata");
+                });
     }
 
     @Test
@@ -779,27 +881,44 @@ public class PaimonPageSinkProviderTest
 
     private static org.apache.paimon.table.sink.BatchTableWrite writer()
     {
-        return writer(List.of(), null);
+        return writer(List.of(), null, null, null);
     }
 
     private static org.apache.paimon.table.sink.BatchTableWrite writer(RuntimeException closeFailure)
     {
-        return writer(List.of(), closeFailure);
+        return writer(List.of(), null, null, closeFailure);
     }
 
     private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages)
     {
-        return writer(commitMessages, null);
+        return writer(commitMessages, null, null, null);
     }
 
     private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages,
             RuntimeException closeFailure)
     {
+        return writer(commitMessages, null, null, closeFailure);
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages,
+            Exception writeFailure, Exception prepareFailure, Exception closeFailure)
+    {
         return (org.apache.paimon.table.sink.BatchTableWrite) Proxy.newProxyInstance(
                 PaimonPageSinkProviderTest.class.getClassLoader(),
                 new Class<?>[] {org.apache.paimon.table.sink.BatchTableWrite.class},
                 (proxy, method, args) -> switch (method.getName()) {
-                    case "prepareCommit" -> commitMessages;
+                    case "write" -> {
+                        if (writeFailure != null) {
+                            throw writeFailure;
+                        }
+                        yield null;
+                    }
+                    case "prepareCommit" -> {
+                        if (prepareFailure != null) {
+                            throw prepareFailure;
+                        }
+                        yield commitMessages;
+                    }
                     case "close" -> {
                         if (closeFailure != null) {
                             throw closeFailure;
@@ -807,6 +926,23 @@ public class PaimonPageSinkProviderTest
                         yield null;
                     }
                     case "toString" -> "testing-writer";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite variantValidatingWriter()
+    {
+        return (org.apache.paimon.table.sink.BatchTableWrite) Proxy.newProxyInstance(
+                PaimonPageSinkProviderTest.class.getClassLoader(),
+                new Class<?>[] {org.apache.paimon.table.sink.BatchTableWrite.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "write" -> {
+                        ((org.apache.paimon.data.InternalRow) args[0]).getVariant(0);
+                        yield null;
+                    }
+                    case "prepareCommit" -> List.of();
+                    case "close" -> null;
+                    case "toString" -> "variant-validating-writer";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

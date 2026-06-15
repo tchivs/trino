@@ -84,6 +84,8 @@ import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_SNAPSHOT;
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
@@ -912,15 +914,43 @@ public class PaimonMetadataTableModeTest
 
         assertThatThrownBy(() -> metadata.finishInsert(SESSION, tableHandle, List.of(Slices.wrappedBuffer(new byte[] {
                 1, 2, 3})), List.of()))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessage("Failed to deserialize Paimon commit fragment");
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to deserialize Paimon commit fragment");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class);
+                });
         assertThat(catalog.initialized).isFalse();
 
         assertThatThrownBy(() -> metadata.finishMerge(SESSION, new PaimonMergeTableHandle(tableHandle),
                 List.of(Slices.wrappedBuffer(new byte[] {1, 2, 3})), List.of()))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessage("Failed to deserialize Paimon commit fragment");
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to deserialize Paimon commit fragment");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class);
+                });
         assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
+    public void testFinishInsertCommitFailuresUsePaimonCommitError()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        RuntimeException commitFailure = new RuntimeException("commit failed");
+        FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(),
+                commitFailure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.finishInsert(SESSION, tableHandle, List.of(commitFragment()), List.of()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to commit Paimon write fragments");
+                    assertThat(exception.getCause()).isSameAs(commitFailure);
+                });
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(committed).isFalse();
     }
 
     @Test
@@ -2112,6 +2142,40 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testCheckedAlterFailureUsesPaimonMetadataError()
+    {
+        IOException failure = new IOException("metastore I/O failed");
+        PaimonMetadata metadata = new PaimonMetadata(new CheckedFailingAlterCatalog(failure), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to alter Paimon table 'schema.table'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+    }
+
+    @Test
+    public void testCheckedTruncateFailureUsesPaimonMetadataError()
+    {
+        IOException failure = new IOException("truncate metastore I/O failed");
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        FileStoreTable table = truncateFailingFileStoreTable(copiedWithLatestSchema, failure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.truncateTable(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to truncate Paimon table 'table'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
     public void testSetTablePropertiesUsesPaimonOptionKeys()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
@@ -3127,13 +3191,22 @@ public class PaimonMetadataTableModeTest
 
     private static FileStoreTable commitFileStoreTable(AtomicBoolean copiedWithLatestSchema, AtomicBoolean committed)
     {
-        return commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>());
+        return commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null);
     }
 
     private static FileStoreTable commitFileStoreTable(
             AtomicBoolean copiedWithLatestSchema,
             AtomicBoolean committed,
             AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions)
+    {
+        return commitFileStoreTable(copiedWithLatestSchema, committed, copyWithoutTimeTravelOptions, null);
+    }
+
+    private static FileStoreTable commitFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicBoolean committed,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            RuntimeException commitFailure)
     {
         AtomicReference<FileStoreTable> latestTableRef = new AtomicReference<>();
         BatchTableCommit commit = (BatchTableCommit) Proxy.newProxyInstance(
@@ -3144,6 +3217,9 @@ public class PaimonMetadataTableModeTest
                         assertThat(args).hasSize(1);
                         assertThat(args[0]).isInstanceOf(List.class);
                         assertThat((List<?>) args[0]).hasSize(1);
+                        if (commitFailure != null) {
+                            throw commitFailure;
+                        }
                         committed.set(true);
                         yield null;
                     }
@@ -3250,6 +3326,56 @@ public class PaimonMetadataTableModeTest
                     case "newBatchWriteBuilder" -> throw new AssertionError(
                             "stale FileStoreTable should not create BatchWriteBuilder before latest-schema refresh");
                     case "toString" -> "stale-truncate-testing-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static FileStoreTable truncateFailingFileStoreTable(AtomicBoolean copiedWithLatestSchema, IOException failure)
+    {
+        AtomicReference<FileStoreTable> latestTableRef = new AtomicReference<>();
+        BatchTableCommit commit = (BatchTableCommit) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {BatchTableCommit.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "truncateTable" -> throw new RuntimeException(failure);
+                    case "close", "abort", "withMetricRegistry" -> proxy;
+                    case "toString" -> "testing-failing-truncate-batch-table-commit";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        BatchWriteBuilder batchWriteBuilder = (BatchWriteBuilder) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {BatchWriteBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "newCommit" -> commit;
+                    case "withOverwrite" -> proxy;
+                    case "tableName" -> "testing";
+                    case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+                    case "newWriteSelector" -> Optional.empty();
+                    case "toString" -> "testing-failing-truncate-batch-write-builder";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "newBatchWriteBuilder" -> batchWriteBuilder;
+                    case "copyWithLatestSchema", "copy" -> proxy;
+                    case "toString" -> "latest-failing-truncate-testing-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        latestTableRef.set(latestTable);
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithLatestSchema" -> {
+                        copiedWithLatestSchema.set(true);
+                        yield latestTableRef.get();
+                    }
+                    case "copy" -> proxy;
+                    case "newBatchWriteBuilder" -> throw new AssertionError(
+                            "stale FileStoreTable should not create BatchWriteBuilder before latest-schema refresh");
+                    case "toString" -> "stale-failing-truncate-testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
@@ -3643,6 +3769,34 @@ public class PaimonMetadataTableModeTest
         {
             assertThat(identifier.getFullName()).isEqualTo("schema.table");
             throw failure;
+        }
+    }
+
+    private static class CheckedFailingAlterCatalog
+            extends PaimonCatalog
+    {
+        private final IOException failure;
+
+        private CheckedFailingAlterCatalog(IOException failure)
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+            this.failure = failure;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public void alterTable(Identifier identifier, List<SchemaChange> changes, boolean ignoreIfNotExists)
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            throw new RuntimeException(failure);
         }
     }
 

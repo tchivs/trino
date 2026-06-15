@@ -31,10 +31,12 @@ import org.apache.paimon.view.View;
 import org.apache.paimon.view.ViewImpl;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
@@ -490,6 +492,51 @@ public class PaimonMetadataViewTest
                 .isSameAs(failure);
     }
 
+    @Test
+    public void testCheckedViewFailuresUsePaimonMetadataError()
+    {
+        IOException failure = new IOException("metastore I/O failed");
+        PaimonMetadata metadata = new PaimonMetadata(new CheckedFailingViewCatalog(failure), TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, VIEW_NAME, viewDefinition("SELECT value"), false))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to create view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThatThrownBy(() -> metadata.dropView(SESSION, VIEW_NAME))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to drop view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThatThrownBy(() -> metadata.getView(SESSION, VIEW_NAME))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to get view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThatThrownBy(() -> metadata.getViews(SESSION, Optional.of(VIEW_NAME.getSchemaName())))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to list views in schema 'test_schema'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThatThrownBy(() -> metadata.renameView(SESSION, VIEW_NAME,
+                new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to rename view 'test_schema.test_view' to 'test_schema.renamed_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThatThrownBy(() -> metadata.setViewComment(SESSION, VIEW_NAME, Optional.of("comment")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to set comment on view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+    }
+
     private static View view(Map<String, String> dialects)
     {
         Identifier identifier = new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName());
@@ -788,6 +835,55 @@ public class PaimonMetadataViewTest
                 throw e;
             }
             throw new AssertionError("Unexpected failure", failure);
+        }
+    }
+
+    private static class CheckedFailingViewCatalog
+            extends TestingPaimonCatalog
+    {
+        private final IOException failure;
+
+        private CheckedFailingViewCatalog(IOException failure)
+        {
+            super(view(Map.of("trino", "SELECT id FROM table")));
+            this.failure = failure;
+        }
+
+        @Override
+        public View getView(Identifier identifier)
+        {
+            throw new RuntimeException(failure);
+        }
+
+        @Override
+        public List<String> listViews(String databaseName)
+        {
+            throw new RuntimeException(failure);
+        }
+
+        @Override
+        public void dropView(Identifier identifier, boolean ignoreIfNotExists)
+        {
+            throw new RuntimeException(failure);
+        }
+
+        @Override
+        public void createView(Identifier identifier, View view, boolean ignoreIfExists)
+        {
+            throw new RuntimeException(failure);
+        }
+
+        @Override
+        public void renameView(Identifier fromView, Identifier toView, boolean ignoreIfNotExists)
+        {
+            throw new RuntimeException(failure);
+        }
+
+        @Override
+        public void alterView(Identifier identifier, List<org.apache.paimon.view.ViewChange> viewChanges,
+                boolean ignoreIfNotExists)
+        {
+            throw new RuntimeException(failure);
         }
     }
 

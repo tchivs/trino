@@ -86,6 +86,8 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static io.trino.plugin.paimon.PaimonColumnHandle.TRINO_ROW_ID_NAME;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
@@ -248,7 +250,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 return serializer.deserialize(serializer.getVersion(), slice.getBytes());
             }
             catch (IOException e) {
-                throw new RuntimeException("Failed to deserialize Paimon commit fragment", e);
+                throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to deserialize Paimon commit fragment", e);
             }
         }).collect(toList());
 
@@ -264,10 +266,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
             commit.commit(commitMessages);
         }
         catch (Exception e) {
-            if (e instanceof RuntimeException runtimeException) {
-                throw runtimeException;
+            if (e instanceof TrinoException trinoException) {
+                throw trinoException;
             }
-            throw new RuntimeException("Failed to commit Paimon write fragments", e);
+            if (e instanceof IllegalArgumentException || e instanceof IllegalStateException) {
+                throw (RuntimeException) e;
+            }
+            if (e instanceof RuntimeException runtimeException) {
+                throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to commit Paimon write fragments", runtimeException);
+            }
+            throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to commit Paimon write fragments", e);
         }
         return Optional.empty();
     }
@@ -764,10 +772,25 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", tableName.getSchemaName()),
                     exception);
         }
-        if (exception instanceof RuntimeException runtimeException) {
-            return runtimeException;
+        if (exception instanceof IllegalArgumentException
+                || exception instanceof IllegalStateException
+                || exception instanceof NullPointerException) {
+            return (RuntimeException) exception;
         }
-        return new RuntimeException(format("Failed to alter Paimon table '%s'", tableName), exception);
+        if (exception instanceof RuntimeException runtimeException) {
+            Throwable cause = runtimeException.getCause();
+            if (cause instanceof Exception nestedException) {
+                return new TrinoException(PAIMON_METADATA_ERROR,
+                        format("Failed to alter Paimon table '%s'", tableName),
+                        nestedException);
+            }
+            return new TrinoException(PAIMON_METADATA_ERROR,
+                    format("Failed to alter Paimon table '%s'", tableName),
+                    runtimeException);
+        }
+        return new TrinoException(PAIMON_METADATA_ERROR,
+                format("Failed to alter Paimon table '%s'", tableName),
+                exception);
     }
 
     private static SchemaTableName schemaTableName(PaimonTableHandle tableHandle)
@@ -1235,7 +1258,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     format("Table '%s' does not exist", schemaTableName(paimonTableHandle)), e);
         }
         catch (Exception e) {
-            throw new RuntimeException(format("failed to truncate table '%s'", paimonTableHandle.getTableName()), e);
+            if (e instanceof IllegalArgumentException
+                    || e instanceof IllegalStateException
+                    || e instanceof NullPointerException) {
+                throw (RuntimeException) e;
+            }
+            if (e instanceof RuntimeException runtimeException && runtimeException.getCause() instanceof Exception nestedException) {
+                throw new TrinoException(PAIMON_METADATA_ERROR,
+                        format("Failed to truncate Paimon table '%s'", paimonTableHandle.getTableName()),
+                        nestedException);
+            }
+            throw new TrinoException(PAIMON_METADATA_ERROR,
+                    format("Failed to truncate Paimon table '%s'", paimonTableHandle.getTableName()),
+                    e);
         }
     }
 
@@ -1599,10 +1634,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
         if (exception instanceof TrinoException trinoException) {
             return trinoException;
         }
-        if (exception instanceof RuntimeException runtimeException) {
-            return runtimeException;
+        if (exception instanceof IllegalArgumentException
+                || exception instanceof IllegalStateException
+                || exception instanceof NullPointerException) {
+            return (RuntimeException) exception;
         }
-        return new RuntimeException(message, exception);
+        if (exception instanceof RuntimeException runtimeException) {
+            Throwable cause = runtimeException.getCause();
+            if (cause instanceof Exception nestedException) {
+                return new TrinoException(PAIMON_METADATA_ERROR, message, nestedException);
+            }
+            return new TrinoException(PAIMON_METADATA_ERROR, message, runtimeException);
+        }
+        return new TrinoException(PAIMON_METADATA_ERROR, message, exception);
     }
 
     private static TrinoException unsupportedViewOperation(String operation, UnsupportedOperationException cause)

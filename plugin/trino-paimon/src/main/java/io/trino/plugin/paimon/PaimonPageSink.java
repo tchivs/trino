@@ -15,6 +15,7 @@ package io.trino.plugin.paimon;
 
 import io.airlift.slice.Slice;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.type.Type;
 import jakarta.annotation.Nullable;
@@ -26,11 +27,15 @@ import org.apache.paimon.types.RowKind;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.IllegalFormatException;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_CLOSE_ERROR;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_DATA_ERROR;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
@@ -125,7 +130,7 @@ public class PaimonPageSink
             writer.close();
         }
         catch (Exception e) {
-            throw wrapWriteException(e);
+            throw wrapWriterCloseException(e);
         }
     }
 
@@ -136,7 +141,7 @@ public class PaimonPageSink
             writer.close();
         }
         catch (Exception e) {
-            RuntimeException closeFailure = wrapWriteException(e);
+            RuntimeException closeFailure = wrapWriterCloseException(e);
             if (failure != null) {
                 failure.addSuppressed(closeFailure);
             }
@@ -155,9 +160,34 @@ public class PaimonPageSink
 
     static RuntimeException wrapWriteException(Exception exception)
     {
+        if (exception instanceof TrinoException trinoException) {
+            return trinoException;
+        }
+        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+            return new TrinoException(NOT_SUPPORTED,
+                    "Paimon write uses features which are not supported by the Trino connector",
+                    unsupportedOperationException);
+        }
+        if (exception instanceof IllegalArgumentException
+                || exception instanceof IllegalStateException
+                || exception instanceof NullPointerException
+                || exception instanceof IllegalFormatException) {
+            return (RuntimeException) exception;
+        }
+        if (exception instanceof RuntimeException runtimeException) {
+            return new TrinoException(PAIMON_WRITER_DATA_ERROR, "Failed to write data to Paimon", runtimeException);
+        }
+        return new TrinoException(PAIMON_WRITER_DATA_ERROR, "Failed to write data to Paimon", exception);
+    }
+
+    static RuntimeException wrapWriterCloseException(Exception exception)
+    {
+        if (exception instanceof TrinoException trinoException) {
+            return trinoException;
+        }
         if (exception instanceof RuntimeException runtimeException) {
             return runtimeException;
         }
-        return new RuntimeException(exception);
+        return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer", exception);
     }
 }
