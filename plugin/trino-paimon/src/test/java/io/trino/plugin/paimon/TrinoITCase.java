@@ -1218,6 +1218,20 @@ public class TrinoITCase
     }
 
     @Test
+    public void testIncrementalReadIgnoresConflictingSessionTimeTravelProperties()
+    {
+        Session conflictingSession = Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.SCAN_SNAPSHOT, "1")
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.SCAN_TAG, "tag-2")
+                .build();
+
+        assertThat(computeActual(conflictingSession,
+                "SELECT * FROM TABLE(paimon.system.table_changes(schema_name=>'default',table_name=>'t2',incremental_between=>'1,2'))")
+                .getMaterializedRows().toString())
+                .isEqualTo("[[5, 6, 3, 3], [7, 8, 4, 4]]");
+    }
+
+    @Test
     public void testTimeTravelWithTag()
     {
         // tag or snapshotId is string
@@ -1284,6 +1298,23 @@ public class TrinoITCase
                 .build();
 
         assertThat(computeActual(tagSession, "SELECT * FROM paimon.default.t2").getMaterializedRows().toString())
+                .isEqualTo("[[1, 2, 1, 1], [3, 4, 2, 2], [5, 6, 3, 3], [7, 8, 4, 4]]");
+    }
+
+    @Test
+    public void testExplicitTimeTravelQueryIgnoresConflictingSessionTimeTravelProperties()
+    {
+        Session conflictingSession = Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.SCAN_SNAPSHOT, "1")
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.SCAN_TAG, "tag-2")
+                .build();
+
+        assertThat(computeActual(conflictingSession, "SELECT * FROM paimon.default.t2 FOR VERSION AS OF 1")
+                .getMaterializedRows().toString())
+                .isEqualTo("[[1, 2, 1, 1], [3, 4, 2, 2]]");
+        assertThat(computeActual(conflictingSession,
+                "SELECT * FROM paimon.default.t2 FOR TIMESTAMP AS OF TIMESTAMP " + timestampLiteral(System.currentTimeMillis(), 6))
+                .getMaterializedRows().toString())
                 .isEqualTo("[[1, 2, 1, 1], [3, 4, 2, 2], [5, 6, 3, 3], [7, 8, 4, 4]]");
     }
 
