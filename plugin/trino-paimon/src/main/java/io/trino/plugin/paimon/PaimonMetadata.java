@@ -1379,6 +1379,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         requireNonNull(viewName, "viewName is null");
         requireNonNull(definition, "definition is null");
+        rejectSystemSchemaWrite(viewName.getSchemaName(), "create view");
         Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
         org.apache.paimon.view.View paimonView = toPaimonView(identifier, definition);
 
@@ -1431,6 +1432,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         requireNonNull(viewName, "viewName is null");
+        rejectSystemSchemaWrite(viewName.getSchemaName(), "drop view");
         Catalog sessionCatalog = catalog.forSession(session);
         Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
 
@@ -1455,6 +1457,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         requireNonNull(source, "source is null");
         requireNonNull(target, "target is null");
+        rejectSystemSchemaWrite(source.getSchemaName(), "rename view");
+        rejectSystemSchemaWrite(target.getSchemaName(), "rename view");
         Catalog sessionCatalog = catalog.forSession(session);
         Identifier sourceIdentifier = new Identifier(source.getSchemaName(), source.getTableName());
         Identifier targetIdentifier = new Identifier(target.getSchemaName(), target.getTableName());
@@ -1569,6 +1573,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         requireNonNull(viewName, "viewName is null");
         requireNonNull(comment, "comment is null");
+        rejectSystemSchemaWrite(viewName.getSchemaName(), "set view comment");
         Catalog sessionCatalog = catalog.forSession(session);
         Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
 

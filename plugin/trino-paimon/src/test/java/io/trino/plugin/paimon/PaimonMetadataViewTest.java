@@ -43,6 +43,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -164,6 +165,46 @@ public class PaimonMetadataViewTest
                 .containsExactly(DataTypeRoot.VARIANT, DataTypeRoot.VARCHAR);
         assertThat(createdView.rowType().getFields()).extracting(field -> field.description())
                 .containsExactly("json payload", null);
+    }
+
+    @Test
+    public void testSystemSchemaViewWritesAreRejected()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT old_value")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        SchemaTableName systemView = new SchemaTableName(SYSTEM_DATABASE_NAME, "catalog_options_view");
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, systemView, viewDefinition("SELECT value"), false))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon create view is not supported for the system schema 'sys'");
+                });
+        assertThatThrownBy(() -> metadata.dropView(SESSION, systemView))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon drop view is not supported for the system schema 'sys'");
+                });
+        assertThatThrownBy(() -> metadata.renameView(SESSION, VIEW_NAME, systemView))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon rename view is not supported for the system schema 'sys'");
+                });
+        assertThatThrownBy(() -> metadata.renameView(SESSION, systemView, VIEW_NAME))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon rename view is not supported for the system schema 'sys'");
+                });
+        assertThatThrownBy(() -> metadata.setViewComment(SESSION, systemView, Optional.of("comment")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon set view comment is not supported for the system schema 'sys'");
+                });
+
+        assertThat(catalog.createdView).isNull();
+        assertThat(catalog.dropViewCalls).isZero();
+        assertThat(catalog.renamedSource).isNull();
+        assertThat(catalog.renamedTarget).isNull();
+        assertThat(catalog.alterViewCalls).isZero();
     }
 
     @Test
