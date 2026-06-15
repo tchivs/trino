@@ -33,6 +33,11 @@ import static java.util.Objects.requireNonNull;
 
 public class PaimonTableOptionUtils
 {
+    private static final Pattern CAMEL_CASE_BOUNDARY = Pattern.compile("([a-z0-9])([A-Z])");
+    private static final Pattern OPTION_KEY_SEPARATOR = Pattern.compile("[.\\-]");
+    private static final List<OptionInfo> OPTION_INFOS = buildOptionInfos();
+    private static final Map<String, OptionInfo> OPTION_INFO_BY_TRINO_KEY = indexOptionInfosByTrinoKey(OPTION_INFOS);
+
     private PaimonTableOptionUtils()
     {
     }
@@ -41,13 +46,13 @@ public class PaimonTableOptionUtils
     {
         requireNonNull(builder, "builder is null");
         requireNonNull(properties, "properties is null");
-        properties.keySet().forEach(PaimonTableOptionUtils::validatePropertyKey);
-        List<OptionInfo> optionInfos = PaimonTableOptionUtils.getOptionInfos();
-        for (OptionInfo optionInfo : optionInfos) {
-            Object rawValue = properties.get(optionInfo.trinoOptionKey);
-            if (rawValue != null) {
+        for (Map.Entry<String, Object> entry : properties.entrySet()) {
+            String propertyName = entry.getKey();
+            validatePropertyKey(propertyName);
+            OptionInfo optionInfo = OPTION_INFO_BY_TRINO_KEY.get(propertyName);
+            if (optionInfo != null && entry.getValue() != null) {
                 builder.option(optionInfo.paimonOptionKey,
-                        requireNonBlankStringOptionValue(optionInfo.trinoOptionKey, rawValue));
+                        requireNonBlankStringOptionValue(optionInfo.trinoOptionKey, entry.getValue()));
             }
         }
     }
@@ -72,12 +77,8 @@ public class PaimonTableOptionUtils
         if (StringUtils.isNullOrWhitespaceOnly(trinoOptionKey)) {
             throw new IllegalArgumentException("trinoOptionKey is blank");
         }
-        for (OptionInfo optionInfo : getOptionInfos()) {
-            if (optionInfo.trinoOptionKey.equals(trinoOptionKey)) {
-                return optionInfo.paimonOptionKey;
-            }
-        }
-        return trinoOptionKey;
+        OptionInfo optionInfo = OPTION_INFO_BY_TRINO_KEY.get(trinoOptionKey);
+        return optionInfo != null ? optionInfo.paimonOptionKey : trinoOptionKey;
     }
 
     private static void validatePropertyKey(String propertyKey)
@@ -89,6 +90,11 @@ public class PaimonTableOptionUtils
     }
 
     public static List<OptionInfo> getOptionInfos()
+    {
+        return OPTION_INFOS;
+    }
+
+    private static List<OptionInfo> buildOptionInfos()
     {
         List<OptionInfo> optionInfos = new ArrayList<>();
         List<OptionWithMetaInfo> optionWithMetaInfos = extractConfigOptions(CoreOptions.class);
@@ -102,7 +108,17 @@ public class PaimonTableOptionUtils
                     optionWithMetaInfo.option.key(), className));
         }
         validateOptionInfos(optionInfos);
-        return optionInfos;
+        return List.copyOf(optionInfos);
+    }
+
+    private static Map<String, OptionInfo> indexOptionInfosByTrinoKey(List<OptionInfo> optionInfos)
+    {
+        requireNonNull(optionInfos, "optionInfos is null");
+        Map<String, OptionInfo> indexedOptionInfos = new LinkedHashMap<>();
+        for (OptionInfo optionInfo : optionInfos) {
+            indexedOptionInfos.put(optionInfo.trinoOptionKey, optionInfo);
+        }
+        return Map.copyOf(indexedOptionInfos);
     }
 
     static void validateOptionInfos(List<OptionInfo> optionInfos)
@@ -170,11 +186,9 @@ public class PaimonTableOptionUtils
         if (StringUtils.isNullOrWhitespaceOnly(key)) {
             throw new IllegalArgumentException("key is blank");
         }
-        Pattern camelCaseBoundary = Pattern.compile("([a-z0-9])([A-Z])");
-        Matcher camelCaseMatcher = camelCaseBoundary.matcher(key);
+        Matcher camelCaseMatcher = CAMEL_CASE_BOUNDARY.matcher(key);
         String snakeCaseKey = camelCaseMatcher.replaceAll("$1_$2");
-        Pattern separator = Pattern.compile("[.\\-]");
-        Matcher separatorMatcher = separator.matcher(snakeCaseKey.toLowerCase(Locale.ENGLISH));
+        Matcher separatorMatcher = OPTION_KEY_SEPARATOR.matcher(snakeCaseKey.toLowerCase(Locale.ENGLISH));
         return separatorMatcher.replaceAll("_");
     }
 
@@ -206,9 +220,9 @@ public class PaimonTableOptionUtils
 
     static class OptionInfo<T>
     {
-        String trinoOptionKey;
-        String paimonOptionKey;
-        String type;
+        final String trinoOptionKey;
+        final String paimonOptionKey;
+        final String type;
 
         public OptionInfo(String trinoOptionKey, String paimonOptionKey, String type)
         {
