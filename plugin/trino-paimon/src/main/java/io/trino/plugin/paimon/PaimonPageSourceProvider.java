@@ -142,7 +142,8 @@ public class PaimonPageSourceProvider
         PaimonTableHandle paimonTableHandle = getTableHandle(tableHandle);
         PaimonSplit paimonSplit = getSplit(split);
         List<PaimonColumnHandle> paimonColumns = getColumnHandles(columns);
-        if (paimonTableHandle.getFilter().isNone()) {
+        TupleDomain<PaimonColumnHandle> effectiveFilter = effectiveFilter(paimonTableHandle, dynamicFilter);
+        if (effectiveFilter.isNone()) {
             return emptyPageSource();
         }
         Catalog catalog = paimonCatalog.forSession(session);
@@ -164,14 +165,20 @@ public class PaimonPageSourceProvider
                     }
                 }
                 return PaimonMergePageSourceWrapper.wrap(createPageSource(session, paimonTableHandle, table,
-                        paimonTableHandle.getFilter(), paimonSplit, dataColumns, paimonTableHandle.getLimit(),
+                        effectiveFilter, paimonSplit, dataColumns, paimonTableHandle.getLimit(),
                         refreshToLatestSchema), rowIdFields, fieldToIndex);
             }
             else {
-                return createPageSource(session, paimonTableHandle, table, paimonTableHandle.getFilter(), paimonSplit,
+                return createPageSource(session, paimonTableHandle, table, effectiveFilter, paimonSplit,
                         paimonColumns, paimonTableHandle.getLimit(), refreshToLatestSchema);
             }
         }, PaimonPageSourceProvider.class.getClassLoader());
+    }
+
+    static TupleDomain<PaimonColumnHandle> effectiveFilter(PaimonTableHandle tableHandle, DynamicFilter dynamicFilter)
+    {
+        requireNonNull(dynamicFilter, "dynamicFilter is null");
+        return PaimonSplitManager.effectivePredicate(requireNonNull(tableHandle, "tableHandle is null"), dynamicFilter);
     }
 
     static Optional<PaimonColumnHandle> rowIdColumn(List<PaimonColumnHandle> columns)

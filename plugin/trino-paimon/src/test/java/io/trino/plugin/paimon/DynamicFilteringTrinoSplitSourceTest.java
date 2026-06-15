@@ -132,6 +132,31 @@ public class DynamicFilteringTrinoSplitSourceTest
     }
 
     @Test
+    public void testDynamicPredicateIsIgnoredWhenLimitAlreadyAccepted()
+    {
+        PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
+        PaimonColumnHandle regionColumn = PaimonColumnHandle.of("region", DataTypes.BIGINT());
+        TupleDomain<PaimonColumnHandle> staticPredicate = TupleDomain.withColumnDomains(Map.of(
+                regionColumn, Domain.singleValue(BIGINT, 7L)));
+        TupleDomain<ColumnHandle> dynamicPredicate = TupleDomain.withColumnDomains(Map.of(
+                (ColumnHandle) idColumn, Domain.singleValue(BIGINT, 11L)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Collections.emptyMap(),
+                staticPredicate,
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(5));
+
+        TupleDomain<PaimonColumnHandle> effectivePredicate = PaimonSplitManager.effectivePredicate(
+                tableHandle,
+                dynamicFilter(dynamicPredicate, false));
+
+        assertThat(effectivePredicate).isEqualTo(staticPredicate);
+    }
+
+    @Test
     public void testDynamicRowIdPredicateIsConvertedToRowRanges()
     {
         PaimonColumnHandle rowIdColumn = PaimonColumnHandle.of("_row_id", org.apache.paimon.table.SpecialFields.ROW_ID.type());
@@ -442,6 +467,35 @@ public class DynamicFilteringTrinoSplitSourceTest
     }
 
     @Test
+    public void testAcceptedLimitSkipsAwaitingDynamicFilter()
+            throws Exception
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false);
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Collections.emptyMap(),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.of(5)),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                blockingDynamicFilter(TupleDomain.none()),
+                new Duration(1, SECONDS));
+
+        ConnectorSplitSource.ConnectorSplitBatch batch = splitSource.getNextBatch(100).get();
+
+        assertThat(catalog.initialized()).isTrue();
+        assertThat(catalog.tableLoaded()).isTrue();
+        assertThat(batch.getSplits()).isEmpty();
+        assertThat(batch.isNoMoreSplits()).isTrue();
+    }
+
+    @Test
     public void testCombinePredicatesRejectsNullInputs()
     {
         assertThatThrownBy(() -> DynamicFilteringTrinoSplitSource.combinePredicates(null, TupleDomain.all(), 3))
@@ -508,6 +562,44 @@ public class DynamicFilteringTrinoSplitSourceTest
             public boolean isAwaitable()
             {
                 return awaitable;
+            }
+
+            @Override
+            public TupleDomain<ColumnHandle> getCurrentPredicate()
+            {
+                return predicate;
+            }
+        };
+    }
+
+    private static DynamicFilter blockingDynamicFilter(TupleDomain<ColumnHandle> predicate)
+    {
+        return new DynamicFilter()
+        {
+            @Override
+            public Set<ColumnHandle> getColumnsCovered()
+            {
+                return predicate.getDomains()
+                        .map(Map::keySet)
+                        .orElse(Set.of());
+            }
+
+            @Override
+            public CompletableFuture<?> isBlocked()
+            {
+                return new CompletableFuture<>();
+            }
+
+            @Override
+            public boolean isComplete()
+            {
+                return false;
+            }
+
+            @Override
+            public boolean isAwaitable()
+            {
+                return true;
             }
 
             @Override

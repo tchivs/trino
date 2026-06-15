@@ -84,7 +84,7 @@ public class DynamicFilteringTrinoSplitSource
             }
 
             // Wait for dynamic filters if not yet started planning
-            if (!splitsPlanningStarted && dynamicFilter.isAwaitable() && timeLeft > 0) {
+            if (!splitsPlanningStarted && PaimonSplitManager.canApplyDynamicFilter(tableHandle) && dynamicFilter.isAwaitable() && timeLeft > 0) {
                 LOG.debug("Waiting for dynamic filters, time left: %sms", timeLeft);
                 return dynamicFilter.isBlocked().thenApply(ignored -> EMPTY_BATCH).completeOnTimeout(EMPTY_BATCH,
                         timeLeft, MILLISECONDS);
@@ -137,7 +137,7 @@ public class DynamicFilteringTrinoSplitSource
 
     private PaimonSplitSource planSplits()
     {
-        TupleDomain<PaimonColumnHandle> combinedPredicate = combinePredicates(tableHandle.getFilter(), dynamicFilter);
+        TupleDomain<PaimonColumnHandle> combinedPredicate = PaimonSplitManager.effectivePredicate(tableHandle, dynamicFilter);
         if (PaimonSplitManager.isEmptySplit(combinedPredicate, tableHandle)) {
             return PaimonSplitManager.emptySplitSource(tableHandle);
         }

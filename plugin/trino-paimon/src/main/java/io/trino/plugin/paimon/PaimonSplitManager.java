@@ -110,7 +110,7 @@ public class PaimonSplitManager
 
         Duration dynamicFilteringWaitTimeout = PaimonSessionProperties.getDynamicFilteringWaitTimeout(session);
 
-        if (dynamicFilteringWaitTimeout.toMillis() == 0 || !dynamicFilter.isAwaitable()) {
+        if (!canApplyDynamicFilter(tableHandle) || dynamicFilteringWaitTimeout.toMillis() == 0 || !dynamicFilter.isAwaitable()) {
             return planSplits(tableHandle, session, effectivePredicate);
         }
 
@@ -122,9 +122,18 @@ public class PaimonSplitManager
 
     static TupleDomain<PaimonColumnHandle> effectivePredicate(PaimonTableHandle tableHandle, DynamicFilter dynamicFilter)
     {
+        requireNonNull(dynamicFilter, "dynamicFilter is null");
+        if (!canApplyDynamicFilter(tableHandle)) {
+            return requireNonNull(tableHandle, "tableHandle is null").getFilter();
+        }
         return DynamicFilteringTrinoSplitSource.combinePredicates(
                 requireNonNull(tableHandle, "tableHandle is null").getFilter(),
-                requireNonNull(dynamicFilter, "dynamicFilter is null"));
+                dynamicFilter);
+    }
+
+    static boolean canApplyDynamicFilter(PaimonTableHandle tableHandle)
+    {
+        return requireNonNull(tableHandle, "tableHandle is null").getLimit().isEmpty();
     }
 
     private ConnectorSplitSource planSplits(

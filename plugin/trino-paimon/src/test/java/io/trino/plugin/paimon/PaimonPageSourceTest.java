@@ -93,6 +93,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -665,6 +666,30 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPageSourceProviderShortCircuitsLateDynamicNoneFilterBeforeCatalog()
+    {
+        PaimonPageSourceProvider provider = new PaimonPageSourceProvider(
+                session -> {
+                    throw new AssertionError("filesystem should not be used by late dynamic TupleDomain.none()");
+                },
+                new PaimonMetadataFactory(new Options(),
+                        session -> {
+                            throw new AssertionError("catalog should not be initialized by late dynamic TupleDomain.none()");
+                        },
+                        TESTING_TYPE_MANAGER),
+                new OrcReaderConfig(),
+                new ParquetReaderConfig());
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        ConnectorPageSource pageSource = provider.createPageSource(null, SESSION,
+                new PaimonSplit("serialized-split", 1.0), tableHandle, List.of(), dynamicFilter(TupleDomain.none()));
+
+        assertThat(pageSource.isFinished()).isTrue();
+        assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
     void testPageSourceProviderRejectsNullSessionAndDynamicFilterBeforeNoneFilterShortCircuit()
     {
         PaimonPageSourceProvider provider = new PaimonPageSourceProvider(
@@ -688,6 +713,51 @@ public class PaimonPageSourceTest
         assertThatThrownBy(() -> provider.createPageSource(null, SESSION, split, tableHandle, List.of(), null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("dynamicFilter is null");
+    }
+
+    @Test
+    void testPageSourceEffectiveFilterAppliesLateDynamicFilterWithoutLimit()
+    {
+        PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
+        PaimonColumnHandle regionColumn = PaimonColumnHandle.of("region", DataTypes.BIGINT());
+        TupleDomain<PaimonColumnHandle> staticFilter = TupleDomain.withColumnDomains(Map.of(
+                regionColumn, Domain.singleValue(BIGINT, 7L)));
+        TupleDomain<ColumnHandle> lateDynamicFilter = TupleDomain.withColumnDomains(Map.of(
+                (ColumnHandle) idColumn, Domain.singleValue(BIGINT, 11L)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                staticFilter,
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThat(PaimonPageSourceProvider.effectiveFilter(tableHandle, dynamicFilter(lateDynamicFilter)).getDomains().orElseThrow())
+                .containsEntry(regionColumn, Domain.singleValue(BIGINT, 7L))
+                .containsEntry(idColumn, Domain.singleValue(BIGINT, 11L));
+    }
+
+    @Test
+    void testPageSourceEffectiveFilterIgnoresLateDynamicFilterAfterAcceptedLimit()
+    {
+        PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
+        PaimonColumnHandle regionColumn = PaimonColumnHandle.of("region", DataTypes.BIGINT());
+        TupleDomain<PaimonColumnHandle> staticFilter = TupleDomain.withColumnDomains(Map.of(
+                regionColumn, Domain.singleValue(BIGINT, 7L)));
+        TupleDomain<ColumnHandle> lateDynamicFilter = TupleDomain.withColumnDomains(Map.of(
+                (ColumnHandle) idColumn, Domain.singleValue(BIGINT, 11L)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                staticFilter,
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(5));
+
+        assertThat(PaimonPageSourceProvider.effectiveFilter(tableHandle, dynamicFilter(lateDynamicFilter)))
+                .isEqualTo(staticFilter);
     }
 
     @Test
@@ -1912,6 +1982,44 @@ public class PaimonPageSourceTest
                     case "toString" -> "testing-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    private static DynamicFilter dynamicFilter(TupleDomain<ColumnHandle> predicate)
+    {
+        return new DynamicFilter()
+        {
+            @Override
+            public Set<ColumnHandle> getColumnsCovered()
+            {
+                return predicate.getDomains()
+                        .map(Map::keySet)
+                        .orElse(Set.of());
+            }
+
+            @Override
+            public CompletableFuture<?> isBlocked()
+            {
+                return DynamicFilter.NOT_BLOCKED;
+            }
+
+            @Override
+            public boolean isComplete()
+            {
+                return true;
+            }
+
+            @Override
+            public boolean isAwaitable()
+            {
+                return false;
+            }
+
+            @Override
+            public TupleDomain<ColumnHandle> getCurrentPredicate()
+            {
+                return predicate;
+            }
+        };
     }
 
     private static InnerTable innerTable()
