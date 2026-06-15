@@ -133,7 +133,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
                             storeTable.schema().bucketKeys(), false));
                 }
                 catch (IOException e) {
-                    throw new RuntimeException(e);
+                    throw new TrinoException(PAIMON_METADATA_ERROR,
+                            format("Failed to prepare Paimon insert layout for table '%s'",
+                                    schemaTableName(paimonTableHandle)),
+                            e);
                 }
             case BUCKET_UNAWARE :
                 return Optional.empty();
@@ -339,7 +342,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return Optional.of(new PaimonPartitioningHandle(InstantiationUtil.serializeObject(storeTable.schema())));
         }
         catch (IOException e) {
-            throw new RuntimeException(e);
+            throw new TrinoException(PAIMON_METADATA_ERROR,
+                    format("Failed to prepare Paimon update layout for table '%s'",
+                            schemaTableName(paimonTableHandle)),
+                    e);
         }
     }
 
@@ -485,6 +491,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         catch (Catalog.DatabaseAlreadyExistException e) {
             throw new TrinoException(SCHEMA_ALREADY_EXISTS, format("Schema '%s' already exists", schemaName), e);
         }
+        catch (Exception e) {
+            throw paimonMetadataException(format("Failed to create Paimon schema '%s'", schemaName), e);
+        }
     }
 
     @Override
@@ -502,6 +511,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         catch (Catalog.DatabaseNotExistException e) {
             throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schemaName));
+        }
+        catch (Exception e) {
+            throw paimonMetadataException(format("Failed to drop Paimon schema '%s'", schemaName), e);
         }
     }
 
@@ -727,6 +739,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
             throw new TrinoException(TABLE_ALREADY_EXISTS, format("Table '%s' already exists", table), e);
         }
+        catch (Exception e) {
+            throw paimonMetadataException(format("Failed to create Paimon table '%s'", table), e);
+        }
     }
 
     private Schema prepareSchema(ConnectorTableMetadata tableMetadata)
@@ -772,25 +787,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", tableName.getSchemaName()),
                     exception);
         }
-        if (exception instanceof IllegalArgumentException
-                || exception instanceof IllegalStateException
-                || exception instanceof NullPointerException) {
-            return (RuntimeException) exception;
-        }
-        if (exception instanceof RuntimeException runtimeException) {
-            Throwable cause = runtimeException.getCause();
-            if (cause instanceof Exception nestedException) {
-                return new TrinoException(PAIMON_METADATA_ERROR,
-                        format("Failed to alter Paimon table '%s'", tableName),
-                        nestedException);
-            }
-            return new TrinoException(PAIMON_METADATA_ERROR,
-                    format("Failed to alter Paimon table '%s'", tableName),
-                    runtimeException);
-        }
-        return new TrinoException(PAIMON_METADATA_ERROR,
-                format("Failed to alter Paimon table '%s'", tableName),
-                exception);
+        return paimonMetadataException(format("Failed to alter Paimon table '%s'", tableName), exception);
     }
 
     private static SchemaTableName schemaTableName(PaimonTableHandle tableHandle)
@@ -818,6 +815,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
         catch (Catalog.TableAlreadyExistException e) {
             throw new TrinoException(TABLE_ALREADY_EXISTS, format("Table '%s' already exists", newTableName), e);
         }
+        catch (Exception e) {
+            throw paimonMetadataException(
+                    format("Failed to rename Paimon table '%s' to '%s'",
+                            schemaTableName(oldTableHandle),
+                            newTableName),
+                    e);
+        }
     }
 
     @Override
@@ -833,6 +837,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         catch (Catalog.TableNotExistException e) {
             throw new TrinoException(TABLE_NOT_FOUND, format("Table '%s.%s' does not exist",
                     paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName()), e);
+        }
+        catch (Exception e) {
+            throw paimonMetadataException(
+                    format("Failed to drop Paimon table '%s'", schemaTableName(paimonTableHandle)),
+                    e);
         }
     }
 
@@ -1258,17 +1267,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     format("Table '%s' does not exist", schemaTableName(paimonTableHandle)), e);
         }
         catch (Exception e) {
-            if (e instanceof IllegalArgumentException
-                    || e instanceof IllegalStateException
-                    || e instanceof NullPointerException) {
-                throw (RuntimeException) e;
-            }
-            if (e instanceof RuntimeException runtimeException && runtimeException.getCause() instanceof Exception nestedException) {
-                throw new TrinoException(PAIMON_METADATA_ERROR,
-                        format("Failed to truncate Paimon table '%s'", paimonTableHandle.getTableName()),
-                        nestedException);
-            }
-            throw new TrinoException(PAIMON_METADATA_ERROR,
+            throw paimonMetadataException(
                     format("Failed to truncate Paimon table '%s'", paimonTableHandle.getTableName()),
                     e);
         }
@@ -1630,6 +1629,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
     }
 
     private static RuntimeException paimonViewException(String message, Exception exception)
+    {
+        return paimonMetadataException(message, exception);
+    }
+
+    private static RuntimeException paimonMetadataException(String message, Exception exception)
     {
         if (exception instanceof TrinoException trinoException) {
             return trinoException;

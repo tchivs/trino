@@ -477,6 +477,13 @@ public class PaimonPageSourceProvider
             return cannotOpenSplitException("Failed to open or read Paimon split", ioException);
         }
         if (exception instanceof RuntimeException runtimeException) {
+            Throwable cause = runtimeException.getCause();
+            if (cause instanceof OrcCorruptionException || cause instanceof ParquetCorruptionException) {
+                return new TrinoException(PAIMON_BAD_DATA, cause);
+            }
+            if (cause instanceof IOException ioException) {
+                return cannotOpenSplitException("Failed to open or read Paimon split", ioException);
+            }
             return runtimeException;
         }
         return new RuntimeException(exception);
@@ -500,6 +507,13 @@ public class PaimonPageSourceProvider
             return cannotOpenSplitException(message, ioException);
         }
         if (exception instanceof RuntimeException runtimeException) {
+            Throwable cause = runtimeException.getCause();
+            if (cause instanceof OrcCorruptionException || cause instanceof ParquetCorruptionException) {
+                return new TrinoException(PAIMON_BAD_DATA, cause);
+            }
+            if (cause instanceof IOException ioException) {
+                return cannotOpenSplitException(message, ioException);
+            }
             return runtimeException;
         }
         return new RuntimeException(message, exception);

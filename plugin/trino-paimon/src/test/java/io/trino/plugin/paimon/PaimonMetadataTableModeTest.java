@@ -698,6 +698,28 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testLayoutSerializationFailuresUsePaimonMetadataError()
+    {
+        IOException failure = new IOException("schema serialization failed");
+        FileStoreTable table = nonSerializableSchemaFileStoreTable(failure);
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.getInsertLayout(SESSION, tableHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to prepare Paimon insert layout for table 'schema.table'");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class);
+                });
+        assertThatThrownBy(() -> metadata.getUpdateLayout(SESSION, tableHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to prepare Paimon update layout for table 'schema.table'");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class);
+                });
+    }
+
+    @Test
     public void testBeginMergeRequiresFileStoreTable()
     {
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table()), TESTING_TYPE_MANAGER);
@@ -2176,6 +2198,81 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testCheckedCreateSchemaFailureUsesPaimonMetadataError()
+    {
+        IOException failure = new IOException("schema metastore I/O failed");
+        PaimonMetadata metadata = new PaimonMetadata(new CheckedFailingSchemaCatalog(failure), TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.createSchema(SESSION, "schema", Map.of(), null))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to create Paimon schema 'schema'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+    }
+
+    @Test
+    public void testCheckedDropSchemaFailureUsesPaimonMetadataError()
+    {
+        IOException failure = new IOException("schema delete metastore I/O failed");
+        PaimonMetadata metadata = new PaimonMetadata(new CheckedFailingDropSchemaCatalog(failure), TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.dropSchema(SESSION, "schema", false))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to drop Paimon schema 'schema'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+    }
+
+    @Test
+    public void testCheckedCreateTableFailureUsesPaimonMetadataError()
+    {
+        IOException failure = new IOException("table create metastore I/O failed");
+        PaimonMetadata metadata = new PaimonMetadata(new CheckedFailingCreateTableCatalog(failure), TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("id", INTEGER)));
+
+        assertThatThrownBy(() -> metadata.createTable(SESSION, tableMetadata, io.trino.spi.connector.SaveMode.FAIL))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to create Paimon table 'schema.table'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+    }
+
+    @Test
+    public void testCheckedRenameTableFailureUsesPaimonMetadataError()
+    {
+        IOException failure = new IOException("table rename metastore I/O failed");
+        PaimonMetadata metadata = new PaimonMetadata(new CheckedFailingRenameTableCatalog(failure), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.renameTable(SESSION, tableHandle, new SchemaTableName("schema", "target")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to rename Paimon table 'schema.table' to 'schema.target'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+    }
+
+    @Test
+    public void testCheckedDropTableFailureUsesPaimonMetadataError()
+    {
+        IOException failure = new IOException("table drop metastore I/O failed");
+        PaimonMetadata metadata = new PaimonMetadata(new CheckedFailingDropTableCatalog(failure), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.dropTable(SESSION, tableHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to drop Paimon table 'schema.table'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+    }
+
+    @Test
     public void testSetTablePropertiesUsesPaimonOptionKeys()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
@@ -3128,6 +3225,50 @@ public class PaimonMetadataTableModeTest
                 });
     }
 
+    private static FileStoreTable nonSerializableSchemaFileStoreTable(IOException failure)
+    {
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "bucketMode" -> BucketMode.HASH_FIXED;
+                    case "name" -> "non-serializable-schema-file-store-table";
+                    case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+                    case "partitionKeys" -> List.of();
+                    case "primaryKeys" -> List.of("id");
+                    case "comment" -> Optional.empty();
+                    case "coreOptions" -> new CoreOptions(new Options(Map.of()));
+                    case "schema" -> {
+                        TableSchema schema = TableSchema.create(1, new Schema(
+                                List.of(new DataField(0, "id", DataTypes.INT())),
+                                List.of(),
+                                List.of("id"),
+                                Map.of(CoreOptions.BUCKET.key(), "7", CoreOptions.BUCKET_KEY.key(), "id"),
+                                ""));
+                        yield new TableSchema(
+                                schema.version(),
+                                schema.id(),
+                                schema.fields(),
+                                schema.highestFieldId(),
+                                schema.partitionKeys(),
+                                schema.primaryKeys(),
+                                schema.options(),
+                                schema.comment(),
+                                schema.timeMillis()) {
+                            private Object writeReplace()
+                                    throws IOException
+                            {
+                                throw failure;
+                            }
+                        };
+                    }
+                    case "copyWithLatestSchema" -> proxy;
+                    case "copy" -> proxy;
+                    case "toString" -> "non-serializable-schema-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
     private static FileStoreTable rowTrackingFileStoreTable(AtomicBoolean copiedWithLatestSchema,
             org.apache.paimon.types.RowType rowType)
     {
@@ -3796,6 +3937,152 @@ public class PaimonMetadataTableModeTest
         public void alterTable(Identifier identifier, List<SchemaChange> changes, boolean ignoreIfNotExists)
         {
             assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private static class CheckedFailingSchemaCatalog
+            extends PaimonCatalog
+    {
+        private final IOException failure;
+
+        private CheckedFailingSchemaCatalog(IOException failure)
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+            this.failure = failure;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public void createDatabase(String name, boolean ignoreIfExists)
+        {
+            assertThat(name).isEqualTo("schema");
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private static class CheckedFailingDropSchemaCatalog
+            extends PaimonCatalog
+    {
+        private final IOException failure;
+
+        private CheckedFailingDropSchemaCatalog(IOException failure)
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+            this.failure = failure;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public void dropDatabase(String name, boolean ignoreIfNotExists, boolean cascade)
+        {
+            assertThat(name).isEqualTo("schema");
+            assertThat(ignoreIfNotExists).isFalse();
+            assertThat(cascade).isFalse();
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private static class CheckedFailingCreateTableCatalog
+            extends PaimonCatalog
+    {
+        private final IOException failure;
+
+        private CheckedFailingCreateTableCatalog(IOException failure)
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+            this.failure = failure;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public void createTable(Identifier identifier, Schema schema, boolean ignoreIfExists)
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            assertThat(ignoreIfExists).isFalse();
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private static class CheckedFailingRenameTableCatalog
+            extends PaimonCatalog
+    {
+        private final IOException failure;
+
+        private CheckedFailingRenameTableCatalog(IOException failure)
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+            this.failure = failure;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public void renameTable(Identifier fromTable, Identifier toTable, boolean ignoreIfNotExists)
+        {
+            assertThat(fromTable.getFullName()).isEqualTo("schema.table");
+            assertThat(toTable.getFullName()).isEqualTo("schema.target");
+            assertThat(ignoreIfNotExists).isFalse();
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private static class CheckedFailingDropTableCatalog
+            extends PaimonCatalog
+    {
+        private final IOException failure;
+
+        private CheckedFailingDropTableCatalog(IOException failure)
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+            this.failure = failure;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public void dropTable(Identifier identifier, boolean ignoreIfNotExists)
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            assertThat(ignoreIfNotExists).isFalse();
             throw new RuntimeException(failure);
         }
     }

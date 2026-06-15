@@ -1057,6 +1057,8 @@ public class PaimonPageSourceTest
         ParquetCorruptionException parquetCorruption = new ParquetCorruptionException(
                 new ParquetDataSourceId("memory://broken.parquet"),
                 "bad parquet");
+        RuntimeException wrappedIoException = new RuntimeException(ioException);
+        RuntimeException wrappedParquetCorruption = new RuntimeException(parquetCorruption);
 
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(unsupported)).isSameAs(unsupported);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(contractViolation)).isSameAs(contractViolation);
@@ -1077,6 +1079,17 @@ public class PaimonPageSourceTest
                     assertThat(exception).hasMessage("Failed to open or read Paimon split");
                     assertThat(exception.getCause()).isSameAs(ioException);
                 });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(wrappedParquetCorruption))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_BAD_DATA.toErrorCode());
+                    assertThat(exception.getCause()).isSameAs(parquetCorruption);
+                });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(wrappedIoException))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).isSameAs(ioException);
+                });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", unsupported)).isSameAs(unsupported);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", contractViolation))
                 .isSameAs(contractViolation);
@@ -1092,6 +1105,17 @@ public class PaimonPageSourceTest
                     assertThat(exception.getCause()).isSameAs(parquetCorruption);
                 });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", ioException))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("reader failed");
+                    assertThat(exception.getCause()).isSameAs(ioException);
+                });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", wrappedParquetCorruption))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_BAD_DATA.toErrorCode());
+                    assertThat(exception.getCause()).isSameAs(parquetCorruption);
+                });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", wrappedIoException))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
                     assertThat(exception).hasMessage("reader failed");
