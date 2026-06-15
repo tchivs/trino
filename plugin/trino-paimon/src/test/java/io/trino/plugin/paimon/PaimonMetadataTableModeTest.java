@@ -371,6 +371,32 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testGetColumnMetadataFallsBackToOrdinaryHandleAfterDdlRemovesColumn()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        org.apache.paimon.types.RowType staleRowType = DataTypes.ROW(
+                new DataField(0, "id", DataTypes.INT(), "stale comment"),
+                new DataField(1, "order_status", DataTypes.STRING(), "old comment"));
+        org.apache.paimon.types.RowType latestRowType = DataTypes.ROW(
+                new DataField(0, "id", DataTypes.INT(), "stale comment"));
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(fileStoreTable(
+                        BucketMode.HASH_FIXED,
+                        copiedWithLatestSchema,
+                        staleRowType,
+                        latestRowType,
+                        List.of("id"))),
+                TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle staleColumnHandle = PaimonColumnHandle.of("order_status", DataTypes.STRING());
+
+        ColumnMetadata columnMetadata = metadata.getColumnMetadata(SESSION, tableHandle, staleColumnHandle);
+
+        assertThat(columnMetadata).isEqualTo(staleColumnHandle.getColumnMetadata());
+        assertThat(copiedWithLatestSchema).isTrue();
+    }
+
+    @Test
     public void testMergeRowIdFailsWhenPrimaryKeyIsMissingFromTableSchema()
     {
         FileStoreTable table = fileStoreTable(
@@ -2775,6 +2801,7 @@ public class PaimonMetadataTableModeTest
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "bucketMode" -> bucketMode;
+                    case "name" -> "testing_file_store_table";
                     case "rowType" -> rowType;
                     case "partitionKeys" -> partitionKeys;
                     case "primaryKeys" -> primaryKeys;

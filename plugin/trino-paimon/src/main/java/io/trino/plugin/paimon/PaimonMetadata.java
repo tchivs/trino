@@ -814,10 +814,21 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Table table = PaimonTableHandle.schemaAwareReadTable(
                 paimonTableHandle.tableWithDynamicOptions(sessionCatalog, session),
                 !paimonTableHandle.usesHistoricalReadSchema(session));
-        return PaimonTableHandle.columnMetadata(
-                table,
-                paimonColumnHandle.getColumnName(),
-                typeManager);
+        try {
+            return PaimonTableHandle.columnMetadata(
+                    table,
+                    paimonColumnHandle.getColumnName(),
+                    typeManager);
+        }
+        catch (TrinoException e) {
+            if (e.getErrorCode().equals(COLUMN_NOT_FOUND.toErrorCode())
+                    && !PaimonColumnHandle.isHiddenColumnName(paimonColumnHandle.getColumnName())) {
+                // Trino may ask for metadata using a stale ordinary column handle immediately after
+                // rename/drop DDL has already changed the table schema.
+                return paimonColumnHandle.getColumnMetadata();
+            }
+            throw e;
+        }
     }
 
     @Override
