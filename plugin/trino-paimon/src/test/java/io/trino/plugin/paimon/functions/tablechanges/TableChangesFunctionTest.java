@@ -52,6 +52,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -69,6 +70,10 @@ public class TableChangesFunctionTest
             PaimonTableOptionUtils.convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN.key()).toUpperCase(ENGLISH);
     private static final String INCREMENTAL_BETWEEN_TIMESTAMP =
             PaimonTableOptionUtils.convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key()).toUpperCase(ENGLISH);
+    private static final String INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT =
+            PaimonTableOptionUtils.convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key()).toUpperCase(ENGLISH);
+    private static final String INCREMENTAL_TO_AUTO_TAG =
+            PaimonTableOptionUtils.convertOptionKey(CoreOptions.INCREMENTAL_TO_AUTO_TAG.key()).toUpperCase(ENGLISH);
 
     @Test
     public void testAnalyzeBuildsExplicitProjectedColumnsAndOptions()
@@ -121,6 +126,58 @@ public class TableChangesFunctionTest
                 .containsExactlyInAnyOrderEntriesOf(Map.of(
                         CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(), "1000,2000",
                         CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "auto"));
+    }
+
+    @Test
+    public void testAnalyzePassesIncrementalToAutoTagWithoutScanMode()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(table(DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
+
+        TableFunctionAnalysis analysis = function.analyze(SESSION, null, arguments(Map.of(
+                INCREMENTAL_TO_AUTO_TAG, "2024-12-04")), new RecordingAccessControl());
+
+        assertThat(((PaimonTableHandle) analysis.getHandle()).getDynamicOptions())
+                .containsExactlyInAnyOrderEntriesOf(Map.of(
+                        CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04"));
+    }
+
+    @Test
+    public void testAnalyzePassesIncrementalBetweenTagToSnapshotOption()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(table(DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
+
+        TableFunctionAnalysis analysis = function.analyze(SESSION, null, arguments(Map.of(
+                INCREMENTAL_BETWEEN, "tag-a,tag-b",
+                INCREMENTAL_BETWEEN_SCAN_MODE, "delta",
+                INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT, true)), new RecordingAccessControl());
+
+        assertThat(((PaimonTableHandle) analysis.getHandle()).getDynamicOptions())
+                .containsExactlyInAnyOrderEntriesOf(Map.of(
+                        CoreOptions.INCREMENTAL_BETWEEN.key(), "tag-a,tag-b",
+                        CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "delta",
+                        CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(), "true"));
+    }
+
+    @Test
+    public void testAnalyzeOmitsIncrementalBetweenTagToSnapshotOptionByDefault()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(table(DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
+
+        TableFunctionAnalysis analysis = function.analyze(SESSION, null, arguments(Map.of(
+                INCREMENTAL_BETWEEN, "tag-a,tag-b",
+                INCREMENTAL_BETWEEN_SCAN_MODE, "delta")), new RecordingAccessControl());
+
+        assertThat(((PaimonTableHandle) analysis.getHandle()).getDynamicOptions())
+                .containsExactlyInAnyOrderEntriesOf(Map.of(
+                        CoreOptions.INCREMENTAL_BETWEEN.key(), "tag-a,tag-b",
+                        CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "delta"))
+                .doesNotContainKey(CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key());
     }
 
     @Test
@@ -187,7 +244,7 @@ public class TableChangesFunctionTest
         assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of()), new RecordingAccessControl()))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
-                    assertThat(exception).hasMessage("Either INCREMENTAL_BETWEEN or INCREMENTAL_BETWEEN_TIMESTAMP must be provided");
+                    assertThat(exception).hasMessage("One of INCREMENTAL_BETWEEN, INCREMENTAL_BETWEEN_TIMESTAMP or INCREMENTAL_TO_AUTO_TAG must be provided");
                 });
     }
 
@@ -218,7 +275,53 @@ public class TableChangesFunctionTest
                 INCREMENTAL_BETWEEN_TIMESTAMP, "1000,2000")), new RecordingAccessControl()))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
-                    assertThat(exception).hasMessage("Only one of INCREMENTAL_BETWEEN or INCREMENTAL_BETWEEN_TIMESTAMP may be provided");
+                    assertThat(exception).hasMessage("Only one of INCREMENTAL_BETWEEN, INCREMENTAL_BETWEEN_TIMESTAMP or INCREMENTAL_TO_AUTO_TAG may be provided");
+                });
+    }
+
+    @Test
+    public void testAnalyzeRejectsIncrementalToAutoTagConflictingWithOtherIncrementalModes()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(table(DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
+
+        assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(
+                INCREMENTAL_BETWEEN, "1,2",
+                INCREMENTAL_TO_AUTO_TAG, "2024-12-04")), new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
+                    assertThat(exception).hasMessage("Only one of INCREMENTAL_BETWEEN, INCREMENTAL_BETWEEN_TIMESTAMP or INCREMENTAL_TO_AUTO_TAG may be provided");
+                });
+    }
+
+    @Test
+    public void testAnalyzeRejectsIncrementalBetweenTagToSnapshotWithoutIncrementalBetween()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(table(DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
+
+        assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(
+                INCREMENTAL_BETWEEN_TIMESTAMP, "1000,2000",
+                INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT, true)), new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
+                    assertThat(exception).hasMessage("INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT requires INCREMENTAL_BETWEEN");
+                });
+    }
+
+    @Test
+    public void testAnalyzeRejectsBlankIncrementalToAutoTagBeforeCatalogLookup()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new MissingTablePaimonCatalog()));
+
+        assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(
+                INCREMENTAL_TO_AUTO_TAG, " ")), new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
+                    assertThat(exception).hasMessage("INCREMENTAL_TO_AUTO_TAG may not be blank");
                 });
     }
 
@@ -357,6 +460,14 @@ public class TableChangesFunctionTest
                     assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
                     assertThat(exception).hasMessage("Unsupported argument value for INCREMENTAL_BETWEEN: java.lang.Long");
                 });
+
+        Map<String, Argument> wrongBooleanValueArguments = arguments(Map.of(INCREMENTAL_BETWEEN, "1,2"));
+        wrongBooleanValueArguments.put(INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT, new ScalarArgument(BOOLEAN, "true"));
+        assertThatThrownBy(() -> function.analyze(SESSION, null, wrongBooleanValueArguments, new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
+                    assertThat(exception).hasMessage("Unsupported argument value for INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT: java.lang.String");
+                });
     }
 
     @Test
@@ -416,7 +527,7 @@ public class TableChangesFunctionTest
                 });
     }
 
-    private static Map<String, Argument> arguments(Map<String, String> overrides)
+    private static Map<String, Argument> arguments(Map<String, ?> overrides)
     {
         Map<String, Argument> arguments = new HashMap<>();
         arguments.put(SCHEMA_NAME, scalar("schema"));
@@ -424,13 +535,21 @@ public class TableChangesFunctionTest
         arguments.put(INCREMENTAL_BETWEEN_SCAN_MODE, scalar("auto"));
         arguments.put(INCREMENTAL_BETWEEN, scalar(null));
         arguments.put(INCREMENTAL_BETWEEN_TIMESTAMP, scalar(null));
+        arguments.put(INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT, scalar(false));
+        arguments.put(INCREMENTAL_TO_AUTO_TAG, scalar(null));
         overrides.forEach((key, value) -> arguments.put(key, scalar(value)));
         return arguments;
     }
 
-    private static ScalarArgument scalar(String value)
+    private static ScalarArgument scalar(Object value)
     {
-        return new ScalarArgument(VARCHAR, Optional.ofNullable(value).map(Slices::utf8Slice).orElse(null));
+        if (value == null || value instanceof String) {
+            return new ScalarArgument(VARCHAR, Optional.ofNullable((String) value).map(Slices::utf8Slice).orElse(null));
+        }
+        if (value instanceof Boolean bool) {
+            return new ScalarArgument(BOOLEAN, bool);
+        }
+        throw new IllegalArgumentException("Unsupported testing scalar value: " + value.getClass().getName());
     }
 
     private static Throwable rootCause(Throwable throwable)

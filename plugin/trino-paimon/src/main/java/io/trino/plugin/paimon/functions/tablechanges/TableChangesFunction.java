@@ -54,6 +54,7 @@ import java.util.OptionalLong;
 import static io.trino.plugin.base.util.Functions.checkFunctionArgument;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.function.table.ReturnTypeSpecification.GenericTable.GENERIC_TABLE;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
@@ -72,6 +73,10 @@ public class TableChangesFunction
             .convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key()).toUpperCase(ENGLISH);
     private static final String INCREMENTAL_BETWEEN = PaimonTableOptionUtils
             .convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN.key()).toUpperCase(ENGLISH);
+    private static final String INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT = PaimonTableOptionUtils
+            .convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key()).toUpperCase(ENGLISH);
+    private static final String INCREMENTAL_TO_AUTO_TAG = PaimonTableOptionUtils
+            .convertOptionKey(CoreOptions.INCREMENTAL_TO_AUTO_TAG.key()).toUpperCase(ENGLISH);
     private final PaimonMetadata trinoMetadata;
 
     @Inject
@@ -87,6 +92,12 @@ public class TableChangesFunction
                 ScalarArgumentSpecification.builder().name(INCREMENTAL_BETWEEN).defaultValue(null)
                         .type(VARCHAR).build(),
                 ScalarArgumentSpecification.builder().name(INCREMENTAL_BETWEEN_TIMESTAMP).defaultValue(null)
+                        .type(VARCHAR).build(),
+                ScalarArgumentSpecification.builder().name(INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT)
+                        .defaultValue(false)
+                        .type(BOOLEAN).build(),
+                ScalarArgumentSpecification.builder().name(INCREMENTAL_TO_AUTO_TAG)
+                        .defaultValue(null)
                         .type(VARCHAR).build()),
                 GENERIC_TABLE);
         this.trinoMetadata = requireNonNull(trinoMetadataFactory, "trinoMetadataFactory is null").create();
@@ -127,6 +138,15 @@ public class TableChangesFunction
         return Optional.of(checkVarcharArgumentValue(value, key));
     }
 
+    private static boolean getRequiredBooleanArgument(Map<String, Argument> arguments, String key)
+    {
+        Object value = getScalarArgument(arguments, key).getValue();
+        if (value == null) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT, FUNCTION_NAME + " argument " + key + " may not be null");
+        }
+        return checkBooleanArgumentValue(value, key);
+    }
+
     private static ScalarArgument getScalarArgument(Map<String, Argument> arguments, String key)
     {
         Argument argument = requireNonNull(arguments, "arguments is null").get(key);
@@ -155,12 +175,27 @@ public class TableChangesFunction
         throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "Unsupported argument value for " + key + ": " + argumentValue.getClass().getName());
     }
 
+    private static boolean checkBooleanArgumentValue(Object argumentValue, String key)
+    {
+        if (argumentValue instanceof Boolean bool) {
+            return bool;
+        }
+        throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "Unsupported argument value for " + key + ": " + argumentValue.getClass().getName());
+    }
+
     private static void validateIncrementalWindow(String argumentName, Slice value)
     {
         String[] parts = value.toStringUtf8().split(",", -1);
         if (parts.length != 2 || parts[0].isBlank() || parts[1].isBlank()) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
                     argumentName + " must be two non-empty values separated by a comma");
+        }
+    }
+
+    private static void validateNonBlankValue(String argumentName, Slice value)
+    {
+        if (value.toStringUtf8().isBlank()) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT, argumentName + " may not be blank");
         }
     }
 
@@ -186,20 +221,35 @@ public class TableChangesFunction
         String schema = getSchemaName(arguments);
         String table = getTableName(arguments);
 
-        String incrementalBetweenScanMode = getRequiredNonBlankVarcharArgument(arguments, INCREMENTAL_BETWEEN_SCAN_MODE);
-        validateIncrementalBetweenScanMode(incrementalBetweenScanMode);
         Optional<Slice> incrementalBetweenValue = getOptionalVarcharArgument(arguments, INCREMENTAL_BETWEEN);
         Optional<Slice> incrementalBetweenTimestamp = getOptionalVarcharArgument(arguments, INCREMENTAL_BETWEEN_TIMESTAMP);
-        if (incrementalBetweenValue.isEmpty() && incrementalBetweenTimestamp.isEmpty()) {
+        boolean incrementalBetweenTagToSnapshot = getRequiredBooleanArgument(arguments, INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT);
+        Optional<Slice> incrementalToAutoTag = getOptionalVarcharArgument(arguments, INCREMENTAL_TO_AUTO_TAG);
+        int incrementalModeCount = (incrementalBetweenValue.isPresent() ? 1 : 0)
+                + (incrementalBetweenTimestamp.isPresent() ? 1 : 0)
+                + (incrementalToAutoTag.isPresent() ? 1 : 0);
+        if (incrementalModeCount == 0) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
-                    "Either " + INCREMENTAL_BETWEEN + " or " + INCREMENTAL_BETWEEN_TIMESTAMP + " must be provided");
+                    "One of " + INCREMENTAL_BETWEEN + ", " + INCREMENTAL_BETWEEN_TIMESTAMP + " or " + INCREMENTAL_TO_AUTO_TAG + " must be provided");
         }
-        if (incrementalBetweenValue.isPresent() && incrementalBetweenTimestamp.isPresent()) {
+        if (incrementalModeCount > 1) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
-                    "Only one of " + INCREMENTAL_BETWEEN + " or " + INCREMENTAL_BETWEEN_TIMESTAMP + " may be provided");
+                    "Only one of " + INCREMENTAL_BETWEEN + ", " + INCREMENTAL_BETWEEN_TIMESTAMP + " or " + INCREMENTAL_TO_AUTO_TAG + " may be provided");
+        }
+        if (incrementalBetweenTagToSnapshot && incrementalBetweenValue.isEmpty()) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
+                    INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT + " requires " + INCREMENTAL_BETWEEN);
         }
         incrementalBetweenValue.ifPresent(value -> validateIncrementalWindow(INCREMENTAL_BETWEEN, value));
         incrementalBetweenTimestamp.ifPresent(value -> validateIncrementalWindow(INCREMENTAL_BETWEEN_TIMESTAMP, value));
+        incrementalToAutoTag.ifPresent(value -> validateNonBlankValue(INCREMENTAL_TO_AUTO_TAG, value));
+
+        Optional<String> incrementalBetweenScanMode = Optional.empty();
+        if (incrementalBetweenValue.isPresent() || incrementalBetweenTimestamp.isPresent()) {
+            String scanMode = getRequiredNonBlankVarcharArgument(arguments, INCREMENTAL_BETWEEN_SCAN_MODE);
+            validateIncrementalBetweenScanMode(scanMode);
+            incrementalBetweenScanMode = Optional.of(scanMode);
+        }
 
         SchemaTableName schemaTableName = new SchemaTableName(schema, table);
         try {
@@ -217,7 +267,14 @@ public class TableChangesFunction
                 options.put(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
                         incrementalBetweenTimestamp.orElseThrow().toStringUtf8());
             }
-            options.put(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), incrementalBetweenScanMode);
+            incrementalBetweenScanMode.ifPresent(scanMode ->
+                    options.put(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), scanMode));
+            if (incrementalBetweenTagToSnapshot) {
+                options.put(CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(), "true");
+            }
+            if (incrementalToAutoTag.isPresent()) {
+                options.put(CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), incrementalToAutoTag.orElseThrow().toStringUtf8());
+            }
 
             ImmutableList.Builder<Descriptor.Field> columns = ImmutableList.builder();
             List<PaimonColumnHandle> projectedColumns = new ArrayList<>();

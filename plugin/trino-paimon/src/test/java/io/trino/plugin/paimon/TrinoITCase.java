@@ -106,6 +106,9 @@ public class TrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.not_null_values");
             sql("DROP TABLE IF EXISTS paimon.default.time_orc_values");
             sql("DROP TABLE IF EXISTS paimon.default.time_travel_schema_evolution");
+            sql("DROP TABLE IF EXISTS paimon.default.incremental_schema_evolution");
+            sql("DROP TABLE IF EXISTS paimon.default.incremental_tag_snapshot_values");
+            sql("DROP TABLE IF EXISTS paimon.default.incremental_auto_tag_values");
             sql("DROP TABLE IF EXISTS paimon.default.row_tracking_values");
             sql("DROP TABLE IF EXISTS paimon.default.branch_values");
             sql("DROP TABLE IF EXISTS paimon.default.branch_schema_values");
@@ -1331,7 +1334,7 @@ public class TrinoITCase
     {
         assertThatExceptionOfType(QueryFailedException.class).isThrownBy(
                 () -> sql("SELECT * FROM TABLE(paimon.system.table_changes(schema_name=>'default',table_name=>'t2'))"))
-                .withMessage("Either INCREMENTAL_BETWEEN or INCREMENTAL_BETWEEN_TIMESTAMP must be provided");
+                .withMessage("One of INCREMENTAL_BETWEEN, INCREMENTAL_BETWEEN_TIMESTAMP or INCREMENTAL_TO_AUTO_TAG must be provided");
         assertThat(sql(
                 "SELECT * FROM TABLE(paimon.system.table_changes(schema_name=>'default',table_name=>'t2',incremental_between=>'1,2'))"))
                 .isEqualTo("[[5, 6, 3, 3], [7, 8, 4, 4]]");
@@ -1342,6 +1345,136 @@ public class TrinoITCase
                 "SELECT * FROM TABLE(paimon.system.table_changes(schema_name=>'default',table_name=>'t2',incremental_between_timestamp=>'%s,%s'))"
                         .formatted(t2FirstCommitTimestamp, System.currentTimeMillis())))
                 .isEqualTo("[[5, 6, 3, 3], [7, 8, 4, 4]]");
+    }
+
+    @Test
+    public void testIncrementalReadBetweenTagsAsSnapshots()
+    {
+        assertThat(sql(
+                "SELECT * FROM TABLE(paimon.system.table_changes("
+                        + "schema_name=>'default',"
+                        + "table_name=>'t2',"
+                        + "incremental_between=>'1,tag-2',"
+                        + "incremental_between_tag_to_snapshot=>true))"))
+                .isEqualTo("[[5, 6, 3, 3], [7, 8, 4, 4]]");
+
+        assertThat(sql(
+                "SELECT * FROM TABLE(paimon.system.table_changes("
+                        + "schema_name=>'default',"
+                        + "table_name=>'t2',"
+                        + "incremental_between=>'1,tag-2',"
+                        + "incremental_between_tag_to_snapshot=>true,"
+                        + "incremental_between_scan_mode=>'delta'))"))
+                .isEqualTo("[[5, 6, 3, 3], [7, 8, 4, 4]]");
+    }
+
+    @Test
+    public void testIncrementalReadBetweenTagsDefaultsToTagDiffUnlessTagToSnapshotEnabled()
+            throws Exception
+    {
+        Path tablePath = new Path(warehouse, "default.db/incremental_tag_snapshot_values");
+        Schema schema = Schema.newBuilder()
+                .column("id", DataTypes.INT())
+                .column("group_id", DataTypes.INT())
+                .column("score", DataTypes.BIGINT())
+                .primaryKey("id")
+                .option(CoreOptions.BUCKET.key(), "1")
+                .option(CoreOptions.BUCKET_KEY.key(), "id")
+                .option(CoreOptions.CHANGELOG_PRODUCER.key(), "lookup")
+                .build();
+        new SchemaManager(LocalFileIO.create(), tablePath).createTable(schema);
+
+        FileStoreTable table = FileStoreTableFactory.create(LocalFileIO.create(), tablePath);
+        InnerTableWrite writer = table.newWrite("user");
+        writer.withIOManager(new IOManagerImpl("/tmp"));
+        InnerTableCommit commit = table.newCommit("user");
+
+        writer.write(GenericRow.of(1, 10, 100L));
+        writer.write(GenericRow.of(2, 20, 200L));
+        writer.write(GenericRow.of(3, 40, 400L));
+        commit.commit(0, writer.prepareCommit(true, 0));
+        createTag("default", "incremental_tag_snapshot_values", "tag-from-snapshot-1");
+
+        writer.write(GenericRow.of(1, 10, 100L));
+        writer.write(GenericRow.of(2, 20, 200L));
+        writer.write(GenericRow.of(3, 40, 500L));
+        commit.commit(1, writer.prepareCommit(true, 1));
+        createTag("default", "incremental_tag_snapshot_values", "tag-from-snapshot-2");
+
+        assertThat(sql(
+                "SELECT * FROM TABLE(paimon.system.table_changes("
+                        + "schema_name=>'default',"
+                        + "table_name=>'incremental_tag_snapshot_values',"
+                        + "incremental_between=>'tag-from-snapshot-1,tag-from-snapshot-2',"
+                        + "incremental_between_scan_mode=>'delta')) "
+                        + "ORDER BY id, score"))
+                .isEqualTo("[[3, 40, 500]]");
+
+        assertThat(sql(
+                "SELECT * FROM TABLE(paimon.system.table_changes("
+                        + "schema_name=>'default',"
+                        + "table_name=>'incremental_tag_snapshot_values',"
+                        + "incremental_between=>'tag-from-snapshot-1,tag-from-snapshot-2',"
+                        + "incremental_between_tag_to_snapshot=>true,"
+                        + "incremental_between_scan_mode=>'delta')) "
+                        + "ORDER BY id, score"))
+                .isEqualTo("[[1, 10, 100], [2, 20, 200], [3, 40, 500]]");
+    }
+
+    @Test
+    public void testIncrementalReadToAutoTag()
+            throws Exception
+    {
+        Path tablePath = new Path(warehouse, "default.db/incremental_auto_tag_values");
+        Schema schema = Schema.newBuilder()
+                .column("id", DataTypes.INT())
+                .column("name", DataTypes.STRING())
+                .primaryKey("id")
+                .option(CoreOptions.BUCKET.key(), "1")
+                .option(CoreOptions.TAG_CREATION_PERIOD.key(), "daily")
+                .build();
+        new SchemaManager(LocalFileIO.create(), tablePath).createTable(schema);
+
+        FileStoreTable table = FileStoreTableFactory.create(LocalFileIO.create(), tablePath);
+        InnerTableWrite writer = table.newWrite("user");
+        InnerTableCommit commit = table.newCommit("user");
+
+        writer.write(GenericRow.of(1, fromString("alpha")));
+        commit.commit(0, writer.prepareCommit(true, 0));
+        table.createTag("2024-12-01");
+
+        writer.write(GenericRow.of(2, fromString("beta")));
+        commit.commit(1, writer.prepareCommit(true, 1));
+        table.createTag("2024-12-02");
+
+        writer.write(GenericRow.of(3, fromString("gamma")));
+        commit.commit(2, writer.prepareCommit(true, 2));
+        table.createTag("2024-12-04");
+
+        assertThat(sql(
+                "SELECT * FROM TABLE(paimon.system.table_changes("
+                        + "schema_name=>'default',"
+                        + "table_name=>'incremental_auto_tag_values',"
+                        + "incremental_to_auto_tag=>'2024-12-01'))"))
+                .isEqualTo("[]");
+        assertThat(sql(
+                "SELECT * FROM TABLE(paimon.system.table_changes("
+                        + "schema_name=>'default',"
+                        + "table_name=>'incremental_auto_tag_values',"
+                        + "incremental_to_auto_tag=>'2024-12-02'))"))
+                .isEqualTo("[[2, beta]]");
+        assertThat(sql(
+                "SELECT * FROM TABLE(paimon.system.table_changes("
+                        + "schema_name=>'default',"
+                        + "table_name=>'incremental_auto_tag_values',"
+                        + "incremental_to_auto_tag=>'2024-12-03'))"))
+                .isEqualTo("[]");
+        assertThat(sql(
+                "SELECT * FROM TABLE(paimon.system.table_changes("
+                        + "schema_name=>'default',"
+                        + "table_name=>'incremental_auto_tag_values',"
+                        + "incremental_to_auto_tag=>'2024-12-04'))"))
+                .isEqualTo("[[3, gamma]]");
     }
 
     @Test
@@ -1356,6 +1489,40 @@ public class TrinoITCase
                 "SELECT * FROM TABLE(paimon.system.table_changes(schema_name=>'default',table_name=>'t2',incremental_between=>'1,2'))")
                 .getMaterializedRows().toString())
                 .isEqualTo("[[5, 6, 3, 3], [7, 8, 4, 4]]");
+    }
+
+    @Test
+    public void testIncrementalReadUsesLatestSchemaAfterSchemaChange()
+    {
+        sql("CREATE TABLE paimon.default.incremental_schema_evolution (id integer, name varchar)");
+        sql("INSERT INTO paimon.default.incremental_schema_evolution VALUES (1, 'alpha'), (2, 'beta')");
+        sql("ALTER TABLE paimon.default.incremental_schema_evolution DROP COLUMN name");
+        sql("INSERT INTO paimon.default.incremental_schema_evolution VALUES (3), (4)");
+        sql("ALTER TABLE paimon.default.incremental_schema_evolution ADD COLUMN comment varchar");
+        sql("INSERT INTO paimon.default.incremental_schema_evolution VALUES (5, 'fifth'), (6, 'sixth')");
+
+        long latestSnapshotId = (long) computeActual(
+                "SELECT max(snapshot_id) FROM paimon.default.\"incremental_schema_evolution$snapshots\"")
+                .getOnlyValue();
+
+        String incrementalSchemaEvolutionQuery = """
+                SELECT * FROM TABLE(paimon.system.table_changes(
+                        schema_name=>'default',
+                        table_name=>'incremental_schema_evolution',
+                        incremental_between=>'1,%s')) ORDER BY id
+                """.formatted(latestSnapshotId);
+        String incrementalSchemaEvolutionDeltaQuery = """
+                SELECT * FROM TABLE(paimon.system.table_changes(
+                        schema_name=>'default',
+                        table_name=>'incremental_schema_evolution',
+                        incremental_between=>'1,%s',
+                        incremental_between_scan_mode=>'delta')) ORDER BY id
+                """.formatted(latestSnapshotId);
+
+        assertThat(sql(incrementalSchemaEvolutionQuery))
+                .isEqualTo("[[3, null], [4, null], [5, fifth], [6, sixth]]");
+        assertThat(sql(incrementalSchemaEvolutionDeltaQuery))
+                .isEqualTo("[[3, null], [4, null], [5, fifth], [6, sixth]]");
     }
 
     @Test
