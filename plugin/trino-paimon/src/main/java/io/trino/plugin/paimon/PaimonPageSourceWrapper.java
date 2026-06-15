@@ -25,6 +25,7 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 
+import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -75,18 +76,24 @@ public class PaimonPageSourceWrapper
     @Override
     public Page getNextPage()
     {
-        OptionalInt startPosition = deletionVector.isPresent() ? OptionalInt.of(startPosition()) : OptionalInt.empty();
-        Page next = source.getNextPage();
-        if (next == null) {
-            return next;
-        }
-        if (deletionVector.isEmpty()) {
-            return next;
-        }
+        try {
+            OptionalInt startPosition = deletionVector.isPresent() ? OptionalInt.of(startPosition()) : OptionalInt.empty();
+            Page next = source.getNextPage();
+            if (next == null) {
+                return next;
+            }
+            if (deletionVector.isEmpty()) {
+                return next;
+            }
 
-        int pageCount = next.getPositionCount();
+            int pageCount = next.getPositionCount();
 
-        return convertToRetained(next, deletionVector.get(), startPosition.orElseThrow(), pageCount);
+            return convertToRetained(next, deletionVector.get(), startPosition.orElseThrow(), pageCount);
+        }
+        catch (RuntimeException e) {
+            closeAllSuppress(e, this);
+            throw e;
+        }
     }
 
     private int startPosition()

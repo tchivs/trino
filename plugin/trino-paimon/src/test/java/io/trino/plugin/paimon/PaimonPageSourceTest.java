@@ -25,6 +25,7 @@ import io.trino.orc.metadata.OrcType.OrcTypeKind;
 import io.trino.parquet.Column;
 import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSourceId;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.plugin.hive.orc.OrcReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetPageSource;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
@@ -40,6 +41,7 @@ import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.LongTimestamp;
@@ -1547,6 +1549,36 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testMergePageSourceWrapperDelegatesProgressBlockingAndMetrics()
+    {
+        DelegatingStatePageSource source = new DelegatingStatePageSource(new Page(1, bigintBlock(10)),
+                OptionalLong.of(7), 123L, 456L);
+        PaimonMergePageSourceWrapper wrapper = PaimonMergePageSourceWrapper.wrap(source, List.of("a"),
+                Map.of("a", 0));
+
+        assertThat(wrapper.getCompletedBytes()).isEqualTo(123L);
+        assertThat(wrapper.getCompletedPositions()).hasValue(7L);
+        assertThat(wrapper.getReadTimeNanos()).isEqualTo(456L);
+        assertThat(wrapper.isBlocked()).isSameAs(source.blockedFuture());
+        assertThat(wrapper.getMetrics()).isSameAs(source.metrics());
+    }
+
+    @Test
+    void testMergePageSourceWrapperClosesSourceWhenRowIdConstructionFails()
+    {
+        AtomicBoolean closed = new AtomicBoolean();
+        PaimonMergePageSourceWrapper wrapper = PaimonMergePageSourceWrapper.wrap(
+                new FailingClosePageSource(new Page(1, bigintBlock(10)), closed, null),
+                List.of("row_id"),
+                Map.of("row_id", 1));
+
+        assertThatThrownBy(wrapper::getNextPage)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Row id field 'row_id' maps to channel 1, but page has 1 channels");
+        assertThat(closed).isTrue();
+    }
+
+    @Test
     void testDeletionVectorWrapperDoesNotRequireCompletedPositionsWithoutDeletionVector()
     {
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(
@@ -1584,6 +1616,20 @@ public class PaimonPageSourceTest
         assertThat(page.getPositionCount()).isEqualTo(2);
         assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 0)).isEqualTo(10L);
         assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 1)).isEqualTo(30L);
+    }
+
+    @Test
+    void testDeletionVectorWrapperClosesSourceWhenDeletionFilteringFails()
+    {
+        AtomicBoolean closed = new AtomicBoolean();
+        PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(
+                new FailingClosePageSource(new Page(1, bigintBlock(10)), closed, null),
+                Optional.of(deletionVectorDeleting(0)));
+
+        assertThatThrownBy(wrapper::getNextPage)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Deletion-vector page source requires completed positions");
+        assertThat(closed).isTrue();
     }
 
     @Test
@@ -2171,6 +2217,142 @@ public class PaimonPageSourceTest
         private boolean completedPositionsReadBeforePage()
         {
             return completedPositionsReadBeforePage;
+        }
+    }
+
+    private static class DelegatingStatePageSource
+            implements ConnectorPageSource
+    {
+        private final Page page;
+        private final OptionalLong completedPositions;
+        private final long completedBytes;
+        private final long readTimeNanos;
+        private final CompletableFuture<?> blockedFuture = new CompletableFuture<>();
+        private final Metrics metrics = new Metrics(Map.of("merge-wrapper", new LongCount(11)));
+
+        private DelegatingStatePageSource(Page page, OptionalLong completedPositions, long completedBytes,
+                long readTimeNanos)
+        {
+            this.page = requireNonNull(page, "page is null");
+            this.completedPositions = requireNonNull(completedPositions, "completedPositions is null");
+            this.completedBytes = completedBytes;
+            this.readTimeNanos = readTimeNanos;
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return completedBytes;
+        }
+
+        @Override
+        public OptionalLong getCompletedPositions()
+        {
+            return completedPositions;
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return readTimeNanos;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return false;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            return page;
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public CompletableFuture<?> isBlocked()
+        {
+            return blockedFuture;
+        }
+
+        @Override
+        public Metrics getMetrics()
+        {
+            return metrics;
+        }
+
+        @Override
+        public void close() {}
+
+        private CompletableFuture<?> blockedFuture()
+        {
+            return blockedFuture;
+        }
+
+        private Metrics metrics()
+        {
+            return metrics;
+        }
+    }
+
+    private static class FailingClosePageSource
+            implements ConnectorPageSource
+    {
+        private final Page page;
+        private final AtomicBoolean closed;
+        private final IOException closeFailure;
+
+        private FailingClosePageSource(Page page, AtomicBoolean closed, IOException closeFailure)
+        {
+            this.page = requireNonNull(page, "page is null");
+            this.closed = requireNonNull(closed, "closed is null");
+            this.closeFailure = closeFailure;
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return 0;
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return 0;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return false;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            return page;
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            closed.set(true);
+            if (closeFailure != null) {
+                throw closeFailure;
+            }
         }
     }
 

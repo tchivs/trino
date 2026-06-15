@@ -17,6 +17,7 @@ import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.RowBlock;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.metrics.Metrics;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -24,8 +25,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
+import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static java.util.Objects.requireNonNull;
 
 public class PaimonMergePageSourceWrapper
@@ -99,6 +103,12 @@ public class PaimonMergePageSourceWrapper
     }
 
     @Override
+    public OptionalLong getCompletedPositions()
+    {
+        return pageSource.getCompletedPositions();
+    }
+
+    @Override
     public long getReadTimeNanos()
     {
         return pageSource.getReadTimeNanos();
@@ -113,36 +123,42 @@ public class PaimonMergePageSourceWrapper
     @Override
     public Page getNextPage()
     {
-        Page nextPage = pageSource.getNextPage();
-        if (nextPage == null) {
-            return null;
-        }
-        int rowCount = nextPage.getPositionCount();
-
-        Block[] newBlocks = new Block[nextPage.getChannelCount() + 1];
-        for (int i = 0; i < nextPage.getChannelCount(); i++) {
-            newBlocks[i] = nextPage.getBlock(i);
-        }
-
-        Block[] rowIdBlocks = new Block[rowIdFields.size()];
-        for (int i = 0; i < rowIdFields.size(); i++) {
-            String fieldName = rowIdFields.get(i);
-            int channelIndex = fieldToIndex.get(fieldName);
-            if (channelIndex >= nextPage.getChannelCount()) {
-                throw new IllegalStateException(
-                        "Row id field '%s' maps to channel %s, but page has %s channels"
-                                .formatted(fieldName, channelIndex, nextPage.getChannelCount()));
+        try {
+            Page nextPage = pageSource.getNextPage();
+            if (nextPage == null) {
+                return null;
             }
-            rowIdBlocks[i] = nextPage.getBlock(channelIndex);
+            int rowCount = nextPage.getPositionCount();
+
+            Block[] newBlocks = new Block[nextPage.getChannelCount() + 1];
+            for (int i = 0; i < nextPage.getChannelCount(); i++) {
+                newBlocks[i] = nextPage.getBlock(i);
+            }
+
+            Block[] rowIdBlocks = new Block[rowIdFields.size()];
+            for (int i = 0; i < rowIdFields.size(); i++) {
+                String fieldName = rowIdFields.get(i);
+                int channelIndex = fieldToIndex.get(fieldName);
+                if (channelIndex >= nextPage.getChannelCount()) {
+                    throw new IllegalStateException(
+                            "Row id field '%s' maps to channel %s, but page has %s channels"
+                                    .formatted(fieldName, channelIndex, nextPage.getChannelCount()));
+                }
+                rowIdBlocks[i] = nextPage.getBlock(channelIndex);
+            }
+
+            // The rowIsNull array size must match rowCount (number of rows), not the number
+            // of fields
+            // All rows are non-null in this context
+            newBlocks[nextPage.getChannelCount()] = RowBlock.fromNotNullSuppressedFieldBlocks(rowCount,
+                    Optional.of(new boolean[rowCount]), rowIdBlocks);
+
+            return new Page(rowCount, newBlocks);
         }
-
-        // The rowIsNull array size must match rowCount (number of rows), not the number
-        // of fields
-        // All rows are non-null in this context
-        newBlocks[nextPage.getChannelCount()] = RowBlock.fromNotNullSuppressedFieldBlocks(rowCount,
-                Optional.of(new boolean[rowCount]), rowIdBlocks);
-
-        return new Page(rowCount, newBlocks);
+        catch (RuntimeException e) {
+            closeAllSuppress(e, this);
+            throw e;
+        }
     }
 
     @Override
@@ -156,5 +172,17 @@ public class PaimonMergePageSourceWrapper
             throws IOException
     {
         pageSource.close();
+    }
+
+    @Override
+    public CompletableFuture<?> isBlocked()
+    {
+        return pageSource.isBlocked();
+    }
+
+    @Override
+    public Metrics getMetrics()
+    {
+        return pageSource.getMetrics();
     }
 }
