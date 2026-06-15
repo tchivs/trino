@@ -77,6 +77,7 @@ public class TrinoITCase
     private static final String CATALOG = "paimon";
     private static final String DB = "default";
 
+    private String warehouse;
     protected long t2FirstCommitTimestamp;
 
     // Cleanup method to ensure test isolation
@@ -104,6 +105,8 @@ public class TrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.time_orc_values");
             sql("DROP TABLE IF EXISTS paimon.default.time_travel_schema_evolution");
             sql("DROP TABLE IF EXISTS paimon.default.row_tracking_values");
+            sql("DROP TABLE IF EXISTS paimon.default.branch_values");
+            sql("DROP TABLE IF EXISTS paimon.default.branch_schema_values");
             // Drop test schemas that may have been created
             sql("DROP SCHEMA IF EXISTS paimon.test CASCADE");
             sql("DROP SCHEMA IF EXISTS paimon.tpch CASCADE");
@@ -117,7 +120,7 @@ public class TrinoITCase
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        String warehouse = Files.createTempDirectory(UUID.randomUUID().toString()).toUri().toString();
+        warehouse = Files.createTempDirectory(UUID.randomUUID().toString()).toUri().toString();
         // flink sink
         Path tablePath1 = new Path(warehouse, DB + ".db/t1");
         SimpleTableTestHelper testHelper1 = createTestHelper(tablePath1);
@@ -604,6 +607,49 @@ public class TrinoITCase
                 .isEqualTo("[[all_table_options], [catalog_options], [partitions], [tables]]");
         assertThat(sql("SHOW COLUMNS FROM paimon.sys.catalog_options"))
                 .isEqualTo("[[key, varchar, , ], [value, varchar, , ]]");
+    }
+
+    @Test
+    public void testBranchQualifiedTableReadWriteIsolation()
+            throws Exception
+    {
+        sql("CREATE TABLE paimon.default.branch_values (id integer, name varchar) WITH (bucket = '-1')");
+        sql("INSERT INTO paimon.default.branch_values VALUES (1, 'main-only')");
+        createTag("default", "branch_values", "seed_tag");
+        createBranch("default", "branch_values", "feature_branch", "seed_tag");
+
+        assertThat(sql("SELECT branch_name FROM paimon.default.\"branch_values$branches\""))
+                .isEqualTo("[[feature_branch]]");
+
+        sql("INSERT INTO paimon.default.\"branch_values$branch_feature_branch\" VALUES (2, 'branch-only')");
+
+        assertThat(sql("SELECT * FROM paimon.default.branch_values ORDER BY id"))
+                .isEqualTo("[[1, main-only]]");
+        assertThat(sql("SELECT * FROM paimon.default.\"branch_values$branch_feature_branch\" ORDER BY id"))
+                .isEqualTo("[[1, main-only], [2, branch-only]]");
+    }
+
+    @Test
+    public void testBranchQualifiedTableSchemaEvolutionUsesBranchSchema()
+            throws Exception
+    {
+        sql("CREATE TABLE paimon.default.branch_schema_values (id integer, name varchar) WITH (bucket = '-1')");
+        sql("INSERT INTO paimon.default.branch_schema_values VALUES (1, 'main')");
+        createTag("default", "branch_schema_values", "schema_seed");
+        createBranch("default", "branch_schema_values", "schema_branch", "schema_seed");
+
+        sql("ALTER TABLE paimon.default.\"branch_schema_values$branch_schema_branch\" ADD COLUMN branch_note varchar");
+        sql("INSERT INTO paimon.default.\"branch_schema_values$branch_schema_branch\" VALUES (2, 'branch', 'note')");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.branch_schema_values"))
+                .isEqualTo("[[id, integer, , ], [name, varchar, , ]]");
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.\"branch_schema_values$branch_schema_branch\""))
+                .isEqualTo("[[id, integer, , ], [name, varchar, , ], [branch_note, varchar, , ]]");
+
+        assertThat(sql("SELECT * FROM paimon.default.branch_schema_values ORDER BY id"))
+                .isEqualTo("[[1, main]]");
+        assertThat(sql("SELECT * FROM paimon.default.\"branch_schema_values$branch_schema_branch\" ORDER BY id"))
+                .isEqualTo("[[1, main, null], [2, branch, note]]");
     }
 
     @Test
@@ -1217,6 +1263,30 @@ public class TrinoITCase
     {
         MaterializedResult result = getQueryRunner().execute(sql);
         return result.getMaterializedRows().toString();
+    }
+
+    private void createBranch(String schemaName, String tableName, String branchName)
+            throws Exception
+    {
+        loadTable(schemaName, tableName).createBranch(branchName);
+    }
+
+    private void createBranch(String schemaName, String tableName, String branchName, String fromTag)
+            throws Exception
+    {
+        loadTable(schemaName, tableName).createBranch(branchName, fromTag);
+    }
+
+    private void createTag(String schemaName, String tableName, String tagName)
+            throws Exception
+    {
+        loadTable(schemaName, tableName).createTag(tagName);
+    }
+
+    private FileStoreTable loadTable(String schemaName, String tableName)
+            throws Exception
+    {
+        return FileStoreTableFactory.create(LocalFileIO.create(), new Path(warehouse, schemaName + ".db/" + tableName));
     }
 
     protected static String timestampLiteral(long epochMilliSeconds, int precision)
