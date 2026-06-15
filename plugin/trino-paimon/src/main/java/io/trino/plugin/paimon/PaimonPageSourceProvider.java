@@ -21,13 +21,16 @@ import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.TrinoInputFile;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.orc.OrcColumn;
+import io.trino.orc.OrcCorruptionException;
 import io.trino.orc.OrcDataSource;
+import io.trino.orc.OrcDataSourceId;
 import io.trino.orc.OrcReader;
 import io.trino.orc.OrcReaderOptions;
 import io.trino.orc.OrcRecordReader;
 import io.trino.orc.TupleDomainOrcPredicate;
 import io.trino.parquet.Column;
 import io.trino.parquet.Field;
+import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSource;
 import io.trino.parquet.ParquetDataSourceId;
 import io.trino.parquet.ParquetReaderOptions;
@@ -78,6 +81,7 @@ import org.apache.parquet.schema.MessageType;
 import org.joda.time.DateTimeZone;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -98,6 +102,9 @@ import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
 import static io.trino.plugin.hive.parquet.ParquetPageSourceFactory.createDataSource;
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_BAD_DATA;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CURSOR_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 
@@ -326,7 +333,9 @@ public class PaimonPageSourceProvider
                                     return DeletionVector.read(fileStoreTable.fileIO(), file);
                                 }
                                 catch (IOException e) {
-                                    throw new RuntimeException(e);
+                                    throw cannotOpenSplitException(
+                                            "Failed to read deletion vector file: " + file.path(),
+                                            e);
                                 }
                             }));
                         }
@@ -458,6 +467,15 @@ public class PaimonPageSourceProvider
             return unsupportedReadException("Paimon page read uses features which are not supported by the Trino connector",
                     unsupportedOperationException);
         }
+        if (exception instanceof OrcCorruptionException || exception instanceof ParquetCorruptionException) {
+            return new TrinoException(PAIMON_BAD_DATA, exception);
+        }
+        if (exception instanceof UncheckedIOException uncheckedIOException) {
+            return cannotOpenSplitException("Failed to open or read Paimon split", uncheckedIOException.getCause());
+        }
+        if (exception instanceof IOException ioException) {
+            return cannotOpenSplitException("Failed to open or read Paimon split", ioException);
+        }
         if (exception instanceof RuntimeException runtimeException) {
             return runtimeException;
         }
@@ -472,6 +490,15 @@ public class PaimonPageSourceProvider
         if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
             return unsupportedReadException(message, unsupportedOperationException);
         }
+        if (exception instanceof OrcCorruptionException || exception instanceof ParquetCorruptionException) {
+            return new TrinoException(PAIMON_BAD_DATA, exception);
+        }
+        if (exception instanceof UncheckedIOException uncheckedIOException) {
+            return cannotOpenSplitException(message, uncheckedIOException.getCause());
+        }
+        if (exception instanceof IOException ioException) {
+            return cannotOpenSplitException(message, ioException);
+        }
         if (exception instanceof RuntimeException runtimeException) {
             return runtimeException;
         }
@@ -482,6 +509,12 @@ public class PaimonPageSourceProvider
     {
         requireNonNull(message, "message is null");
         return new TrinoException(NOT_SUPPORTED, message, requireNonNull(exception, "exception is null"));
+    }
+
+    static TrinoException cannotOpenSplitException(String message, IOException exception)
+    {
+        requireNonNull(message, "message is null");
+        return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, requireNonNull(exception, "exception is null"));
     }
 
     static ConnectorPageSource emptyPageSource()
@@ -766,11 +799,13 @@ public class PaimonPageSourceProvider
                             inputFile.length());
                 }
                 catch (IOException e) {
-                    throw new RuntimeException("Failed to get file length for Parquet file", e);
+                    throw cannotOpenSplitException(
+                            "Failed to get file length for Parquet file: " + inputFile.location(),
+                            e);
                 }
             }
             default : {
-                throw new RuntimeException("Unsupport file format: " + format);
+                throw new IllegalArgumentException("Unsupported direct file format: " + format);
             }
         }
     }
@@ -807,10 +842,12 @@ public class PaimonPageSourceProvider
     private ConnectorPageSource createOrcDataPageSource(TrinoInputFile inputFile, OrcReaderOptions options,
             List<String> columns, List<Type> types, List<Domain> domains)
     {
+        OrcDataSource orcDataSource = null;
         try {
-            OrcDataSource orcDataSource = new PaimonOrcDataSource(inputFile, options);
+            orcDataSource = new PaimonOrcDataSource(inputFile, options);
             OrcReader reader = OrcReader.createOrcReader(orcDataSource, options)
-                    .orElseThrow(() -> new RuntimeException("ORC file is zero length"));
+                    .orElseThrow(() -> new TrinoException(PAIMON_BAD_DATA,
+                            "ORC file is zero length: " + inputFile.location()));
 
             List<OrcColumn> fileColumns = reader.getRootColumn().getNestedColumns();
             // Use case-insensitive map for column name lookup
@@ -840,23 +877,27 @@ public class PaimonPageSourceProvider
             }
 
             AggregatedMemoryContext memoryUsage = newSimpleAggregatedMemoryContext();
+            OrcDataSourceId dataSourceId = orcDataSource.getId();
             OrcRecordReader recordReader = reader.createRecordReader(fileReadColumns, fileReadTypes,
-                    predicateBuilder.build(), DateTimeZone.UTC, memoryUsage, INITIAL_BATCH_SIZE, RuntimeException::new);
+                    predicateBuilder.build(), DateTimeZone.UTC, memoryUsage, INITIAL_BATCH_SIZE,
+                    exception -> handleOrcException(dataSourceId, exception));
 
             return new OrcPageSource(recordReader, columnAdaptations, orcDataSource, Optional.empty(), Optional.empty(),
                     memoryUsage, new FileFormatDataSourceStats(), reader.getCompressionKind());
         }
         catch (Exception e) {
-            throw wrapPaimonReadException(e);
+            closeDataSourceSuppressingException(orcDataSource, e);
+            throw wrapPaimonReadException("Failed to create ORC page source for " + inputFile.location(), e);
         }
     }
 
     private ConnectorPageSource createParquetDataPageSource(TrinoInputFile inputFile, ParquetReaderOptions options,
             List<String> columns, List<Type> types, List<Domain> domains, long fileSize)
     {
+        ParquetDataSource dataSource = null;
         try {
             AggregatedMemoryContext memoryContext = newSimpleAggregatedMemoryContext();
-            ParquetDataSource dataSource = createDataSource(inputFile, OptionalLong.of(fileSize), options,
+            dataSource = createDataSource(inputFile, OptionalLong.of(fileSize), options,
                     memoryContext, new FileFormatDataSourceStats());
 
             ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
@@ -927,7 +968,8 @@ public class PaimonPageSourceProvider
             return pageSourceBuilder.build(parquetReader);
         }
         catch (Exception e) {
-            throw wrapPaimonReadException("Failed to create Parquet page source", e);
+            closeDataSourceSuppressingException(dataSource, e);
+            throw wrapPaimonReadException("Failed to create Parquet page source for " + inputFile.location(), e);
         }
     }
 
@@ -1020,14 +1062,41 @@ public class PaimonPageSourceProvider
         return io.trino.parquet.ParquetTypeUtils.constructField(type, columnIO);
     }
 
-    private static RuntimeException handleParquetException(ParquetDataSourceId dataSourceId, Exception exception)
+    static TrinoException handleOrcException(OrcDataSourceId dataSourceId, Exception exception)
     {
-        if (exception instanceof io.trino.parquet.ParquetCorruptionException) {
-            return new RuntimeException("Parquet file is corrupted: " + dataSourceId, exception);
+        if (exception instanceof TrinoException trinoException) {
+            return trinoException;
         }
-        if (exception instanceof RuntimeException runtimeException) {
-            return runtimeException;
+        if (exception instanceof OrcCorruptionException) {
+            return new TrinoException(PAIMON_BAD_DATA, exception);
         }
-        return new RuntimeException("Error reading Parquet file: " + dataSourceId, exception);
+        return new TrinoException(PAIMON_CURSOR_ERROR, "Failed to read ORC file: " + dataSourceId, exception);
+    }
+
+    static TrinoException handleParquetException(ParquetDataSourceId dataSourceId, Exception exception)
+    {
+        if (exception instanceof TrinoException trinoException) {
+            return trinoException;
+        }
+        if (exception instanceof ParquetCorruptionException) {
+            return new TrinoException(PAIMON_BAD_DATA, exception);
+        }
+        return new TrinoException(PAIMON_CURSOR_ERROR, "Failed to read Parquet file: " + dataSourceId, exception);
+    }
+
+    private static void closeDataSourceSuppressingException(AutoCloseable dataSource, Exception failure)
+    {
+        if (dataSource == null) {
+            return;
+        }
+        requireNonNull(failure, "failure is null");
+        try {
+            dataSource.close();
+        }
+        catch (Exception closeException) {
+            if (closeException != failure) {
+                failure.addSuppressed(closeException);
+            }
+        }
     }
 }

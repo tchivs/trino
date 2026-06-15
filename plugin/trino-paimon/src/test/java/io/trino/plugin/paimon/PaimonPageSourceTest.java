@@ -23,6 +23,8 @@ import io.trino.orc.OrcDataSourceId;
 import io.trino.orc.metadata.OrcColumnId;
 import io.trino.orc.metadata.OrcType.OrcTypeKind;
 import io.trino.parquet.Column;
+import io.trino.parquet.ParquetCorruptionException;
+import io.trino.parquet.ParquetDataSourceId;
 import io.trino.plugin.hive.orc.OrcReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetPageSource;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
@@ -89,6 +91,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.trino.plugin.base.util.JsonTypeUtil.jsonParse;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_BAD_DATA;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CURSOR_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -1049,6 +1054,9 @@ public class PaimonPageSourceTest
         IllegalStateException contractViolation = new IllegalStateException("metadata mismatch");
         UnsupportedOperationException unsupportedRead = new UnsupportedOperationException("unsupported logical type");
         IOException ioException = new IOException("cannot read");
+        ParquetCorruptionException parquetCorruption = new ParquetCorruptionException(
+                new ParquetDataSourceId("memory://broken.parquet"),
+                "bad parquet");
 
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(unsupported)).isSameAs(unsupported);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(contractViolation)).isSameAs(contractViolation);
@@ -1058,9 +1066,17 @@ public class PaimonPageSourceTest
                     assertThat(exception).hasMessage("Paimon page read uses features which are not supported by the Trino connector");
                     assertThat(exception.getCause()).isSameAs(unsupportedRead);
                 });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(parquetCorruption))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_BAD_DATA.toErrorCode());
+                    assertThat(exception.getCause()).isSameAs(parquetCorruption);
+                });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(ioException))
-                .isInstanceOf(RuntimeException.class)
-                .hasCause(ioException);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).isSameAs(ioException);
+                });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", unsupported)).isSameAs(unsupported);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", contractViolation))
                 .isSameAs(contractViolation);
@@ -1070,10 +1086,51 @@ public class PaimonPageSourceTest
                     assertThat(exception).hasMessage("reader failed");
                     assertThat(exception.getCause()).isSameAs(unsupportedRead);
                 });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", parquetCorruption))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_BAD_DATA.toErrorCode());
+                    assertThat(exception.getCause()).isSameAs(parquetCorruption);
+                });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", ioException))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessage("reader failed")
-                .hasCause(ioException);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("reader failed");
+                    assertThat(exception.getCause()).isSameAs(ioException);
+                });
+    }
+
+    @Test
+    void testDirectReaderRuntimeExceptionsUsePaimonErrorCodes()
+    {
+        OrcDataSourceId orcDataSourceId = new OrcDataSourceId("memory://broken.orc");
+        IOException orcIo = new IOException("orc cursor failed");
+        IOException parquetIo = new IOException("parquet cursor failed");
+        TrinoException alreadyMapped = new TrinoException(NOT_SUPPORTED, "unsupported direct read");
+
+        assertThat(PaimonPageSourceProvider.handleOrcException(
+                orcDataSourceId,
+                new io.trino.orc.OrcCorruptionException(orcDataSourceId, "bad stripe")))
+                .hasFieldOrPropertyWithValue("errorCode", PAIMON_BAD_DATA.toErrorCode());
+        assertThat(PaimonPageSourceProvider.handleOrcException(orcDataSourceId, orcIo))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CURSOR_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to read ORC file: " + orcDataSourceId);
+                    assertThat(exception.getCause()).isSameAs(orcIo);
+                });
+        assertThat(PaimonPageSourceProvider.handleOrcException(orcDataSourceId, alreadyMapped)).isSameAs(alreadyMapped);
+
+        ParquetDataSourceId parquetDataSourceId = new ParquetDataSourceId("memory://broken.parquet");
+        assertThat(PaimonPageSourceProvider.handleParquetException(
+                parquetDataSourceId,
+                new ParquetCorruptionException(parquetDataSourceId, "bad row group")))
+                .hasFieldOrPropertyWithValue("errorCode", PAIMON_BAD_DATA.toErrorCode());
+        assertThat(PaimonPageSourceProvider.handleParquetException(parquetDataSourceId, parquetIo))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CURSOR_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to read Parquet file: " + parquetDataSourceId);
+                    assertThat(exception.getCause()).isSameAs(parquetIo);
+                });
+        assertThat(PaimonPageSourceProvider.handleParquetException(parquetDataSourceId, alreadyMapped)).isSameAs(alreadyMapped);
     }
 
     @Test
