@@ -906,6 +906,57 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testInsertOverwriteAppliesToFinishInsertOnly()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
+                overwriteEnabled);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        ConnectorSession overwriteSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE.name()))
+                .build();
+
+        assertThat(metadata.finishInsert(overwriteSession, tableHandle, List.of(commitFragment()), List.of()))
+                .isEmpty();
+
+        assertThat(overwriteEnabled).isTrue();
+        assertThat(committed).isTrue();
+    }
+
+    @Test
+    public void testInsertOverwriteDoesNotApplyToFinishMerge()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
+                overwriteEnabled);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        ConnectorSession overwriteSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE.name()))
+                .build();
+
+        metadata.finishMerge(overwriteSession, new PaimonMergeTableHandle(tableHandle), List.of(commitFragment()), List.of());
+
+        assertThat(overwriteEnabled).isFalse();
+        assertThat(committed).isTrue();
+    }
+
+    @Test
     public void testTruncateUsesLatestSchemaBeforeCreatingBatchWriteBuilder()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
@@ -3498,6 +3549,17 @@ public class PaimonMetadataTableModeTest
             AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
             RuntimeException commitFailure)
     {
+        return commitFileStoreTable(copiedWithLatestSchema, committed, copyWithoutTimeTravelOptions, commitFailure,
+                new AtomicBoolean());
+    }
+
+    private static FileStoreTable commitFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicBoolean committed,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            RuntimeException commitFailure,
+            AtomicBoolean overwriteEnabled)
+    {
         AtomicReference<FileStoreTable> latestTableRef = new AtomicReference<>();
         BatchTableCommit commit = (BatchTableCommit) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
@@ -3522,7 +3584,10 @@ public class PaimonMetadataTableModeTest
                 new Class<?>[] {BatchWriteBuilder.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "newCommit" -> commit;
-                    case "withOverwrite" -> proxy;
+                    case "withOverwrite" -> {
+                        overwriteEnabled.set(true);
+                        yield proxy;
+                    }
                     case "tableName" -> "testing";
                     case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
                     case "newWriteSelector" -> Optional.empty();

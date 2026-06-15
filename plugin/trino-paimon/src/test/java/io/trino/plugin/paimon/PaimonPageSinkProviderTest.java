@@ -17,12 +17,14 @@ import io.airlift.slice.Slices;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeSink;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextSearch;
@@ -225,6 +227,48 @@ public class PaimonPageSinkProviderTest
         assertThat(pageSink).isNotNull();
         assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
         assertThat(copiedWithLatestSchema).isTrue();
+    }
+
+    @Test
+    public void testInsertOverwriteAppliesToInsertPageSinkOnly()
+    {
+        AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
+                writeReadyFileStoreTable(new AtomicBoolean(), new AtomicReference<>(), overwriteEnabled)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())));
+        ConnectorSession overwriteSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE.name()))
+                .build();
+
+        ConnectorPageSink pageSink = provider.createPageSink(null, overwriteSession, (ConnectorInsertTableHandle) tableHandle, null);
+
+        assertThat(pageSink).isNotNull();
+        assertThat(overwriteEnabled).isTrue();
+    }
+
+    @Test
+    public void testInsertOverwriteDoesNotApplyToMergePageSink()
+    {
+        AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
+                writeReadyFileStoreTable(new AtomicBoolean(), new AtomicReference<>(), overwriteEnabled)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())));
+        ConnectorSession overwriteSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE.name()))
+                .build();
+
+        ConnectorMergeSink pageSink = provider.createMergeSink(null, overwriteSession, new PaimonMergeTableHandle(tableHandle), null);
+
+        assertThat(pageSink).isNotNull();
+        assertThat(overwriteEnabled).isFalse();
     }
 
     @Test
@@ -804,6 +848,14 @@ public class PaimonPageSinkProviderTest
             AtomicBoolean copiedWithLatestSchema,
             AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions)
     {
+        return writeReadyFileStoreTable(copiedWithLatestSchema, copyWithoutTimeTravelOptions, new AtomicBoolean());
+    }
+
+    private static FileStoreTable writeReadyFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            AtomicBoolean overwriteEnabled)
+    {
         org.apache.paimon.table.sink.BatchTableWrite writer = writer();
         org.apache.paimon.table.sink.BatchWriteBuilder batchWriteBuilder = (org.apache.paimon.table.sink.BatchWriteBuilder) Proxy
                 .newProxyInstance(
@@ -811,7 +863,10 @@ public class PaimonPageSinkProviderTest
                         new Class<?>[] {org.apache.paimon.table.sink.BatchWriteBuilder.class},
                         (proxy, method, args) -> switch (method.getName()) {
                             case "newWrite" -> writer;
-                            case "withOverwrite" -> proxy;
+                            case "withOverwrite" -> {
+                                overwriteEnabled.set(true);
+                                yield proxy;
+                            }
                             case "tableName" -> "testing";
                             case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
                             case "newWriteSelector" -> Optional.empty();

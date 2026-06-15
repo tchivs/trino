@@ -241,6 +241,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
     private Optional<ConnectorOutputMetadata> commit(ConnectorSession session, PaimonTableHandle insertHandle,
             Collection<Slice> fragments)
     {
+        return commit(session, insertHandle, fragments, true);
+    }
+
+    private Optional<ConnectorOutputMetadata> commit(ConnectorSession session, PaimonTableHandle insertHandle,
+            Collection<Slice> fragments, boolean enableOverwrite)
+    {
         requireNonNull(session, "session is null");
         List<Slice> fragmentsList = copyFragments(fragments);
         if (fragmentsList.isEmpty()) {
@@ -262,7 +268,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         FileStoreTable fileStoreTable = latestFileStoreTable(table.tableWithWriteDynamicOptions(sessionCatalog),
                 "commit writes");
         BatchWriteBuilder batchWriteBuilder = fileStoreTable.newBatchWriteBuilder();
-        if (PaimonSessionProperties.enableInsertOverwrite(session)) {
+        if (enableOverwrite && PaimonSessionProperties.enableInsertOverwrite(session)) {
             batchWriteBuilder.withOverwrite();
         }
         try (BatchTableCommit commit = batchWriteBuilder.newCommit()) {
@@ -391,7 +397,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle,
             Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
-        commit(session, getMergeTableHandle(mergeTableHandle), fragments);
+        commit(session, getMergeTableHandle(mergeTableHandle), fragments, false);
     }
 
     static PaimonTableHandle getOutputTableHandle(ConnectorOutputTableHandle tableHandle)

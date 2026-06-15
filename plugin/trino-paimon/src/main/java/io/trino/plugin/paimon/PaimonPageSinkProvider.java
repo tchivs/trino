@@ -115,7 +115,21 @@ public class PaimonPageSinkProvider
 
         validateWriteColumns(table, writeColumns);
         return runWithContextClassLoader(() -> createPageSink(table, session, getWriteColumnTypes(writeColumns),
-                getWriteLogicalTypes(writeColumns)),
+                getWriteLogicalTypes(writeColumns), true),
+                PaimonPageSinkProvider.class.getClassLoader());
+    }
+
+    private ConnectorPageSink createMergePageSink(PaimonTableHandle tableHandle, ConnectorSession session)
+    {
+        requireNonNull(session, "session is null");
+        List<PaimonColumnHandle> writeColumns = getWriteColumns(tableHandle);
+        Catalog catalog = paimonCatalog.forSession(session);
+        FileStoreTable table = latestFileStoreTable(tableHandle.tableWithWriteDynamicOptions(catalog),
+                "merge writes");
+        validateMergeBucketMode(table);
+        validateMergeWriteColumns(table, writeColumns);
+        return runWithContextClassLoader(() -> createPageSink(table, session, getWriteColumnTypes(writeColumns),
+                getWriteLogicalTypes(writeColumns), false),
                 PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -243,10 +257,10 @@ public class PaimonPageSinkProvider
     }
 
     private PaimonPageSink createPageSink(FileStoreTable table, ConnectorSession session, List<Type> columnTypes,
-            List<DataType> logicalTypes)
+            List<DataType> logicalTypes, boolean enableOverwrite)
     {
         BatchWriteBuilder batchWriteBuilder = table.newBatchWriteBuilder();
-        if (PaimonSessionProperties.enableInsertOverwrite(session)) {
+        if (enableOverwrite && PaimonSessionProperties.enableInsertOverwrite(session)) {
             batchWriteBuilder.withOverwrite();
         }
         BatchTableWrite write = batchWriteBuilder.newWrite();
@@ -259,16 +273,10 @@ public class PaimonPageSinkProvider
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getMergeTableHandle(mergeHandle);
-        List<PaimonColumnHandle> writeColumns = getWriteColumns(paimonTableHandle);
-        Catalog catalog = paimonCatalog.forSession(session);
-        FileStoreTable table = latestFileStoreTable(paimonTableHandle.tableWithWriteDynamicOptions(catalog),
-                "merge writes");
-        validateMergeBucketMode(table);
-        validateMergeWriteColumns(table, writeColumns);
-
+        int dataColumnCount = getWriteColumns(paimonTableHandle).size();
         return runWithContextClassLoader(() -> new PaimonMergeSink(
-                createPageSink(table, session, getWriteColumnTypes(writeColumns), getWriteLogicalTypes(writeColumns)),
-                table.rowType().getFields().size()), PaimonPageSinkProvider.class.getClassLoader());
+                createMergePageSink(paimonTableHandle, session),
+                dataColumnCount), PaimonPageSinkProvider.class.getClassLoader());
     }
 
     static PaimonTableHandle getMergeTableHandle(ConnectorMergeTableHandle mergeHandle)
