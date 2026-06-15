@@ -681,7 +681,7 @@ public class PaimonPageSourceProvider
         requireNonNull(tableHandle, "tableHandle is null");
         // Incremental window reads back the system.table_changes contract. Keep them on Paimon's
         // reader path until the raw-file fast path is explicitly validated for those semantics.
-        return !tableHandle.hasIncrementalReadWindow() && canUseTrinoPageSource(rawFiles, columns);
+        return !tableHandle.hasIncrementalReadMode() && canUseTrinoPageSource(rawFiles, columns);
     }
 
     // Support ORC and Parquet direct reads. Other formats, including Avro, fall back to Paimon's reader.

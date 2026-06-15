@@ -348,6 +348,35 @@ public class DynamicFilteringTrinoSplitSourceTest
     }
 
     @Test
+    public void testDynamicAutoTagTableChangesSplitPlanningMapsUnsupportedReadFeaturesToNotSupported()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, unsupportedPlanningTable());
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Map.of(org.apache.paimon.CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04"),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.empty()),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                dynamicFilter(TupleDomain.all(), false),
+                new Duration(0, MILLISECONDS));
+
+        assertThatThrownBy(() -> splitSource.getNextBatch(100))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon system.table_changes uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage("unsupported scan mode");
+                });
+    }
+
+    @Test
     public void testDynamicSplitPlanningMapsWrappedRuntimeIoFailuresToCannotOpenSplit()
     {
         RecordingCatalog catalog = new RecordingCatalog(false, failingPlanningTable("dynamic split planning failed"));
@@ -402,6 +431,35 @@ public class DynamicFilteringTrinoSplitSourceTest
                     assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits");
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("dynamic table_changes planning failed");
+                });
+    }
+
+    @Test
+    public void testDynamicAutoTagTableChangesSplitPlanningMapsWrappedRuntimeIoFailuresToCannotOpenSplit()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, failingPlanningTable("dynamic auto-tag table_changes planning failed"));
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Map.of(org.apache.paimon.CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04"),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.empty()),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                dynamicFilter(TupleDomain.all(), false),
+                new Duration(0, MILLISECONDS));
+
+        assertThatThrownBy(() -> splitSource.getNextBatch(100))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class)
+                            .hasMessage("dynamic auto-tag table_changes planning failed");
                 });
     }
 

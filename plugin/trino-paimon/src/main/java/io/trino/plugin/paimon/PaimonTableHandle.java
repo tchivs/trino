@@ -32,6 +32,8 @@ import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.options.ConfigOption;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.Table;
@@ -65,6 +67,10 @@ public class PaimonTableHandle
         ConnectorTableFunctionHandle
 {
     static final String UNSUPPORTED_HISTORICAL_READ_MESSAGE = "Paimon system tables do not support historical reads";
+    private static final Set<String> INCREMENTAL_READ_OPTION_KEYS = Set.of(
+            CoreOptions.INCREMENTAL_BETWEEN.key(),
+            CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
+            CoreOptions.INCREMENTAL_TO_AUTO_TAG.key());
     private static final Set<String> EXPLICIT_STARTUP_OPTION_KEYS = Set.of(
             CoreOptions.SCAN_VERSION.key(),
             CoreOptions.SCAN_SNAPSHOT_ID.key(),
@@ -73,7 +79,20 @@ public class PaimonTableHandle
             CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
             CoreOptions.SCAN_WATERMARK.key(),
             CoreOptions.INCREMENTAL_BETWEEN.key(),
-            CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key());
+            CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
+            CoreOptions.INCREMENTAL_TO_AUTO_TAG.key());
+    private static final Set<String> READ_ONLY_DYNAMIC_OPTION_KEYS = Set.of(
+            CoreOptions.SCAN_VERSION.key(),
+            CoreOptions.SCAN_SNAPSHOT_ID.key(),
+            CoreOptions.SCAN_TAG_NAME.key(),
+            CoreOptions.SCAN_TIMESTAMP.key(),
+            CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
+            CoreOptions.SCAN_WATERMARK.key(),
+            CoreOptions.INCREMENTAL_BETWEEN.key(),
+            CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
+            CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(),
+            CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(),
+            CoreOptions.INCREMENTAL_TO_AUTO_TAG.key());
     private static final Set<String> HISTORICAL_READ_OPTION_KEYS = Set.of(
             CoreOptions.SCAN_VERSION.key(),
             CoreOptions.SCAN_SNAPSHOT_ID.key(),
@@ -128,6 +147,53 @@ public class PaimonTableHandle
             checkArgument(!value.isBlank(), "dynamicOptions contains blank value for key '%s'".formatted(key));
         });
         return Map.copyOf(dynamicOptions);
+    }
+
+    private static void validateDynamicOptionsSemantics(Map<String, String> dynamicOptions)
+    {
+        requireNonNull(dynamicOptions, "dynamicOptions is null");
+
+        List<String> startupSelections = EXPLICIT_STARTUP_OPTION_KEYS.stream()
+                .filter(dynamicOptions::containsKey)
+                .sorted()
+                .toList();
+        checkArgument(startupSelections.size() <= 1,
+                "dynamicOptions may contain only one startup selection, got keys: %s",
+                startupSelections);
+
+        String incrementalBetweenScanMode = dynamicOptions.get(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key());
+        if (incrementalBetweenScanMode != null) {
+            checkArgument(
+                    dynamicOptions.containsKey(CoreOptions.INCREMENTAL_BETWEEN.key())
+                            || dynamicOptions.containsKey(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key()),
+                    "dynamicOptions key '%s' requires '%s' or '%s'",
+                    CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(),
+                    CoreOptions.INCREMENTAL_BETWEEN.key(),
+                    CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key());
+            validateDynamicOptionValue(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE, incrementalBetweenScanMode);
+        }
+
+        String incrementalBetweenTagToSnapshot = dynamicOptions.get(CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key());
+        if (incrementalBetweenTagToSnapshot != null) {
+            checkArgument(
+                    dynamicOptions.containsKey(CoreOptions.INCREMENTAL_BETWEEN.key()),
+                    "dynamicOptions key '%s' requires '%s'",
+                    CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(),
+                    CoreOptions.INCREMENTAL_BETWEEN.key());
+            validateDynamicOptionValue(CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT, incrementalBetweenTagToSnapshot);
+        }
+    }
+
+    private static <T> void validateDynamicOptionValue(ConfigOption<T> option, String value)
+    {
+        requireNonNull(option, "option is null");
+        requireNonNull(value, "value is null");
+        try {
+            Options.fromMap(Map.of(option.key(), value)).get(option);
+        }
+        catch (RuntimeException e) {
+            throw new IllegalArgumentException("dynamicOptions contains invalid value for key '%s'".formatted(option.key()), e);
+        }
     }
 
     private static Optional<List<PaimonColumnHandle>> copyColumnHandles(
@@ -227,10 +293,9 @@ public class PaimonTableHandle
         return HISTORICAL_READ_OPTION_KEYS.stream().anyMatch(dynamicOptions::containsKey);
     }
 
-    boolean hasIncrementalReadWindow()
+    boolean hasIncrementalReadMode()
     {
-        return dynamicOptions.containsKey(CoreOptions.INCREMENTAL_BETWEEN.key())
-                || dynamicOptions.containsKey(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key());
+        return INCREMENTAL_READ_OPTION_KEYS.stream().anyMatch(dynamicOptions::containsKey);
     }
 
     public Table tableWithWriteDynamicOptions(Catalog catalog)
@@ -242,7 +307,7 @@ public class PaimonTableHandle
         }
 
         Map<String, String> dynamicOptions = new HashMap<>(this.dynamicOptions);
-        EXPLICIT_STARTUP_OPTION_KEYS.forEach(dynamicOptions::remove);
+        READ_ONLY_DYNAMIC_OPTION_KEYS.forEach(dynamicOptions::remove);
         return requireSupportedTable(!dynamicOptions.isEmpty()
                 ? fileStoreTable.copyWithoutTimeTravel(dynamicOptions)
                 : fileStoreTable);
@@ -281,6 +346,7 @@ public class PaimonTableHandle
                 dynamicOptions.put(CoreOptions.SCAN_TAG_NAME.key(), scanTagName);
             }
         }
+        validateDynamicOptionsSemantics(dynamicOptions);
         return dynamicOptions;
     }
 

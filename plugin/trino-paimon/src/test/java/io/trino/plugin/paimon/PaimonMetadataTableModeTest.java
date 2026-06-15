@@ -924,7 +924,9 @@ public class PaimonMetadataTableModeTest
                 Map.of(
                         "custom.option", "value",
                         CoreOptions.SCAN_VERSION.key(), "tag-1",
-                        CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"));
+                        CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2",
+                        CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "delta",
+                        CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(), "true"));
         ConnectorSession session = TestingConnectorSession.builder()
                 .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
                 .setPropertyValues(Map.of(SCAN_SNAPSHOT, 9L))

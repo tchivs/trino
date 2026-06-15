@@ -349,6 +349,19 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testIncrementalAutoTagReadsFallBackFromDirectPageSource()
+    {
+        List<RawFile> rawFiles = List.of(rawFile("orc"));
+        List<PaimonColumnHandle> columns = List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT()));
+        PaimonTableHandle incrementalAutoTagHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(org.apache.paimon.CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04"));
+
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(incrementalAutoTagHandle, rawFiles, columns)).isFalse();
+    }
+
+    @Test
     void testUnsupportedRawFileFormatsFallBackFromDirectPageSource()
     {
         assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(), List.of(

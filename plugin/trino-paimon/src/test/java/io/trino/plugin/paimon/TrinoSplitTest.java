@@ -461,6 +461,29 @@ public class TrinoSplitTest
     }
 
     @Test
+    public void testAutoTagTableChangesSplitPlanningMapsUnsupportedReadFeaturesToNotSupported()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, unsupportedPlanningTable());
+        PaimonSplitManager splitManager = splitManager(catalog);
+        PaimonTableHandle tableChangesHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(org.apache.paimon.CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04"),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThatThrownBy(() -> splitManager.getSplits(null, SESSION, tableChangesHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon system.table_changes uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage("unsupported scan mode");
+                });
+    }
+
+    @Test
     public void testSplitPlanningMapsWrappedRuntimeIoFailuresToCannotOpenSplit()
     {
         RecordingCatalog catalog = new RecordingCatalog(false, failingPlanningTable("split planning failed"));
@@ -500,6 +523,29 @@ public class TrinoSplitTest
                     assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits");
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("table_changes planning failed");
+                });
+    }
+
+    @Test
+    public void testAutoTagTableChangesSplitPlanningMapsWrappedRuntimeIoFailuresToCannotOpenSplit()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, failingPlanningTable("auto-tag table_changes planning failed"));
+        PaimonSplitManager splitManager = splitManager(catalog);
+        PaimonTableHandle tableChangesHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(org.apache.paimon.CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04"),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThatThrownBy(() -> splitManager.getSplits(null, SESSION, tableChangesHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class)
+                            .hasMessage("auto-tag table_changes planning failed");
                 });
     }
 

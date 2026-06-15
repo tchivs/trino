@@ -178,7 +178,7 @@ public class PaimonSplitManager
         requireNonNull(tableHandle, "tableHandle is null");
         requireNonNull(cause, "cause is null");
 
-        String message = tableHandle.hasIncrementalReadWindow()
+        String message = tableHandle.hasIncrementalReadMode()
                 ? "Paimon system.table_changes uses features which are not supported by the Trino connector"
                 : "Paimon table read uses features which are not supported by the Trino connector";
         return new TrinoException(NOT_SUPPORTED, message, cause);
@@ -189,7 +189,7 @@ public class PaimonSplitManager
         requireNonNull(tableHandle, "tableHandle is null");
         requireNonNull(cause, "cause is null");
 
-        String message = tableHandle.hasIncrementalReadWindow()
+        String message = tableHandle.hasIncrementalReadMode()
                 ? "Failed to plan Paimon table_changes splits"
                 : "Failed to plan Paimon splits";
         return PaimonPageSourceProvider.wrapPaimonReadException(message, cause);
