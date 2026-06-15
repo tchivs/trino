@@ -35,6 +35,7 @@ import io.trino.spi.connector.PointerType;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
@@ -73,6 +74,7 @@ import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -493,6 +495,138 @@ public class PaimonMetadataTableModeTest
 
         assertThat(columnMetadata).isEqualTo(staleColumnHandle.getColumnMetadata());
         assertThat(copiedWithLatestSchema).isTrue();
+    }
+
+    @Test
+    public void testGetColumnHandlesMapsColumnNamesToHandles()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(SESSION, tableHandle);
+
+        assertThat(columnHandles).hasSize(1);
+        assertThat(columnHandles).containsKey("id");
+        assertThat(columnHandles.get("id")).isInstanceOf(PaimonColumnHandle.class);
+        assertThat(((PaimonColumnHandle) columnHandles.get("id")).getColumnName()).isEqualTo("id");
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testGetTableMetadata()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        ConnectorTableMetadata tableMetadata = metadata.getTableMetadata(SESSION, tableHandle);
+
+        assertThat(tableMetadata.getTable()).isEqualTo(new SchemaTableName("schema", "table"));
+        assertThat(tableMetadata.getColumns()).extracting(ColumnMetadata::getName).containsExactly("id");
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testGetTablePropertiesReturnsEmptyProperties()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        io.trino.spi.connector.ConnectorTableProperties properties = metadata.getTableProperties(SESSION, tableHandle);
+
+        assertThat(properties).isNotNull();
+    }
+
+    @Test
+    public void testBeginInsertReturnsHandleWithWriteColumns()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+
+        ConnectorInsertTableHandle insertHandle = metadata.beginInsert(SESSION, tableHandle, List.of(id), RetryMode.NO_RETRIES);
+
+        assertThat(insertHandle).isInstanceOf(PaimonTableHandle.class);
+        PaimonTableHandle result = (PaimonTableHandle) insertHandle;
+        assertThat(result.getWriteColumns()).hasValueSatisfying(writeColumns ->
+                assertThat(writeColumns).extracting(PaimonColumnHandle::getColumnName).containsExactly("id"));
+    }
+
+    @Test
+    public void testListTableColumnsSkipsMissingTables()
+    {
+        PaimonCatalog catalog = new PaimonCatalog(new Options(), unsupportedFileSystemFactory()) {
+            @Override
+            public void initSession(ConnectorSession connectorSession) {}
+
+            @Override
+            public Catalog forSession(ConnectorSession connectorSession)
+            {
+                return this;
+            }
+
+            @Override
+            public List<String> listTables(String databaseName)
+            {
+                return List.of("existing", "missing");
+            }
+
+            @Override
+            public Table getTable(Identifier identifier)
+                    throws Catalog.TableNotExistException
+            {
+                if (identifier.getObjectName().equals("missing")) {
+                    throw new Catalog.TableNotExistException(identifier);
+                }
+                return fileStoreTable(BucketMode.HASH_FIXED);
+            }
+        };
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        Map<SchemaTableName, List<ColumnMetadata>> columns = metadata.listTableColumns(SESSION, new SchemaTablePrefix("schema"));
+
+        assertThat(columns).hasSize(1);
+        assertThat(columns).containsKey(new SchemaTableName("schema", "existing"));
+    }
+
+    @Test
+    public void testStreamTableColumns()
+    {
+        PaimonCatalog catalog = new PaimonCatalog(new Options(), unsupportedFileSystemFactory()) {
+            @Override
+            public void initSession(ConnectorSession connectorSession) {}
+
+            @Override
+            public Catalog forSession(ConnectorSession connectorSession)
+            {
+                return this;
+            }
+
+            @Override
+            public List<String> listTables(String databaseName)
+            {
+                return List.of("table");
+            }
+
+            @Override
+            public Table getTable(Identifier identifier)
+            {
+                return fileStoreTable(BucketMode.HASH_FIXED);
+            }
+        };
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        Iterator<TableColumnsMetadata> columns = metadata.streamTableColumns(SESSION, new SchemaTablePrefix("schema"));
+
+        assertThat(columns.hasNext()).isTrue();
+        TableColumnsMetadata tableColumns = columns.next();
+        assertThat(tableColumns.getTable()).isEqualTo(new SchemaTableName("schema", "table"));
+        assertThat(tableColumns.getColumns()).hasValueSatisfying(list ->
+                assertThat(list).extracting(ColumnMetadata::getName).containsExactly("id"));
+        assertThat(columns.hasNext()).isFalse();
     }
 
     @Test
@@ -2908,6 +3042,7 @@ public class PaimonMetadataTableModeTest
                     case "rowType" -> rowType;
                     case "partitionKeys" -> partitionKeys;
                     case "primaryKeys" -> primaryKeys;
+                    case "comment" -> Optional.empty();
                     case "coreOptions" -> new CoreOptions(new Options(Map.of()));
                     case "schema" -> TableSchema.create(1, new Schema(
                             rowType.getFields(),
