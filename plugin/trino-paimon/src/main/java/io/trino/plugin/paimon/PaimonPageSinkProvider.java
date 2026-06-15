@@ -93,7 +93,7 @@ public class PaimonPageSinkProvider
             ConnectorOutputTableHandle outputTableHandle, ConnectorPageSinkId pageSinkId)
     {
         requireNonNull(session, "session is null");
-        return createPageSink(getOutputTableHandle(outputTableHandle), session);
+        return createOutputPageSink(getOutputTableHandle(outputTableHandle), session);
     }
 
     @Override
@@ -101,10 +101,10 @@ public class PaimonPageSinkProvider
             ConnectorInsertTableHandle insertTableHandle, ConnectorPageSinkId pageSinkId)
     {
         requireNonNull(session, "session is null");
-        return createPageSink(getInsertTableHandle(insertTableHandle), session);
+        return createInsertPageSink(getInsertTableHandle(insertTableHandle), session);
     }
 
-    private ConnectorPageSink createPageSink(PaimonTableHandle tableHandle, ConnectorSession session)
+    private ConnectorPageSink createOutputPageSink(PaimonTableHandle tableHandle, ConnectorSession session)
     {
         requireNonNull(session, "session is null");
         List<PaimonColumnHandle> writeColumns = getWriteColumns(tableHandle);
@@ -114,8 +114,26 @@ public class PaimonPageSinkProvider
         validateWriteBucketMode(table);
 
         validateWriteColumns(table, writeColumns);
-        return runWithContextClassLoader(() -> createPageSink(table, session, getWriteColumnTypes(writeColumns),
-                getWriteLogicalTypes(writeColumns), true),
+        return runWithContextClassLoader(() -> createPageSink(table, false, getWriteColumnTypes(writeColumns),
+                getWriteLogicalTypes(writeColumns)),
+                PaimonPageSinkProvider.class.getClassLoader());
+    }
+
+    private ConnectorPageSink createInsertPageSink(PaimonTableHandle tableHandle, ConnectorSession session)
+    {
+        requireNonNull(session, "session is null");
+        List<PaimonColumnHandle> writeColumns = getWriteColumns(tableHandle);
+        Catalog catalog = paimonCatalog.forSession(session);
+        FileStoreTable table = latestFileStoreTable(tableHandle.tableWithWriteDynamicOptions(catalog),
+                "writes");
+        validateWriteBucketMode(table);
+        validateWriteColumns(table, writeColumns);
+        boolean overwrite = PaimonSessionProperties.enableInsertOverwrite(session);
+        if (overwrite) {
+            PaimonTableSupport.validateInsertOverwrite(table);
+        }
+        return runWithContextClassLoader(() -> createPageSink(table, overwrite, getWriteColumnTypes(writeColumns),
+                getWriteLogicalTypes(writeColumns)),
                 PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -128,8 +146,8 @@ public class PaimonPageSinkProvider
                 "merge writes");
         validateMergeBucketMode(table);
         validateMergeWriteColumns(table, writeColumns);
-        return runWithContextClassLoader(() -> createPageSink(table, session, getWriteColumnTypes(writeColumns),
-                getWriteLogicalTypes(writeColumns), false),
+        return runWithContextClassLoader(() -> createPageSink(table, false, getWriteColumnTypes(writeColumns),
+                getWriteLogicalTypes(writeColumns)),
                 PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -256,11 +274,11 @@ public class PaimonPageSinkProvider
         }
     }
 
-    private PaimonPageSink createPageSink(FileStoreTable table, ConnectorSession session, List<Type> columnTypes,
-            List<DataType> logicalTypes, boolean enableOverwrite)
+    private PaimonPageSink createPageSink(FileStoreTable table, boolean overwrite, List<Type> columnTypes,
+            List<DataType> logicalTypes)
     {
         BatchWriteBuilder batchWriteBuilder = table.newBatchWriteBuilder();
-        if (enableOverwrite && PaimonSessionProperties.enableInsertOverwrite(session)) {
+        if (overwrite) {
             batchWriteBuilder.withOverwrite();
         }
         BatchTableWrite write = batchWriteBuilder.newWrite();

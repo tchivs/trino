@@ -102,10 +102,14 @@ public class PaimonSessionProperties
         return session.getProperty(MINIMUM_SPLIT_WEIGHT, Double.class);
     }
 
+    public static InsertExistingPartitionsBehavior getInsertExistingPartitionsBehavior(ConnectorSession session)
+    {
+        return session.getProperty(INSERT_EXISTING_PARTITIONS_BEHAVIOR, InsertExistingPartitionsBehavior.class);
+    }
+
     public static boolean enableInsertOverwrite(ConnectorSession session)
     {
-        return session.getProperty(INSERT_EXISTING_PARTITIONS_BEHAVIOR,
-                InsertExistingPartitionsBehavior.class) == InsertExistingPartitionsBehavior.OVERWRITE;
+        return getInsertExistingPartitionsBehavior(session) == InsertExistingPartitionsBehavior.OVERWRITE;
     }
 
     public static Duration getDynamicFilteringWaitTimeout(ConnectorSession session)

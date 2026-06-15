@@ -49,8 +49,10 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataIncrement;
+import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
@@ -96,6 +98,7 @@ import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.READ_ONLY_VIOLATION;
 import static io.trino.spi.StandardErrorCode.SCHEMA_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
@@ -954,6 +957,131 @@ public class PaimonMetadataTableModeTest
 
         assertThat(overwriteEnabled).isFalse();
         assertThat(committed).isTrue();
+    }
+
+    @Test
+    public void testInsertErrorRejectsExistingNonPartitionedTable()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                new AtomicReference<>(),
+                null,
+                new AtomicBoolean(),
+                List.of(new PartitionEntry(BinaryRow.EMPTY_ROW, 1, 1, 1, 1, 1)),
+                List.of(),
+                Map.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        ConnectorSession errorSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR.name()))
+                .build();
+        Slice fragment = commitFragment();
+
+        assertTrinoError(() -> metadata.finishInsert(errorSession, new PaimonTableHandle("schema", "table", Map.of()),
+                        List.of(fragment), List.of()),
+                READ_ONLY_VIOLATION.toErrorCode(),
+                "Cannot insert into an existing non-partitioned Paimon table: schema.table");
+        assertThat(committed).isFalse();
+    }
+
+    @Test
+    public void testInsertErrorRejectsExistingPartition()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        BinaryRow partition = partitionRow("p1");
+        FileStoreTable table = commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                new AtomicReference<>(),
+                null,
+                new AtomicBoolean(),
+                List.of(new PartitionEntry(partition, 1, 1, 1, 1, 1)),
+                List.of("pt"),
+                Map.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        ConnectorSession errorSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR.name()))
+                .build();
+        Slice fragment = commitFragment(partition);
+
+        assertTrinoError(() -> metadata.finishInsert(errorSession, new PaimonTableHandle("schema", "table", Map.of()),
+                        List.of(fragment), List.of()),
+                READ_ONLY_VIOLATION.toErrorCode(),
+                "Cannot insert into an existing partition of Paimon table: schema.table");
+        assertThat(committed).isFalse();
+    }
+
+    @Test
+    public void testInsertErrorAllowsNewPartition()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                new AtomicReference<>(),
+                null,
+                new AtomicBoolean(),
+                List.of(new PartitionEntry(partitionRow("p1"), 1, 1, 1, 1, 1)),
+                List.of("pt"),
+                Map.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        ConnectorSession errorSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR.name()))
+                .build();
+        Slice fragment = commitFragment(partitionRow("p2"));
+
+        assertThat(metadata.finishInsert(errorSession, new PaimonTableHandle("schema", "table", Map.of()),
+                List.of(fragment), List.of())).isEmpty();
+        assertThat(committed).isTrue();
+    }
+
+    @Test
+    public void testInsertOverwriteRejectsPartitionedTableWithoutDynamicPartitionOverwrite()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                new AtomicReference<>(),
+                null,
+                overwriteEnabled,
+                List.of(),
+                List.of("pt"),
+                Map.of(CoreOptions.DYNAMIC_PARTITION_OVERWRITE.key(), "false"));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        ConnectorSession overwriteSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE.name()))
+                .build();
+        Slice fragment = commitFragment(partitionRow("p1"));
+
+        assertTrinoError(() -> metadata.finishInsert(overwriteSession, new PaimonTableHandle("schema", "table", Map.of()),
+                        List.of(fragment), List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon insert overwrite requires dynamic-partition-overwrite=true for partitioned tables");
+        assertThat(overwriteEnabled).isFalse();
+        assertThat(committed).isFalse();
     }
 
     @Test
@@ -3560,7 +3688,36 @@ public class PaimonMetadataTableModeTest
             RuntimeException commitFailure,
             AtomicBoolean overwriteEnabled)
     {
+        return commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                copyWithoutTimeTravelOptions,
+                commitFailure,
+                overwriteEnabled,
+                List.of(),
+                List.of(),
+                Map.of());
+    }
+
+    private static FileStoreTable commitFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicBoolean committed,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            RuntimeException commitFailure,
+            AtomicBoolean overwriteEnabled,
+            List<PartitionEntry> existingPartitions,
+            List<String> partitionKeys,
+            Map<String, String> options)
+    {
         AtomicReference<FileStoreTable> latestTableRef = new AtomicReference<>();
+        Object snapshotReader = Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {org.apache.paimon.table.source.snapshot.SnapshotReader.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "partitionEntries" -> existingPartitions;
+                    case "toString" -> "testing-snapshot-reader";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
         BatchTableCommit commit = (BatchTableCommit) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
                 new Class<?>[] {BatchTableCommit.class},
@@ -3599,6 +3756,15 @@ public class PaimonMetadataTableModeTest
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "newBatchWriteBuilder" -> batchWriteBuilder;
+                    case "newSnapshotReader" -> snapshotReader;
+                    case "partitionKeys" -> partitionKeys;
+                    case "coreOptions" -> new CoreOptions(new Options(options));
+                    case "schema" -> TableSchema.create(1, new Schema(
+                            DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())).getFields(),
+                            partitionKeys,
+                            List.of(),
+                            options,
+                            ""));
                     case "copyWithLatestSchema" -> {
                         copiedWithLatestSchema.set(true);
                         yield proxy;
@@ -3625,6 +3791,15 @@ public class PaimonMetadataTableModeTest
                         copyWithoutTimeTravelOptions.set(Map.copyOf((Map<String, String>) args[0]));
                         yield latestTableRef.get();
                     }
+                    case "partitionKeys" -> partitionKeys;
+                    case "coreOptions" -> new CoreOptions(new Options(options));
+                    case "schema" -> TableSchema.create(1, new Schema(
+                            DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())).getFields(),
+                            partitionKeys,
+                            List.of(),
+                            options,
+                            ""));
+                    case "newSnapshotReader" -> snapshotReader;
                     case "newBatchWriteBuilder" -> throw new AssertionError(
                             "stale FileStoreTable should not create BatchWriteBuilder before latest-schema refresh");
                     case "toString" -> "stale-testing-file-store-table";
@@ -3807,13 +3982,25 @@ public class PaimonMetadataTableModeTest
     private static Slice commitFragment()
             throws IOException
     {
+        return commitFragment(BinaryRow.EMPTY_ROW);
+    }
+
+    private static Slice commitFragment(BinaryRow partition)
+            throws IOException
+    {
         CommitMessageSerializer serializer = new CommitMessageSerializer();
         return Slices.wrappedBuffer(serializer.serialize(new CommitMessageImpl(
-                BinaryRow.EMPTY_ROW,
+                partition,
                 0,
                 null,
                 DataIncrement.emptyIncrement(),
                 CompactIncrement.emptyIncrement())));
+    }
+
+    private static BinaryRow partitionRow(String value)
+    {
+        return new InternalRowSerializer(DataTypes.ROW(DataTypes.FIELD(0, "pt", DataTypes.STRING())))
+                .toBinaryRow(org.apache.paimon.data.GenericRow.of(org.apache.paimon.data.BinaryString.fromString(value)));
     }
 
     private static ConnectorMergeTableHandle mergeTableHandle(ConnectorTableHandle tableHandle)

@@ -49,4 +49,12 @@ public final class PaimonTableSupport
         }
         return fileStoreTable;
     }
+
+    public static void validateInsertOverwrite(FileStoreTable table)
+    {
+        if (!table.partitionKeys().isEmpty() && !table.coreOptions().dynamicPartitionOverwrite()) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon insert overwrite requires dynamic-partition-overwrite=true for partitioned tables");
+        }
+    }
 }

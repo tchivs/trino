@@ -53,7 +53,9 @@ import io.trino.spi.type.VarcharType;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.table.BucketMode;
@@ -92,6 +94,7 @@ import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.READ_ONLY_VIOLATION;
 import static io.trino.spi.StandardErrorCode.SCHEMA_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
@@ -209,7 +212,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
             ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments,
             Collection<ComputedStatistics> computedStatistics)
     {
-        return commit(session, getOutputTableHandle(tableHandle), fragments);
+        return commit(session, getOutputTableHandle(tableHandle), fragments,
+                PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND);
     }
 
     @Override
@@ -235,44 +239,43 @@ public record PaimonMetadata(PaimonCatalog catalog,
             ConnectorInsertTableHandle insertHandle, List<ConnectorTableHandle> sourceTableHandles,
             Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
-        return commit(session, getInsertTableHandle(insertHandle), fragments);
+        requireNonNull(session, "session is null");
+        return commit(session, getInsertTableHandle(insertHandle), fragments,
+                PaimonSessionProperties.getInsertExistingPartitionsBehavior(session));
     }
 
-    private Optional<ConnectorOutputMetadata> commit(ConnectorSession session, PaimonTableHandle insertHandle,
-            Collection<Slice> fragments)
-    {
-        return commit(session, insertHandle, fragments, true);
-    }
-
-    private Optional<ConnectorOutputMetadata> commit(ConnectorSession session, PaimonTableHandle insertHandle,
-            Collection<Slice> fragments, boolean enableOverwrite)
+    private Optional<ConnectorOutputMetadata> commit(
+            ConnectorSession session,
+            PaimonTableHandle tableHandle,
+            Collection<Slice> fragments,
+            PaimonSessionProperties.InsertExistingPartitionsBehavior insertBehavior)
     {
         requireNonNull(session, "session is null");
+        requireNonNull(insertBehavior, "insertBehavior is null");
         List<Slice> fragmentsList = copyFragments(fragments);
         if (fragmentsList.isEmpty()) {
             return Optional.empty();
         }
 
-        CommitMessageSerializer serializer = new CommitMessageSerializer();
-        List<CommitMessage> commitMessages = fragmentsList.stream().map(slice -> {
-            try {
-                return serializer.deserialize(serializer.getVersion(), slice.getBytes());
-            }
-            catch (IOException e) {
-                throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to deserialize Paimon commit fragment", e);
-            }
-        }).collect(toList());
-
+        List<CommitMessage> commitMessages = deserializeCommitMessages(fragmentsList);
         Catalog sessionCatalog = catalog.forSession(session);
-        PaimonTableHandle table = insertHandle;
-        FileStoreTable fileStoreTable = latestFileStoreTable(table.tableWithWriteDynamicOptions(sessionCatalog),
+        FileStoreTable fileStoreTable = latestFileStoreTable(tableHandle.tableWithWriteDynamicOptions(sessionCatalog),
                 "commit writes");
-        BatchWriteBuilder batchWriteBuilder = fileStoreTable.newBatchWriteBuilder();
-        if (enableOverwrite && PaimonSessionProperties.enableInsertOverwrite(session)) {
-            batchWriteBuilder.withOverwrite();
-        }
-        try (BatchTableCommit commit = batchWriteBuilder.newCommit()) {
-            commit.commit(commitMessages);
+
+        try {
+            if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR) {
+                validateInsertTargetIsNew(fileStoreTable, schemaTableName(tableHandle), commitMessages);
+            }
+
+            BatchWriteBuilder batchWriteBuilder = fileStoreTable.newBatchWriteBuilder();
+            if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE) {
+                PaimonTableSupport.validateInsertOverwrite(fileStoreTable);
+                batchWriteBuilder.withOverwrite();
+            }
+
+            try (BatchTableCommit commit = batchWriteBuilder.newCommit()) {
+                commit.commit(commitMessages);
+            }
         }
         catch (Exception e) {
             if (e instanceof TrinoException trinoException) {
@@ -287,6 +290,45 @@ public record PaimonMetadata(PaimonCatalog catalog,
             throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to commit Paimon write fragments", e);
         }
         return Optional.empty();
+    }
+
+    private static List<CommitMessage> deserializeCommitMessages(List<Slice> fragments)
+    {
+        CommitMessageSerializer serializer = new CommitMessageSerializer();
+        return fragments.stream().map(slice -> {
+            try {
+                return serializer.deserialize(serializer.getVersion(), slice.getBytes());
+            }
+            catch (IOException e) {
+                throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to deserialize Paimon commit fragment", e);
+            }
+        }).collect(toList());
+    }
+
+    private static void validateInsertTargetIsNew(
+            FileStoreTable fileStoreTable,
+            SchemaTableName tableName,
+            List<CommitMessage> commitMessages)
+    {
+        Set<BinaryRow> existingPartitions = fileStoreTable.newSnapshotReader().partitionEntries().stream()
+                .map(PartitionEntry::partition)
+                .collect(Collectors.toSet());
+        if (existingPartitions.isEmpty()) {
+            return;
+        }
+
+        if (fileStoreTable.partitionKeys().isEmpty()) {
+            throw new TrinoException(READ_ONLY_VIOLATION,
+                    format("Cannot insert into an existing non-partitioned Paimon table: %s", tableName));
+        }
+
+        boolean writesExistingPartition = commitMessages.stream()
+                .map(CommitMessage::partition)
+                .anyMatch(existingPartitions::contains);
+        if (writesExistingPartition) {
+            throw new TrinoException(READ_ONLY_VIOLATION,
+                    format("Cannot insert into an existing partition of Paimon table: %s", tableName));
+        }
     }
 
     private static List<Slice> copyFragments(Collection<Slice> fragments)
@@ -397,7 +439,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle,
             Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
-        commit(session, getMergeTableHandle(mergeTableHandle), fragments, false);
+        commit(session, getMergeTableHandle(mergeTableHandle), fragments,
+                PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND);
     }
 
     static PaimonTableHandle getOutputTableHandle(ConnectorOutputTableHandle tableHandle)
