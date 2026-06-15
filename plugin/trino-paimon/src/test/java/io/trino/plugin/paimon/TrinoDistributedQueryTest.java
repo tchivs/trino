@@ -13,11 +13,16 @@
  */
 package io.trino.plugin.paimon;
 
+import com.google.common.collect.ImmutableMap;
+import io.trino.connector.MockConnectorFactory;
+import io.trino.connector.MockConnectorPlugin;
 import io.trino.testing.AbstractDistributedEngineOnlyQueries;
+import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 
+import static io.airlift.testing.Closeables.closeAllSuppress;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -39,59 +44,20 @@ public class TrinoDistributedQueryTest
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        // Note: This test inherits hundreds of tests from
-        // AbstractDistributedEngineOnlyQueries
-        // Many tests require TPCH tables (orders, customer, lineitem, etc.)
-        // Currently we only create nation and region tables for basic smoke tests
-        // Tests requiring other TPCH tables will fail with "table does not exist"
-        // This is expected behavior for now as full TPCH table creation would be
-        // complex
-        return TrinoQueryRunner.createPrestoQueryRunner(ImmutableMap.of(), ImmutableMap.of(), true);
-    }
-
-    // Disable tests that are not applicable to Paimon connector
-    // These tests rely on features that Paimon doesn't currently support
-
-    @Disabled("Paimon doesn't support CREATE TABLE AS SELECT with duplicate rows handling")
-    @Override
-    public void testDuplicatedRowCreateTable()
-    {
-        // Skip - not applicable to Paimon
-    }
-
-    @Disabled("Paimon doesn't support INSERT with specific coercion behaviors tested here")
-    @Override
-    public void testInsertWithCoercion()
-    {
-        // Skip - not applicable to Paimon
-    }
-
-    @Disabled("Paimon doesn't support the specific implicit cast scenarios tested here")
-    @Override
-    public void testImplicitCastToRowWithFieldsRequiringDelimitation()
-    {
-        // Skip - not applicable to Paimon
-    }
-
-    @Disabled("Test requires test_string session property which is not registered")
-    @Override
-    public void testSetSession()
-    {
-        // Skip - test infrastructure issue
-    }
-
-    @Disabled("Test requires test_string session property which is not registered")
-    @Override
-    public void testResetSession()
-    {
-        // Skip - test infrastructure issue
-    }
-
-    @Disabled("Test requires test_string session property which is not registered")
-    @Override
-    public void testShowSession()
-    {
-        // Skip - test infrastructure issue
+        // This test inherits a broad distributed query suite; create the tiny
+        // TPCH tables in Paimon so inherited tests exercise the connector.
+        DistributedQueryRunner queryRunner = TrinoQueryRunner.createPrestoQueryRunner(ImmutableMap.of(), ImmutableMap.of(), true);
+        queryRunner.getCoordinator().getSessionPropertyManager().addSystemSessionProperties(TEST_SYSTEM_PROPERTIES);
+        try {
+            queryRunner.installPlugin(new MockConnectorPlugin(MockConnectorFactory.builder()
+                    .withSessionProperties(TEST_CATALOG_PROPERTIES)
+                    .build()));
+            queryRunner.createCatalog(TESTING_CATALOG, "mock");
+        }
+        catch (RuntimeException e) {
+            throw closeAllSuppress(e, queryRunner);
+        }
+        return queryRunner;
     }
 
     @Disabled("Test assumes specific JVM timezone configuration")
@@ -99,6 +65,26 @@ public class TrinoDistributedQueryTest
     public void testLocallyUnrepresentableTimeLiterals()
     {
         // Skip - environment-specific test
+    }
+
+    @Test
+    @Override
+    public void testImplicitCastToRowWithFieldsRequiringDelimitation()
+    {
+        String sourceTableName = "test_row_source_" + randomNameSuffix();
+        String targetTableName = "test_row_target_" + randomNameSuffix();
+
+        assertUpdate("CREATE TABLE " + sourceTableName + "(r ROW(a char(4), b char(4)))");
+        assertUpdate("CREATE TABLE " + targetTableName + "(r ROW(\"a b\" varchar, \"from\" varchar))");
+        assertUpdate("INSERT INTO " + sourceTableName
+                + " SELECT CAST(ROW('abcd', 'wxyz') AS ROW(a char(4), b char(4)))", 1);
+
+        assertUpdate("INSERT INTO " + targetTableName + " SELECT * FROM " + sourceTableName, 1);
+        assertThat(query("SELECT r.\"a b\", r.\"from\" FROM " + targetTableName))
+                .matches("VALUES (CAST('abcd' AS varchar), CAST('wxyz' AS varchar))");
+
+        assertUpdate("DROP TABLE " + sourceTableName);
+        assertUpdate("DROP TABLE " + targetTableName);
     }
 
     @Override

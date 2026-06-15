@@ -20,6 +20,7 @@ import io.trino.testing.QueryFailedException;
 import io.trino.testing.QueryRunner;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.BinaryVector;
 import org.apache.paimon.data.Decimal;
 import org.apache.paimon.data.GenericArray;
 import org.apache.paimon.data.GenericMap;
@@ -86,7 +87,23 @@ public class TrinoITCase
             // Drop common test tables that may have been created
             sql("DROP TABLE IF EXISTS paimon.default.t5");
             sql("DROP TABLE IF EXISTS paimon.default.t6");
+            sql("DROP TABLE IF EXISTS paimon.default.json_values");
+            sql("DROP TABLE IF EXISTS paimon.default.vector_directive_values");
+            sql("DROP TABLE IF EXISTS paimon.default.vector_directive_add_column");
+            sql("DROP TABLE IF EXISTS paimon.default.blob_directive_values");
+            sql("DROP TABLE IF EXISTS paimon.default.blob_directive_add_column");
+            sql("DROP TABLE IF EXISTS paimon.default.comment_directive_values");
             sql("DROP TABLE IF EXISTS paimon.default.orders");
+            sql("DROP TABLE IF EXISTS paimon.default.comment_values");
+            sql("DROP TABLE IF EXISTS paimon.default.replace_values");
+            sql("DROP TABLE IF EXISTS paimon.default.truncate_values");
+            sql("DROP TABLE IF EXISTS paimon.default.hash_fixed_mutations");
+            sql("DROP TABLE IF EXISTS paimon.default.drop_nn_values");
+            sql("DROP TABLE IF EXISTS paimon.default.nested_field_values");
+            sql("DROP TABLE IF EXISTS paimon.default.not_null_values");
+            sql("DROP TABLE IF EXISTS paimon.default.time_orc_values");
+            sql("DROP TABLE IF EXISTS paimon.default.time_travel_schema_evolution");
+            sql("DROP TABLE IF EXISTS paimon.default.row_tracking_values");
             // Drop test schemas that may have been created
             sql("DROP SCHEMA IF EXISTS paimon.test CASCADE");
             sql("DROP SCHEMA IF EXISTS paimon.tpch CASCADE");
@@ -121,6 +138,18 @@ public class TrinoITCase
         testHelper2.write(GenericRow.of(7, 8L, fromString("4"), fromString("4")));
         testHelper2.commit();
         testHelper2.createTag("tag-2");
+
+        Path versionPrecedenceTablePath = new Path(warehouse, "default.db/t_version_precedence");
+        SimpleTableTestHelper versionPrecedenceHelper = createTestHelper(versionPrecedenceTablePath);
+        versionPrecedenceHelper.write(GenericRow.of(1, 2L, fromString("1"), fromString("1")));
+        versionPrecedenceHelper.write(GenericRow.of(3, 4L, fromString("2"), fromString("2")));
+        versionPrecedenceHelper.commit();
+        versionPrecedenceHelper.write(GenericRow.of(5, 6L, fromString("3"), fromString("3")));
+        versionPrecedenceHelper.write(GenericRow.of(7, 8L, fromString("4"), fromString("4")));
+        versionPrecedenceHelper.commit();
+        versionPrecedenceHelper.createTag("2", 1L);
+
+        createSystemChangelogTable(new Path(warehouse, "default.db/system_changelog_values"));
 
         {
             Path tablePath3 = new Path(warehouse, "default.db/t3");
@@ -355,6 +384,24 @@ public class TrinoITCase
                     }, ""));
         }
 
+        {
+            Path tablePath = new Path(warehouse, "default.db/vector_values");
+            RowType rowType = new RowType(Arrays.asList(new DataField(0, "id", DataTypes.INT()),
+                    new DataField(1, "embedding", DataTypes.VECTOR(3, DataTypes.FLOAT()))));
+            new SchemaManager(LocalFileIO.create(), tablePath).createTable(new Schema(rowType.getFields(),
+                    Collections.emptyList(), Collections.emptyList(), new HashMap<>() {
+                        {
+                            put(CoreOptions.FILE_FORMAT.key(), "json");
+                            put(CoreOptions.FILE_COMPRESSION.key(), "none");
+                        }
+                    }, ""));
+            FileStoreTable table = FileStoreTableFactory.create(LocalFileIO.create(), tablePath);
+            InnerTableWrite writer = table.newWrite("user");
+            InnerTableCommit commit = table.newCommit("user");
+            writer.write(GenericRow.of(1, BinaryVector.fromPrimitiveArray(new float[] {1.0f, 2.5f, 3.75f})));
+            commit.commit(0, writer.prepareCommit(true, 0));
+        }
+
         DistributedQueryRunner queryRunner = null;
         try {
             queryRunner = DistributedQueryRunner.builder(testSessionBuilder().setCatalog(CATALOG).setSchema(DB).build())
@@ -379,6 +426,33 @@ public class TrinoITCase
                         // test field name has upper case
                         new DataField(2, "aCa", new VarCharType()), new DataField(3, "d", new CharType(1))));
         return new SimpleTableTestHelper(tablePath, rowType);
+    }
+
+    private static void createSystemChangelogTable(Path tablePath)
+            throws Exception
+    {
+        Schema schema = Schema.newBuilder()
+                .column("pk", DataTypes.INT())
+                .column("pt", DataTypes.INT())
+                .column("col1", DataTypes.INT())
+                .partitionKeys("pt")
+                .primaryKey("pk", "pt")
+                .option(CoreOptions.CHANGELOG_PRODUCER.key(), "input")
+                .option(CoreOptions.TABLE_READ_SEQUENCE_NUMBER_ENABLED.key(), "true")
+                .option("bucket", "1")
+                .build();
+        new SchemaManager(LocalFileIO.create(), tablePath).createTable(schema);
+
+        FileStoreTable table = FileStoreTableFactory.create(LocalFileIO.create(), tablePath);
+        InnerTableWrite writer = table.newWrite("user");
+        InnerTableCommit commit = table.newCommit("user");
+        writer.write(GenericRow.ofKind(RowKind.INSERT, 1, 1, 1));
+        writer.write(GenericRow.ofKind(RowKind.DELETE, 1, 1, 1));
+        writer.write(GenericRow.ofKind(RowKind.INSERT, 1, 2, 5));
+        writer.write(GenericRow.ofKind(RowKind.UPDATE_BEFORE, 1, 2, 5));
+        writer.write(GenericRow.ofKind(RowKind.UPDATE_AFTER, 1, 2, 6));
+        writer.write(GenericRow.ofKind(RowKind.INSERT, 2, 3, 1));
+        commit.commit(0, writer.prepareCommit(true, 0));
     }
 
     @Test
@@ -413,6 +487,68 @@ public class TrinoITCase
     {
         assertThat(sql("SELECT snapshot_id,schema_id,commit_user,commit_identifier,commit_kind FROM \"t1$snapshots\""))
                 .isEqualTo("[[1, 0, user, 0, APPEND]]");
+    }
+
+    @Test
+    public void testAuditLogSystemTable()
+    {
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.\"system_changelog_values$audit_log\""))
+                .isEqualTo("[[rowkind, varchar, , ], [_sequence_number, bigint, , ], [pk, integer, , ], [pt, integer, , ], [col1, integer, , ]]");
+        assertThat(sql("SELECT rowkind, _sequence_number, pk, pt, col1 "
+                + "FROM paimon.default.\"system_changelog_values$audit_log\" "
+                + "ORDER BY _sequence_number"))
+                .isEqualTo("[[+I, 0, 2, 3, 1], [-D, 1, 1, 1, 1], [+U, 2, 1, 2, 6]]");
+    }
+
+    @Test
+    public void testBinlogSystemTable()
+    {
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.\"system_changelog_values$binlog\""))
+                .isEqualTo("[[rowkind, varchar, , ], [_sequence_number, bigint, , ], [pk, array(integer), , ], [pt, array(integer), , ], [col1, array(integer), , ]]");
+        assertThat(sql("SELECT rowkind, _sequence_number, pk, pt, col1 "
+                + "FROM paimon.default.\"system_changelog_values$binlog\" "
+                + "ORDER BY _sequence_number"))
+                .isEqualTo("[[+I, 0, [2], [3], [1]], [-D, 1, [1], [1], [1]], [+U, 2, [1], [2], [6]]]");
+    }
+
+    @Test
+    public void testRowTrackingSystemTable()
+    {
+        sql("CREATE TABLE paimon.default.row_tracking_values ("
+                + "id integer, "
+                + "name varchar) "
+                + "WITH (row_tracking_enabled = 'true')");
+        sql("INSERT INTO paimon.default.row_tracking_values VALUES (11, 'alpha'), (22, 'beta')");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.\"row_tracking_values$row_tracking\""))
+                .isEqualTo("[[id, integer, , ], [name, varchar, , ], [_row_id, bigint, , ], [_sequence_number, bigint, , ]]");
+        assertThat(sql("SELECT id, name, _row_id, _sequence_number "
+                + "FROM paimon.default.\"row_tracking_values$row_tracking\" "
+                + "ORDER BY id"))
+                .isEqualTo("[[11, alpha, 0, 1], [22, beta, 1, 1]]");
+    }
+
+    @Test
+    public void testRowTrackingHiddenColumnsOnBaseTable()
+    {
+        sql("CREATE TABLE paimon.default.row_tracking_values ("
+                + "id integer, "
+                + "name varchar) "
+                + "WITH (row_tracking_enabled = 'true')");
+        sql("INSERT INTO paimon.default.row_tracking_values VALUES (11, 'alpha'), (22, 'beta')");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.row_tracking_values"))
+                .isEqualTo("[[id, integer, , ], [name, varchar, , ]]");
+        assertThat(sql("SELECT id, name, _row_id, _sequence_number "
+                + "FROM paimon.default.row_tracking_values "
+                + "ORDER BY id"))
+                .isEqualTo("[[11, alpha, 0, 1], [22, beta, 1, 1]]");
+        assertThat(sql("SELECT id, _row_id "
+                + "FROM paimon.default.row_tracking_values "
+                + "WHERE _row_id = BIGINT '0'"))
+                .isEqualTo("[[11, 0]]");
+        assertThat(sql("SELECT * FROM paimon.default.row_tracking_values ORDER BY id"))
+                .isEqualTo("[[11, alpha], [22, beta]]");
     }
 
     @Test
@@ -497,15 +633,168 @@ public class TrinoITCase
     }
 
     @Test
+    public void testTruncateTable()
+    {
+        sql("CREATE TABLE paimon.default.truncate_values (id integer, name varchar) WITH (bucket = '-1')");
+        sql("INSERT INTO paimon.default.truncate_values VALUES (1, 'one'), (2, 'two')");
+
+        assertThat(sql("SELECT count(*) FROM paimon.default.truncate_values")).isEqualTo("[[2]]");
+
+        sql("TRUNCATE TABLE paimon.default.truncate_values");
+
+        assertThat(sql("SELECT count(*) FROM paimon.default.truncate_values")).isEqualTo("[[0]]");
+    }
+
+    @Test
+    public void testTableAndColumnComments()
+    {
+        sql("CREATE TABLE paimon.default.comment_values ("
+                + "id integer COMMENT 'identifier', "
+                + "name varchar) "
+                + "COMMENT 'table comment' "
+                + "WITH (bucket = '-1')");
+
+        assertThat(sql("SELECT comment FROM system.metadata.table_comments "
+                + "WHERE catalog_name = 'paimon' AND schema_name = 'default' AND table_name = 'comment_values'"))
+                .isEqualTo("[[table comment]]");
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.comment_values"))
+                .isEqualTo("[[id, integer, , identifier], [name, varchar, , ]]");
+
+        sql("COMMENT ON TABLE paimon.default.comment_values IS 'updated table comment'");
+        assertThat(sql("SELECT comment FROM system.metadata.table_comments "
+                + "WHERE catalog_name = 'paimon' AND schema_name = 'default' AND table_name = 'comment_values'"))
+                .isEqualTo("[[updated table comment]]");
+        assertThat(sql("SHOW CREATE TABLE paimon.default.comment_values"))
+                .contains("COMMENT 'updated table comment'");
+
+        sql("COMMENT ON COLUMN paimon.default.comment_values.name IS 'display name'");
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.comment_values"))
+                .isEqualTo("[[id, integer, , identifier], [name, varchar, , display name]]");
+
+        sql("ALTER TABLE paimon.default.comment_values ADD COLUMN detail varchar COMMENT 'detail column'");
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.comment_values"))
+                .isEqualTo("[[id, integer, , identifier], [name, varchar, , display name], [detail, varchar, , detail column]]");
+
+        sql("COMMENT ON COLUMN paimon.default.comment_values.name IS NULL");
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.comment_values"))
+                .isEqualTo("[[id, integer, , identifier], [name, varchar, , ], [detail, varchar, , detail column]]");
+
+        sql("COMMENT ON TABLE paimon.default.comment_values IS NULL");
+        assertThat(sql("SELECT comment IS NULL FROM system.metadata.table_comments "
+                + "WHERE catalog_name = 'paimon' AND schema_name = 'default' AND table_name = 'comment_values'"))
+                .isEqualTo("[[true]]");
+    }
+
+    @Test
+    public void testColumnCommentDirectiveDoesNotChangeExistingLogicalType()
+    {
+        sql("CREATE TABLE paimon.default.comment_directive_values ("
+                + "id integer, "
+                + "embedding array(real), "
+                + "picture varbinary) "
+                + "WITH (file_format = 'json', file_compression = 'none')");
+
+        sql("COMMENT ON COLUMN paimon.default.comment_directive_values.embedding IS '__VECTOR_FIELD;3; display vector'");
+        sql("COMMENT ON COLUMN paimon.default.comment_directive_values.picture IS '__BLOB_FIELD; display blob'");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.comment_directive_values")).isEqualTo(
+                "[[id, integer, , ], [embedding, array(real), , __VECTOR_FIELD;3; display vector], [picture, varbinary, , __BLOB_FIELD; display blob]]");
+        sql("INSERT INTO paimon.default.comment_directive_values VALUES "
+                + "(1, ARRAY[CAST(1.0 AS real), CAST(2.0 AS real)], X'CAFE')");
+        assertThat(sql("SELECT id, embedding, to_hex(picture) FROM paimon.default.comment_directive_values"))
+                .isEqualTo("[[1, [1.0, 2.0], CAFE]]");
+    }
+
+    @Test
+    public void testCreateOrReplaceTable()
+    {
+        sql("CREATE OR REPLACE TABLE paimon.default.replace_values (id integer, name varchar) WITH (bucket = '-1')");
+        assertThat(sql("SELECT count(*) FROM paimon.default.replace_values")).isEqualTo("[[0]]");
+
+        sql("INSERT INTO paimon.default.replace_values VALUES (1, 'one'), (2, 'two')");
+        assertThat(sql("SELECT count(*) FROM paimon.default.replace_values")).isEqualTo("[[2]]");
+
+        sql("CREATE OR REPLACE TABLE paimon.default.replace_values AS SELECT 3 id, 'three' name");
+        assertThat(sql("SELECT * FROM paimon.default.replace_values")).isEqualTo("[[3, three]]");
+    }
+
+    @Test
+    public void testHashFixedDeleteAndMerge()
+    {
+        sql("CREATE TABLE paimon.default.hash_fixed_mutations ("
+                + "id integer, "
+                + "name varchar, "
+                + "score integer) "
+                + "WITH (primary_key = ARRAY['id'], bucket = '1', bucket_key = 'id')");
+        sql("INSERT INTO paimon.default.hash_fixed_mutations VALUES "
+                + "(1, 'one', 10), (2, 'two', 20), (3, 'three', 30)");
+
+        sql("DELETE FROM paimon.default.hash_fixed_mutations WHERE id = 2");
+        assertThat(sql("SELECT * FROM paimon.default.hash_fixed_mutations ORDER BY id"))
+                .isEqualTo("[[1, one, 10], [3, three, 30]]");
+
+        sql("MERGE INTO paimon.default.hash_fixed_mutations t "
+                + "USING (VALUES (1, 'one-updated', 11), (3, 'three-deleted', -1), (4, 'four', 40)) "
+                + "AS s(id, name, score) "
+                + "ON (t.id = s.id) "
+                + "WHEN MATCHED AND s.score < 0 THEN DELETE "
+                + "WHEN MATCHED THEN UPDATE SET name = s.name, score = s.score "
+                + "WHEN NOT MATCHED THEN INSERT (id, name, score) VALUES (s.id, s.name, s.score)");
+
+        assertThat(sql("SELECT * FROM paimon.default.hash_fixed_mutations ORDER BY id"))
+                .isEqualTo("[[1, one-updated, 11], [4, four, 40]]");
+    }
+
+    @Test
+    public void testNotNullInsertValidation()
+    {
+        sql("CREATE TABLE paimon.default.not_null_values ("
+                + "nullable_col integer, "
+                + "not_null_col integer NOT NULL) "
+                + "WITH (bucket = '-1')");
+
+        assertThat(sql("SHOW CREATE TABLE paimon.default.not_null_values"))
+                .contains("not_null_col integer NOT NULL");
+        sql("INSERT INTO paimon.default.not_null_values (not_null_col) VALUES (2)");
+        assertThat(sql("SELECT nullable_col, not_null_col FROM paimon.default.not_null_values"))
+                .isEqualTo("[[null, 2]]");
+
+        assertThatExceptionOfType(QueryFailedException.class)
+                .isThrownBy(() -> sql("INSERT INTO paimon.default.not_null_values (nullable_col) VALUES (1)"))
+                .withMessageContaining("not_null_col");
+        assertThatExceptionOfType(QueryFailedException.class)
+                .isThrownBy(() -> sql("INSERT INTO paimon.default.not_null_values "
+                        + "(not_null_col, nullable_col) VALUES (NULL, 3)"))
+                .withMessageContaining("NULL value not allowed for NOT NULL column: not_null_col");
+    }
+
+    @Test
+    public void testAddNotNullColumnFailsFast()
+    {
+        sql("CREATE TABLE paimon.default.not_null_values (id integer) WITH (bucket = '-1')");
+
+        assertThatExceptionOfType(QueryFailedException.class)
+                .isThrownBy(() -> sql("ALTER TABLE paimon.default.not_null_values "
+                        + "ADD COLUMN required_value integer NOT NULL"))
+                .withMessageContaining("This connector does not support adding not null columns");
+    }
+
+    @Test
     public void testAddColumn()
     {
         sql("CREATE TABLE t5 (" + "  order_key bigint," + "  order_status varchar," + "  total_price double,"
                 + "  order_date date" + ")" + "WITH (" + "file_format = 'ORC',"
                 + "primary_key = ARRAY['order_key','order_date']," + "partitioned_by = ARRAY['order_date'],"
                 + "bucket = '2'," + "bucket_key = 'order_key'," + "changelog_producer = 'input'" + ")");
+        sql("INSERT INTO paimon.default.t5 (order_key, order_status, total_price, order_date) "
+                + "VALUES (1, 'old', 11.0, DATE '2026-06-11')");
         sql("ALTER TABLE paimon.default.t5 ADD COLUMN zip varchar");
+        sql("INSERT INTO paimon.default.t5 (order_key, order_status, total_price, order_date, zip) "
+                + "VALUES (2, 'new', 22.0, DATE '2026-06-12', '94107')");
         assertThat(sql("SHOW COLUMNS FROM paimon.default.t5")).isEqualTo(
-                "[[order_key, bigint, , ], [order_status, varchar(2147483646), , ], [total_price, double, , ], [order_date, date, , ], [zip, varchar(2147483646), , ]]");
+                "[[order_key, bigint, , ], [order_status, varchar, , ], [total_price, double, , ], [order_date, date, , ], [zip, varchar, , ]]");
+        assertThat(sql("SELECT order_key, order_status, zip FROM paimon.default.t5 ORDER BY order_key"))
+                .isEqualTo("[[1, old, null], [2, new, 94107]]");
         sql("DROP TABLE IF EXISTS paimon.default.t5");
     }
 
@@ -518,7 +807,7 @@ public class TrinoITCase
                 + "bucket = '2'," + "bucket_key = 'order_key'," + "changelog_producer = 'input'" + ")");
         sql("ALTER TABLE paimon.default.t5 RENAME COLUMN order_status to g");
         assertThat(sql("SHOW COLUMNS FROM paimon.default.t5")).isEqualTo(
-                "[[order_key, bigint, , ], [g, varchar(2147483646), , ], [total_price, double, , ], [order_date, date, , ]]");
+                "[[order_key, bigint, , ], [g, varchar, , ], [total_price, double, , ], [order_date, date, , ]]");
         sql("DROP TABLE IF EXISTS paimon.default.t5");
     }
 
@@ -547,6 +836,73 @@ public class TrinoITCase
     }
 
     @Test
+    public void testDropNotNullConstraint()
+    {
+        sql("CREATE TABLE paimon.default.drop_nn_values ("
+                + "id integer, "
+                + "required_col integer NOT NULL) "
+                + "WITH (bucket = '-1')");
+
+        // Verify NOT NULL is enforced
+        assertThatExceptionOfType(QueryFailedException.class)
+                .isThrownBy(() -> sql("INSERT INTO paimon.default.drop_nn_values (id) VALUES (1)"))
+                .withMessageContaining("required_col");
+
+        // Drop the NOT NULL constraint
+        sql("ALTER TABLE paimon.default.drop_nn_values ALTER COLUMN required_col DROP NOT NULL");
+
+        // Now null values should be accepted
+        sql("INSERT INTO paimon.default.drop_nn_values (id) VALUES (1)");
+        assertThat(sql("SELECT id, required_col FROM paimon.default.drop_nn_values"))
+                .isEqualTo("[[1, null]]");
+    }
+
+    @Test
+    public void testNestedFieldOperations()
+    {
+        sql("CREATE TABLE paimon.default.nested_field_values ("
+                + "id integer, "
+                + "info row(name varchar, age integer, city varchar)) "
+                + "WITH (bucket = '-1')");
+        sql("INSERT INTO paimon.default.nested_field_values VALUES "
+                + "(1, ROW('alice', 30, 'NYC'))");
+
+        // Verify initial state
+        assertThat(sql("SELECT id, info.name, info.age, info.city FROM paimon.default.nested_field_values"))
+                .isEqualTo("[[1, alice, 30, NYC]]");
+
+        // Drop nested field: dropField
+        sql("ALTER TABLE paimon.default.nested_field_values DROP COLUMN info.city");
+        assertThat(sql("SELECT id, info.name, info.age FROM paimon.default.nested_field_values"))
+                .isEqualTo("[[1, alice, 30]]");
+
+        // Rename nested field: renameField (verify schema change, not data migration)
+        sql("ALTER TABLE paimon.default.nested_field_values RENAME COLUMN info.name TO full_name");
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.nested_field_values"))
+                .contains("[info, row(full_name varchar, age integer), , ]");
+
+        // Insert data with new schema to verify rename works for new writes
+        sql("INSERT INTO paimon.default.nested_field_values VALUES (2, ROW('bob', 25))");
+        assertThat(sql("SELECT id, info.full_name, info.age FROM paimon.default.nested_field_values WHERE id = 2"))
+                .isEqualTo("[[2, bob, 25]]");
+
+        // Change nested field type: setFieldType
+        sql("ALTER TABLE paimon.default.nested_field_values ALTER COLUMN info.age SET DATA TYPE bigint");
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.nested_field_values"))
+                .contains("[info, row(full_name varchar, age bigint), , ]");
+
+        // Add nested field: addField
+        sql("ALTER TABLE paimon.default.nested_field_values ADD COLUMN info.email varchar");
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.nested_field_values"))
+                .contains("[info, row(full_name varchar, age bigint, email varchar), , ]");
+
+        // Verify new writes work with full schema
+        sql("INSERT INTO paimon.default.nested_field_values VALUES (3, ROW('charlie', 35, 'charlie@test.com'))");
+        assertThat(sql("SELECT id, info.full_name, info.age, info.email FROM paimon.default.nested_field_values WHERE id = 3"))
+                .isEqualTo("[[3, charlie, 35, charlie@test.com]]");
+    }
+
+    @Test
     public void testAllType()
     {
         assertThat(sql("SELECT boolean, tinyint, smallint,int,bigint,float,double,char,varchar, date,timestamp_0, "
@@ -554,6 +910,180 @@ public class TrinoITCase
                 .isEqualTo("[[true, 1, 1, 1, 1, 1.0, 1.0, char1, varchar1, 1970-01-01, "
                         + "2023-09-12T07:54:48, 2023-09-12T07:54:48.001, 2023-09-12T07:54:48.001001, "
                         + "0.10000, 010203, [1, 1, 1], {1=1}, [1, 1]]]");
+    }
+
+    @Test
+    public void testOrcTimeType()
+    {
+        sql("CREATE TABLE paimon.default.time_orc_values ("
+                + "id integer, "
+                + "time_value time(3)) "
+                + "WITH (file_format = 'ORC')");
+        sql("INSERT INTO paimon.default.time_orc_values VALUES "
+                + "(1, TIME '00:00:12.345'), "
+                + "(2, TIME '23:59:59.999')");
+
+        assertThat(sql("SELECT id, CAST(time_value AS varchar) FROM paimon.default.time_orc_values ORDER BY id"))
+                .isEqualTo("[[1, 00:00:12.345], [2, 23:59:59.999]]");
+    }
+
+    @Test
+    public void testJsonVariantType()
+    {
+        sql("CREATE TABLE paimon.default.json_values ("
+                + "id integer, "
+                + "payload json, "
+                + "nested array(json)) "
+                + "WITH (file_format = 'PARQUET')");
+        sql("INSERT INTO paimon.default.json_values VALUES "
+                + "(1, JSON '{\"name\":\"alice\",\"numbers\":[1,2,3]}', ARRAY[JSON '{\"kind\":\"home\"}', JSON '42']), "
+                + "(2, JSON '{\"name\":\"bob\",\"active\":true}', ARRAY[JSON '{\"kind\":\"work\"}', JSON 'null'])");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.json_values")).isEqualTo(
+                "[[id, integer, , ], [payload, json, , ], [nested, array(json), , ]]");
+        assertThat(sql("SELECT id, json_extract_scalar(payload, '$.name'), json_format(nested[1]) "
+                + "FROM paimon.default.json_values ORDER BY id"))
+                .isEqualTo("[[1, alice, {\"kind\":\"home\"}], [2, bob, {\"kind\":\"work\"}]]");
+        assertThat(sql("SELECT id, json_extract_scalar(nested[1], '$.kind'), json_format(nested[2]) "
+                + "FROM paimon.default.json_values ORDER BY id"))
+                .isEqualTo("[[1, home, 42], [2, work, null]]");
+    }
+
+    @Test
+    public void testDirectReadFilterOnUnprojectedColumnFallsBackToPaimonReader()
+    {
+        sql("CREATE TABLE paimon.default.direct_filter_values ("
+                + "id integer, "
+                + "category varchar, "
+                + "payload varchar) "
+                + "WITH (file_format = 'PARQUET')");
+        sql("INSERT INTO paimon.default.direct_filter_values VALUES "
+                + "(1, 'keep', 'alpha'), "
+                + "(2, 'drop', 'beta'), "
+                + "(3, 'keep', 'gamma')");
+
+        assertThat(sql("SELECT id, payload FROM paimon.default.direct_filter_values "
+                + "WHERE category = 'keep' ORDER BY id"))
+                .isEqualTo("[[1, alpha], [3, gamma]]");
+    }
+
+    @Test
+    public void testSchemaEvolutionFilterOnAddedColumnSkipsOldFiles()
+    {
+        sql("CREATE TABLE paimon.default.direct_filter_schema_evolution ("
+                + "id integer, "
+                + "payload varchar) "
+                + "WITH (file_format = 'PARQUET')");
+        sql("INSERT INTO paimon.default.direct_filter_schema_evolution VALUES "
+                + "(1, 'alpha'), "
+                + "(2, 'beta')");
+        sql("ALTER TABLE paimon.default.direct_filter_schema_evolution ADD COLUMN category varchar");
+        sql("INSERT INTO paimon.default.direct_filter_schema_evolution VALUES "
+                + "(3, 'gamma', 'keep'), "
+                + "(4, 'delta', 'drop')");
+
+        assertThat(sql("SELECT id, payload FROM paimon.default.direct_filter_schema_evolution "
+                + "WHERE category = 'keep' ORDER BY id"))
+                .isEqualTo("[[3, gamma]]");
+        assertThat(sql("SELECT id FROM paimon.default.direct_filter_schema_evolution "
+                + "WHERE category = 'missing'"))
+                .isEqualTo("[]");
+    }
+
+    @Test
+    public void testFilesystemCatalogViewCreateFailsFast()
+    {
+        assertThatExceptionOfType(QueryFailedException.class)
+                .isThrownBy(() -> sql("CREATE VIEW paimon.default.order_view AS SELECT 1 value"))
+                .withMessageContaining("This connector does not support creating views")
+                .withMessageContaining("Paimon catalog does not support view create operations");
+    }
+
+    @Test
+    public void testVectorType()
+    {
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.vector_values")).isEqualTo(
+                "[[id, integer, , ], [embedding, array(real), , ]]");
+        assertThat(sql("SELECT id, embedding FROM paimon.default.vector_values"))
+                .isEqualTo("[[1, [1.0, 2.5, 3.75]]]");
+
+        sql("INSERT INTO paimon.default.vector_values VALUES "
+                + "(2, ARRAY[CAST(4.0 AS real), CAST(5.5 AS real), CAST(6.25 AS real)])");
+
+        assertThat(sql("SELECT id, embedding FROM paimon.default.vector_values ORDER BY id"))
+                .isEqualTo("[[1, [1.0, 2.5, 3.75]], [2, [4.0, 5.5, 6.25]]]");
+    }
+
+    @Test
+    public void testVectorColumnDirectiveOnCreateTable()
+    {
+        sql("CREATE TABLE paimon.default.vector_directive_values ("
+                + "id integer, "
+                + "embedding array(real) COMMENT '__VECTOR_FIELD;3; embedding vector') "
+                + "WITH (file_format = 'json', file_compression = 'none')");
+        sql("INSERT INTO paimon.default.vector_directive_values VALUES "
+                + "(1, ARRAY[CAST(1.0 AS real), CAST(2.5 AS real), CAST(3.75 AS real)])");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.vector_directive_values")).isEqualTo(
+                "[[id, integer, , ], [embedding, array(real), , embedding vector]]");
+        assertThat(sql("SELECT id, embedding FROM paimon.default.vector_directive_values"))
+                .isEqualTo("[[1, [1.0, 2.5, 3.75]]]");
+        assertThatExceptionOfType(QueryFailedException.class)
+                .isThrownBy(() -> sql("INSERT INTO paimon.default.vector_directive_values VALUES "
+                        + "(2, ARRAY[CAST(1.0 AS real), CAST(2.5 AS real)])"))
+                .withMessageContaining("Paimon VECTOR length mismatch: expected 3, got 2");
+    }
+
+    @Test
+    public void testVectorColumnDirectiveOnAddColumn()
+    {
+        sql("CREATE TABLE paimon.default.vector_directive_add_column ("
+                + "id integer) WITH (file_format = 'json', file_compression = 'none')");
+        sql("ALTER TABLE paimon.default.vector_directive_add_column "
+                + "ADD COLUMN embedding array(real) COMMENT '__VECTOR_FIELD;3; added embedding'");
+        sql("INSERT INTO paimon.default.vector_directive_add_column VALUES "
+                + "(1, ARRAY[CAST(1.0 AS real), CAST(2.5 AS real), CAST(3.75 AS real)])");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.vector_directive_add_column")).isEqualTo(
+                "[[id, integer, , ], [embedding, array(real), , added embedding]]");
+        assertThat(sql("SELECT id, embedding FROM paimon.default.vector_directive_add_column"))
+                .isEqualTo("[[1, [1.0, 2.5, 3.75]]]");
+        assertThatExceptionOfType(QueryFailedException.class)
+                .isThrownBy(() -> sql("INSERT INTO paimon.default.vector_directive_add_column VALUES "
+                        + "(2, ARRAY[CAST(1.0 AS real), CAST(2.5 AS real)])"))
+                .withMessageContaining("Paimon VECTOR length mismatch: expected 3, got 2");
+    }
+
+    @Test
+    public void testBlobColumnDirectiveOnCreateTable()
+    {
+        sql("CREATE TABLE paimon.default.blob_directive_values ("
+                + "id integer, "
+                + "picture varbinary COMMENT '__BLOB_FIELD; profile picture') "
+                + "WITH (data_evolution_enabled = 'true', row_tracking_enabled = 'true')");
+        sql("INSERT INTO paimon.default.blob_directive_values VALUES "
+                + "(1, X'48656C6C6F')");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.blob_directive_values")).isEqualTo(
+                "[[id, integer, , ], [picture, varbinary, , profile picture]]");
+        assertThat(sql("SELECT id, to_hex(picture) FROM paimon.default.blob_directive_values"))
+                .isEqualTo("[[1, 48656C6C6F]]");
+    }
+
+    @Test
+    public void testBlobColumnDirectiveOnAddColumn()
+    {
+        sql("CREATE TABLE paimon.default.blob_directive_add_column ("
+                + "id integer) WITH (data_evolution_enabled = 'true', row_tracking_enabled = 'true')");
+        sql("ALTER TABLE paimon.default.blob_directive_add_column "
+                + "ADD COLUMN picture varbinary COMMENT '__BLOB_FIELD; added picture'");
+        sql("INSERT INTO paimon.default.blob_directive_add_column VALUES "
+                + "(1, X'5945')");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.blob_directive_add_column")).isEqualTo(
+                "[[id, integer, , ], [picture, varbinary, , added picture]]");
+        assertThat(sql("SELECT id, to_hex(picture) FROM paimon.default.blob_directive_add_column"))
+                .isEqualTo("[[1, 5945]]");
     }
 
     @Test
@@ -603,10 +1133,34 @@ public class TrinoITCase
     }
 
     @Test
+    public void testTimeTravelVersionPrefersTagOverSnapshotIdWithSameToken()
+    {
+        assertThat(sql("SELECT * FROM paimon.default.t_version_precedence FOR VERSION AS OF 2"))
+                .isEqualTo("[[1, 2, 1, 1], [3, 4, 2, 2]]");
+        assertThat(sql("SELECT * FROM paimon.default.t_version_precedence FOR VERSION AS OF '2'"))
+                .isEqualTo("[[1, 2, 1, 1], [3, 4, 2, 2]]");
+    }
+
+    @Test
+    public void testTimeTravelUsesHistoricalSchemaAfterAddColumn()
+    {
+        sql("CREATE TABLE paimon.default.time_travel_schema_evolution (id integer, name varchar)");
+        sql("INSERT INTO paimon.default.time_travel_schema_evolution VALUES (1, 'hello'), (2, 'paimon')");
+        sql("ALTER TABLE paimon.default.time_travel_schema_evolution ADD COLUMN dt varchar");
+        sql("INSERT INTO paimon.default.time_travel_schema_evolution VALUES (3, 'trino', '0401'), (4, 'spark', '0402')");
+
+        assertThat(sql("SELECT * FROM paimon.default.time_travel_schema_evolution"))
+                .isEqualTo("[[1, hello, null], [2, paimon, null], [3, trino, 0401], [4, spark, 0402]]");
+        assertThat(sql("SELECT * FROM paimon.default.time_travel_schema_evolution FOR VERSION AS OF 1"))
+                .isEqualTo("[[1, hello], [2, paimon]]");
+    }
+
+    @Test
     public void testSchemaEvolution()
     {
         assertThat(sql("SELECT boolean, tinyint, smallint, int, bigint,float,double,char,varchar, date,timestamp_0, "
-                + "timestamp_3, timestamp_6, decimal, to_hex(varbinary), array, map, row FROM paimon.default.t100"))
+                + "timestamp_3, timestamp_6, decimal, to_hex(varbinary), array, map, row FROM paimon.default.t100 "
+                + "ORDER BY smallint NULLS FIRST"))
                 .isEqualTo(
                         "[[true, 1, null, 1, 1, 1.0, 1.0, char1, varchar1, 1970-01-01, 2023-09-12T07:54:48, 2023-09-12T07:54:48.001, 2023-09-12T07:54:48.001001, 0.10000, 010203, [1, 1, 1], {1=1}, [1, 1]], "
                                 + "[true, 1, null, 1, 1, 1.0, 1.0, char1, varchar1, 1970-01-01, 2023-09-12T07:54:48, 2023-09-12T07:54:48.001, 2023-09-12T07:54:48.001001, 0.10000, 010203, [1, 1, 1], {1=1}, [1, 1]], "

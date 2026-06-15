@@ -60,4 +60,9 @@ public class SimpleTableTestHelper
     {
         table.createTag(name);
     }
+
+    public void createTag(String name, long fromSnapshotId)
+    {
+        table.createTag(name, fromSnapshotId);
+    }
 }

@@ -22,11 +22,14 @@ import java.lang.reflect.Field;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static java.util.Objects.requireNonNull;
 
 public class PaimonTableOptionUtils
 {
@@ -36,12 +39,52 @@ public class PaimonTableOptionUtils
 
     public static void buildOptions(Schema.Builder builder, Map<String, Object> properties)
     {
+        requireNonNull(builder, "builder is null");
+        requireNonNull(properties, "properties is null");
+        properties.keySet().forEach(PaimonTableOptionUtils::validatePropertyKey);
         List<OptionInfo> optionInfos = PaimonTableOptionUtils.getOptionInfos();
         for (OptionInfo optionInfo : optionInfos) {
-            if (properties.get(optionInfo.trinoOptionKey) != null
-                    && !StringUtils.isNullOrWhitespaceOnly(String.valueOf(properties.get(optionInfo.trinoOptionKey)))) {
-                builder.option(optionInfo.paimonOptionKey, String.valueOf(properties.get(optionInfo.trinoOptionKey)));
+            Object rawValue = properties.get(optionInfo.trinoOptionKey);
+            if (rawValue != null) {
+                builder.option(optionInfo.paimonOptionKey,
+                        requireNonBlankStringOptionValue(optionInfo.trinoOptionKey, rawValue));
             }
+        }
+    }
+
+    static String requireNonBlankStringOptionValue(String propertyName, Object rawValue)
+    {
+        requireNonNull(propertyName, "propertyName is null");
+        if (!(rawValue instanceof String optionValue)) {
+            throw new IllegalArgumentException(
+                    "properties value for property '%s' must be a string".formatted(propertyName));
+        }
+        if (StringUtils.isNullOrWhitespaceOnly(optionValue)) {
+            throw new IllegalArgumentException(
+                    "properties value for property '%s' is blank".formatted(propertyName));
+        }
+        return optionValue;
+    }
+
+    public static String toPaimonOptionKey(String trinoOptionKey)
+    {
+        requireNonNull(trinoOptionKey, "trinoOptionKey is null");
+        if (StringUtils.isNullOrWhitespaceOnly(trinoOptionKey)) {
+            throw new IllegalArgumentException("trinoOptionKey is blank");
+        }
+        for (OptionInfo optionInfo : getOptionInfos()) {
+            if (optionInfo.trinoOptionKey.equals(trinoOptionKey)) {
+                return optionInfo.paimonOptionKey;
+            }
+        }
+        return trinoOptionKey;
+    }
+
+    private static void validatePropertyKey(String propertyKey)
+    {
+        requireNonNull(propertyKey, "properties contains null option key");
+        if (StringUtils.isNullOrWhitespaceOnly(propertyKey)) {
+            throw new IllegalArgumentException("properties contains blank option key");
         }
     }
 
@@ -49,26 +92,63 @@ public class PaimonTableOptionUtils
     {
         List<OptionInfo> optionInfos = new ArrayList<>();
         List<OptionWithMetaInfo> optionWithMetaInfos = extractConfigOptions(CoreOptions.class);
-        String className = "";
         for (OptionWithMetaInfo optionWithMetaInfo : optionWithMetaInfos) {
             if (shouldSkip(optionWithMetaInfo.field.getName())) {
                 continue;
             }
 
-            Type genericType = optionWithMetaInfo.field.getGenericType();
-            if (genericType instanceof ParameterizedType parameterizedType) {
-                Type[] actualTypeArguments = parameterizedType.getActualTypeArguments();
-                for (Type actualTypeArgument : actualTypeArguments) {
-                    if (actualTypeArgument instanceof Class<?>) {
-                        className = ((Class<?>) actualTypeArgument).getSimpleName();
-                    }
-                }
+            String className = optionValueClassName(optionWithMetaInfo.field);
+            optionInfos.add(new OptionInfo(convertOptionKey(optionWithMetaInfo.option.key()),
+                    optionWithMetaInfo.option.key(), className));
+        }
+        validateOptionInfos(optionInfos);
+        return optionInfos;
+    }
+
+    static void validateOptionInfos(List<OptionInfo> optionInfos)
+    {
+        requireNonNull(optionInfos, "optionInfos is null");
+        Map<String, String> trinoToPaimonKeys = new LinkedHashMap<>();
+        Map<String, String> paimonToTrinoKeys = new LinkedHashMap<>();
+        for (OptionInfo optionInfo : optionInfos) {
+            requireNonNull(optionInfo, "optionInfo is null");
+            String trinoOptionKey = requireNonNull(optionInfo.trinoOptionKey, "trinoOptionKey is null");
+            String paimonOptionKey = requireNonNull(optionInfo.paimonOptionKey, "paimonOptionKey is null");
+            if (StringUtils.isNullOrWhitespaceOnly(trinoOptionKey)) {
+                throw new IllegalArgumentException("trinoOptionKey is blank");
+            }
+            if (StringUtils.isNullOrWhitespaceOnly(paimonOptionKey)) {
+                throw new IllegalArgumentException("paimonOptionKey is blank");
             }
 
-            optionInfos.add(new OptionInfo(convertOptionKey(optionWithMetaInfo.option.key()),
-                    optionWithMetaInfo.option.key(), buildClass(className), isEnum(className), className));
+            String previousPaimonOptionKey = trinoToPaimonKeys.putIfAbsent(trinoOptionKey, paimonOptionKey);
+            if (previousPaimonOptionKey != null) {
+                throw new IllegalStateException(
+                        "Duplicate Trino table option key '%s' maps to Paimon keys '%s' and '%s'"
+                                .formatted(trinoOptionKey, previousPaimonOptionKey, paimonOptionKey));
+            }
+            String previousTrinoOptionKey = paimonToTrinoKeys.putIfAbsent(paimonOptionKey, trinoOptionKey);
+            if (previousTrinoOptionKey != null) {
+                throw new IllegalStateException(
+                        "Duplicate Paimon table option key '%s' maps to Trino keys '%s' and '%s'"
+                                .formatted(paimonOptionKey, previousTrinoOptionKey, trinoOptionKey));
+            }
         }
-        return optionInfos;
+    }
+
+    private static String optionValueClassName(Field field)
+    {
+        String className = "";
+        Type genericType = field.getGenericType();
+        if (genericType instanceof ParameterizedType parameterizedType) {
+            Type[] actualTypeArguments = parameterizedType.getActualTypeArguments();
+            for (Type actualTypeArgument : actualTypeArguments) {
+                if (actualTypeArgument instanceof Class<?>) {
+                    className = ((Class<?>) actualTypeArgument).getSimpleName();
+                }
+            }
+        }
+        return className;
     }
 
     private static boolean shouldSkip(String fieldName)
@@ -84,38 +164,18 @@ public class PaimonTableOptionUtils
         }
     }
 
-    private static boolean isEnum(String className)
-    {
-        switch (className) {
-            case "StartupMode" :
-            case "MergeEngine" :
-            case "ChangelogProducer" :
-                return true;
-            default :
-                return false;
-        }
-    }
-
-    private static Class<?> buildClass(String className)
-    {
-        switch (className) {
-            case "MergeEngine" :
-                return CoreOptions.MergeEngine.class;
-            case "ChangelogProducer" :
-                return CoreOptions.ChangelogProducer.class;
-            case "StartupMode" :
-                return CoreOptions.StartupMode.class;
-            default :
-                return null;
-        }
-    }
-
     public static String convertOptionKey(String key)
     {
-        String regex = "[.\\-]";
-        Pattern pattern = Pattern.compile(regex);
-        Matcher matcher = pattern.matcher(key.toLowerCase(Locale.ENGLISH));
-        return matcher.replaceAll("_");
+        requireNonNull(key, "key is null");
+        if (StringUtils.isNullOrWhitespaceOnly(key)) {
+            throw new IllegalArgumentException("key is blank");
+        }
+        Pattern camelCaseBoundary = Pattern.compile("([a-z0-9])([A-Z])");
+        Matcher camelCaseMatcher = camelCaseBoundary.matcher(key);
+        String snakeCaseKey = camelCaseMatcher.replaceAll("$1_$2");
+        Pattern separator = Pattern.compile("[.\\-]");
+        Matcher separatorMatcher = separator.matcher(snakeCaseKey.toLowerCase(Locale.ENGLISH));
+        return separatorMatcher.replaceAll("_");
     }
 
     private static List<OptionWithMetaInfo> extractConfigOptions(Class<?> clazz)
@@ -148,16 +208,12 @@ public class PaimonTableOptionUtils
     {
         String trinoOptionKey;
         String paimonOptionKey;
-        Class<T> clazz;
-        boolean isEnum;
         String type;
 
-        public OptionInfo(String trinoOptionKey, String paimonOptionKey, Class<T> clazz, boolean isEnum, String type)
+        public OptionInfo(String trinoOptionKey, String paimonOptionKey, String type)
         {
             this.trinoOptionKey = trinoOptionKey;
             this.paimonOptionKey = paimonOptionKey;
-            this.clazz = clazz;
-            this.isEnum = isEnum;
             this.type = type;
         }
     }

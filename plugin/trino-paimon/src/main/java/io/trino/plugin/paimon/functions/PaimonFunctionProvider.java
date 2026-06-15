@@ -21,6 +21,8 @@ import io.trino.spi.function.FunctionProvider;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.function.table.TableFunctionProcessorProvider;
 
+import static java.util.Objects.requireNonNull;
+
 public class PaimonFunctionProvider
         implements
         FunctionProvider
@@ -30,16 +32,18 @@ public class PaimonFunctionProvider
     @Inject
     public PaimonFunctionProvider(TableChangesFunctionProcessorProvider tableChangesFunctionProcessorProvider)
     {
-        this.tableChangesFunctionProcessorProvider = tableChangesFunctionProcessorProvider;
+        this.tableChangesFunctionProcessorProvider = requireNonNull(tableChangesFunctionProcessorProvider, "tableChangesFunctionProcessorProvider is null");
     }
 
     @Override
     public TableFunctionProcessorProvider getTableFunctionProcessorProvider(ConnectorTableFunctionHandle functionHandle)
     {
+        requireNonNull(functionHandle, "functionHandle is null");
         if (functionHandle instanceof PaimonTableHandle) {
             return new ClassLoaderSafeTableFunctionProcessorProvider(tableChangesFunctionProcessorProvider,
                     getClass().getClassLoader());
         }
-        return FunctionProvider.super.getTableFunctionProcessorProvider(functionHandle);
+        throw new IllegalArgumentException(
+                "functionHandle must be PaimonTableHandle, got: " + functionHandle.getClass().getName());
     }
 }

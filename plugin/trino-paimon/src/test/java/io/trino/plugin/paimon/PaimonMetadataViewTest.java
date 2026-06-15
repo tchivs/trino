@@ -1,0 +1,784 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.plugin.paimon;
+
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.paimon.catalog.PaimonCatalog;
+import io.trino.spi.TrinoException;
+import io.trino.spi.connector.CatalogSchemaName;
+import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorViewDefinition;
+import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.type.TypeId;
+import io.trino.testing.TestingConnectorSession;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.options.Options;
+import org.apache.paimon.types.DataTypeRoot;
+import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.view.View;
+import org.apache.paimon.view.ViewImpl;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.StandardTypes.JSON;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+public class PaimonMetadataViewTest
+{
+    private static final ConnectorSession SESSION = TestingConnectorSession.SESSION;
+    private static final SchemaTableName VIEW_NAME = new SchemaTableName("test_schema", "test_view");
+
+    @Test
+    public void testGetViewRequiresTrinoDialect()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(Map.of("spark", "SELECT id FROM spark_table"))),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.getView(SESSION, VIEW_NAME))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon view 'test_schema.test_view' does not contain a Trino SQL dialect");
+                });
+    }
+
+    @Test
+    public void testGetViewUsesTrinoDialect()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(Map.of(
+                        "spark", "SELECT id FROM spark_table",
+                        "trino", "SELECT id FROM trino_table"))),
+                TESTING_TYPE_MANAGER);
+
+        ConnectorViewDefinition view = metadata.getView(SESSION, VIEW_NAME).orElseThrow();
+
+        assertThat(view.getOriginalSql()).isEqualTo("SELECT id FROM trino_table");
+        assertThat(view.getCatalog()).isEmpty();
+        assertThat(view.getSchema()).isEmpty();
+        assertThat(view.getColumns()).hasSize(1);
+        assertThat(view.getColumns().get(0).getName()).isEqualTo("id");
+        assertThat(view.getColumns().get(0).getType()).isEqualTo(TypeId.of(BIGINT.getTypeSignature().toString()));
+        assertThat(view.getColumns().get(0).getComment()).contains("id column");
+    }
+
+    @Test
+    public void testGetViewsReportsUnsupportedCatalog()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new UnsupportedListViewsPaimonCatalog(),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.getViews(SESSION, Optional.of(VIEW_NAME.getSchemaName())))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon catalog does not support view list operations");
+                });
+    }
+
+    @Test
+    public void testGetViewsPreservesViewDialectFailure()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(Map.of("spark", "SELECT id FROM spark_table"))),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.getViews(SESSION, Optional.of(VIEW_NAME.getSchemaName())))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon view 'test_schema.test_view' does not contain a Trino SQL dialect");
+                });
+    }
+
+    @Test
+    public void testGetViewsWithoutSchemaListsAllSchemas()
+    {
+        MultiSchemaViewCatalog catalog = new MultiSchemaViewCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        Map<SchemaTableName, ConnectorViewDefinition> views = metadata.getViews(SESSION, Optional.empty());
+
+        assertThat(catalog.listDatabasesCalls).isEqualTo(1);
+        assertThat(catalog.listedSchemas).containsExactly("schema_a", "schema_b");
+        assertThat(views.keySet()).containsExactlyInAnyOrder(
+                new SchemaTableName("schema_a", "view_a"),
+                new SchemaTableName("schema_b", "view_b"));
+        assertThat(views.get(new SchemaTableName("schema_a", "view_a")).getOriginalSql())
+                .isEqualTo("SELECT a_value");
+        assertThat(views.get(new SchemaTableName("schema_b", "view_b")).getOriginalSql())
+                .isEqualTo("SELECT b_value");
+    }
+
+    @Test
+    public void testCreateViewUsesTypeManagerAndTrinoDialect()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(null);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        ConnectorViewDefinition definition = new ConnectorViewDefinition(
+                "SELECT payload FROM source_table",
+                Optional.of("paimon"),
+                Optional.of(VIEW_NAME.getSchemaName()),
+                List.of(
+                        new ConnectorViewDefinition.ViewColumn("payload", TypeId.of(JSON), Optional.of("json payload")),
+                        new ConnectorViewDefinition.ViewColumn("name", VARCHAR.getTypeId(), Optional.empty())),
+                Optional.of("view comment"),
+                Optional.empty(),
+                false,
+                List.of(new CatalogSchemaName("paimon", VIEW_NAME.getSchemaName())));
+
+        metadata.createView(SESSION, VIEW_NAME, definition, false);
+
+        assertThat(catalog.dropViewCalls).isEqualTo(0);
+        assertThat(catalog.createdIgnoreIfExists).isFalse();
+        View createdView = catalog.createdView;
+        assertThat(createdView).isNotNull();
+        assertThat(createdView.dialects()).containsOnly(Map.entry("trino", "SELECT payload FROM source_table"));
+        assertThat(createdView.query()).isEqualTo("SELECT payload FROM source_table");
+        assertThat(createdView.comment()).contains("view comment");
+        assertThat(createdView.options()).containsEntry("comment", "view comment");
+        assertThat(createdView.rowType().getFields()).extracting(field -> field.type().getTypeRoot())
+                .containsExactly(DataTypeRoot.VARIANT, DataTypeRoot.VARCHAR);
+        assertThat(createdView.rowType().getFields()).extracting(field -> field.description())
+                .containsExactly("json payload", null);
+    }
+
+    @Test
+    public void testViewEntrypointsValidateInputsBeforeCatalogInitialization()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT old_value")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorViewDefinition definition = viewDefinition("SELECT value");
+
+        assertThatThrownBy(() -> metadata.createView(null, VIEW_NAME, definition, false))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, null, definition, false))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("viewName is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, VIEW_NAME, null, false))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("definition is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.dropView(null, VIEW_NAME))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.dropView(SESSION, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("viewName is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.getView(null, VIEW_NAME))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.getView(SESSION, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("viewName is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.renameView(null, VIEW_NAME,
+                new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view")))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.renameView(SESSION, null,
+                new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view")))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("source is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.renameView(SESSION, VIEW_NAME, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("target is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.getViews(null, Optional.of(VIEW_NAME.getSchemaName())))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.getViews(SESSION, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("schemaName is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.getViews(SESSION, Optional.of(" ")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("schemaName cannot be null or empty");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.setViewComment(null, VIEW_NAME, Optional.of("comment")))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.setViewComment(SESSION, null, Optional.of("comment")))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("viewName is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.setViewComment(SESSION, VIEW_NAME, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("comment is null");
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
+    public void testCreateOrReplaceViewDropsExistingViewBeforeCreating()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT old_value")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        metadata.createView(SESSION, VIEW_NAME, viewDefinition("SELECT new_value"), true);
+
+        assertThat(catalog.dropViewCalls).isEqualTo(1);
+        assertThat(catalog.droppedIgnoreIfNotExists).isTrue();
+        assertThat(catalog.createdIgnoreIfExists).isFalse();
+        assertThat(catalog.createdView.dialects()).containsOnly(Map.entry("trino", "SELECT new_value"));
+    }
+
+    @Test
+    public void testDropViewSuccess()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT id FROM table")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        metadata.dropView(SESSION, VIEW_NAME);
+
+        assertThat(catalog.dropViewCalls).isEqualTo(1);
+        assertThat(catalog.droppedIgnoreIfNotExists).isFalse();
+    }
+
+    @Test
+    public void testCreateViewRejectsExistingViewWithoutReplace()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT old_value")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, VIEW_NAME, viewDefinition("SELECT new_value"), false))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ALREADY_EXISTS.toErrorCode());
+                    assertThat(exception).hasMessage("View 'test_schema.test_view' already exists");
+                });
+
+        assertThat(catalog.dropViewCalls).isEqualTo(0);
+        assertThat(catalog.createdView).isNull();
+    }
+
+    @Test
+    public void testRenameViewDelegatesToPaimonCatalog()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT old_value")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        SchemaTableName targetView = new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view");
+
+        metadata.renameView(SESSION, VIEW_NAME, targetView);
+
+        assertThat(catalog.renamedSource).isEqualTo(new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName()));
+        assertThat(catalog.renamedTarget).isEqualTo(new Identifier(targetView.getSchemaName(), targetView.getTableName()));
+        assertThat(catalog.renamedIgnoreIfNotExists).isFalse();
+    }
+
+    @Test
+    public void testRenameViewTranslatesPaimonStateFailures()
+    {
+        SchemaTableName targetView = new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view");
+
+        PaimonMetadata missingSourceMetadata = new PaimonMetadata(
+                new FailingRenameViewCatalog(new org.apache.paimon.catalog.Catalog.ViewNotExistException(
+                        new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName()))),
+                TESTING_TYPE_MANAGER);
+        assertThatThrownBy(() -> missingSourceMetadata.renameView(SESSION, VIEW_NAME, targetView))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(TABLE_NOT_FOUND.toErrorCode());
+                    assertThat(exception).hasMessage("View 'test_schema.test_view' does not exist");
+                });
+
+        PaimonMetadata existingTargetMetadata = new PaimonMetadata(
+                new FailingRenameViewCatalog(new org.apache.paimon.catalog.Catalog.ViewAlreadyExistException(
+                        new Identifier(targetView.getSchemaName(), targetView.getTableName()))),
+                TESTING_TYPE_MANAGER);
+        assertThatThrownBy(() -> existingTargetMetadata.renameView(SESSION, VIEW_NAME, targetView))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ALREADY_EXISTS.toErrorCode());
+                    assertThat(exception).hasMessage("View 'test_schema.renamed_view' already exists");
+                });
+    }
+
+    @Test
+    public void testRenameViewReportsUnsupportedCatalog()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new FailingRenameViewCatalog(new UnsupportedOperationException("views are not supported")),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.renameView(SESSION, VIEW_NAME,
+                new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon catalog does not support view rename operations");
+                });
+    }
+
+    @Test
+    public void testCreateViewValidatesDefinitionBeforeCatalogInitialization()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(null);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorViewDefinition definition = new ConnectorViewDefinition(
+                "SELECT value FROM source_table",
+                Optional.empty(),
+                Optional.empty(),
+                List.of(new ConnectorViewDefinition.ViewColumn("value", TypeId.of("not_a_type"), Optional.empty())),
+                Optional.empty(),
+                Optional.empty(),
+                false,
+                List.of());
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, VIEW_NAME, definition, false))
+                .hasMessageContaining("Unknown type: not_a_type");
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
+    public void testSetViewCommentSuccess()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT id FROM table")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        metadata.setViewComment(SESSION, VIEW_NAME, Optional.of("new comment"));
+
+        assertThat(catalog.alterViewCalls).isEqualTo(1);
+        assertThat(catalog.alterViewIgnoreIfNotExists).isFalse();
+        assertThat(catalog.alterViewChanges).hasSize(1);
+    }
+
+    @Test
+    public void testSetViewCommentClearsWithEmpty()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT id FROM table")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        metadata.setViewComment(SESSION, VIEW_NAME, Optional.empty());
+
+        assertThat(catalog.alterViewCalls).isEqualTo(1);
+        assertThat(catalog.alterViewChanges).hasSize(1);
+    }
+
+    @Test
+    public void testSetViewCommentNonExistentThrowsTableNotFound()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new FailingAlterViewCatalog(
+                        new Catalog.ViewNotExistException(
+                                new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName()))),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.setViewComment(SESSION, VIEW_NAME, Optional.of("comment")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(TABLE_NOT_FOUND.toErrorCode());
+                    assertThat(exception).hasMessage("View 'test_schema.test_view' does not exist");
+                });
+    }
+
+    @Test
+    public void testCreateViewInNonExistentSchemaThrowsSchemaNotFound()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new SchemaNotFoundViewCatalog(),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, VIEW_NAME, viewDefinition("SELECT value"), false))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(SCHEMA_NOT_FOUND.toErrorCode());
+                    assertThat(exception).hasMessage("Schema '%s' does not exist", VIEW_NAME.getSchemaName());
+                });
+    }
+
+    @Test
+    public void testUnknownViewRuntimeFailuresAreNotRewrapped()
+    {
+        IllegalStateException failure = new IllegalStateException("catalog invariant broken");
+        PaimonMetadata metadata = new PaimonMetadata(new RuntimeFailingViewCatalog(failure), TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, VIEW_NAME, viewDefinition("SELECT value"), false))
+                .isSameAs(failure);
+        assertThatThrownBy(() -> metadata.dropView(SESSION, VIEW_NAME))
+                .isSameAs(failure);
+        assertThatThrownBy(() -> metadata.getView(SESSION, VIEW_NAME))
+                .isSameAs(failure);
+        assertThatThrownBy(() -> metadata.getViews(SESSION, Optional.of(VIEW_NAME.getSchemaName())))
+                .isSameAs(failure);
+        assertThatThrownBy(() -> metadata.renameView(SESSION, VIEW_NAME,
+                new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view")))
+                .isSameAs(failure);
+        assertThatThrownBy(() -> metadata.setViewComment(SESSION, VIEW_NAME, Optional.of("comment")))
+                .isSameAs(failure);
+    }
+
+    private static View view(Map<String, String> dialects)
+    {
+        Identifier identifier = new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName());
+        return new ViewImpl(
+                identifier,
+                List.of(DataTypes.FIELD(0, "id", DataTypes.BIGINT(), "id column")),
+                "SELECT id FROM canonical_table",
+                dialects,
+                null,
+                Map.of());
+    }
+
+    private static ConnectorViewDefinition viewDefinition(String sql)
+    {
+        return new ConnectorViewDefinition(
+                sql,
+                Optional.empty(),
+                Optional.empty(),
+                List.of(new ConnectorViewDefinition.ViewColumn("value", BIGINT.getTypeId(), Optional.empty())),
+                Optional.empty(),
+                Optional.empty(),
+                false,
+                List.of());
+    }
+
+    private static class TestingPaimonCatalog
+            extends PaimonCatalog
+    {
+        private final View view;
+        private View createdView;
+        private boolean initialized;
+        private boolean createdIgnoreIfExists;
+        private int dropViewCalls;
+        private boolean droppedIgnoreIfNotExists;
+        private Identifier renamedSource;
+        private Identifier renamedTarget;
+        private boolean renamedIgnoreIfNotExists;
+        private int alterViewCalls;
+        private List<org.apache.paimon.view.ViewChange> alterViewChanges;
+        private boolean alterViewIgnoreIfNotExists;
+
+        private TestingPaimonCatalog(View view)
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+            this.view = view;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession)
+        {
+            initialized = true;
+        }
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            initialized = true;
+            return this;
+        }
+
+        @Override
+        public View getView(Identifier identifier)
+        {
+            assertThat(identifier.getDatabaseName()).isEqualTo(VIEW_NAME.getSchemaName());
+            assertThat(identifier.getObjectName()).isEqualTo(VIEW_NAME.getTableName());
+            return view;
+        }
+
+        @Override
+        public List<String> listViews(String databaseName)
+        {
+            assertThat(databaseName).isEqualTo(VIEW_NAME.getSchemaName());
+            return List.of(VIEW_NAME.getTableName());
+        }
+
+        @Override
+        public void dropView(Identifier identifier, boolean ignoreIfNotExists)
+        {
+            assertThat(identifier.getDatabaseName()).isEqualTo(VIEW_NAME.getSchemaName());
+            assertThat(identifier.getObjectName()).isEqualTo(VIEW_NAME.getTableName());
+            dropViewCalls++;
+            droppedIgnoreIfNotExists = ignoreIfNotExists;
+        }
+
+        @Override
+        public void createView(Identifier identifier, View view, boolean ignoreIfExists)
+                throws org.apache.paimon.catalog.Catalog.ViewAlreadyExistException
+        {
+            assertThat(identifier.getDatabaseName()).isEqualTo(VIEW_NAME.getSchemaName());
+            assertThat(identifier.getObjectName()).isEqualTo(VIEW_NAME.getTableName());
+            if (this.view != null && dropViewCalls == 0 && !ignoreIfExists) {
+                throw new org.apache.paimon.catalog.Catalog.ViewAlreadyExistException(identifier);
+            }
+            createdView = view;
+            createdIgnoreIfExists = ignoreIfExists;
+        }
+
+        @Override
+        public void renameView(Identifier fromView, Identifier toView, boolean ignoreIfNotExists)
+                throws org.apache.paimon.catalog.Catalog.ViewAlreadyExistException,
+                org.apache.paimon.catalog.Catalog.ViewNotExistException
+        {
+            renamedSource = fromView;
+            renamedTarget = toView;
+            renamedIgnoreIfNotExists = ignoreIfNotExists;
+        }
+
+        @Override
+        public void alterView(Identifier identifier, List<org.apache.paimon.view.ViewChange> viewChanges,
+                boolean ignoreIfNotExists)
+                throws Catalog.ViewNotExistException
+        {
+            assertThat(identifier.getDatabaseName()).isEqualTo(VIEW_NAME.getSchemaName());
+            assertThat(identifier.getObjectName()).isEqualTo(VIEW_NAME.getTableName());
+            alterViewCalls++;
+            alterViewChanges = viewChanges;
+            alterViewIgnoreIfNotExists = ignoreIfNotExists;
+        }
+    }
+
+    private static class FailingRenameViewCatalog
+            extends TestingPaimonCatalog
+    {
+        private final Exception failure;
+
+        private FailingRenameViewCatalog(Exception failure)
+        {
+            super(null);
+            this.failure = failure;
+        }
+
+        @Override
+        public void renameView(Identifier fromView, Identifier toView, boolean ignoreIfNotExists)
+                throws org.apache.paimon.catalog.Catalog.ViewAlreadyExistException,
+                org.apache.paimon.catalog.Catalog.ViewNotExistException
+        {
+            if (failure instanceof org.apache.paimon.catalog.Catalog.ViewAlreadyExistException e) {
+                throw e;
+            }
+            if (failure instanceof org.apache.paimon.catalog.Catalog.ViewNotExistException e) {
+                throw e;
+            }
+            if (failure instanceof RuntimeException e) {
+                throw e;
+            }
+            throw new AssertionError("Unexpected checked rename failure", failure);
+        }
+    }
+
+    private static class UnsupportedListViewsPaimonCatalog
+            extends TestingPaimonCatalog
+    {
+        private UnsupportedListViewsPaimonCatalog()
+        {
+            super(view(Map.of("trino", "SELECT id FROM trino_table")));
+        }
+
+        @Override
+        public List<String> listViews(String databaseName)
+        {
+            throw new UnsupportedOperationException("views are not supported");
+        }
+    }
+
+    private static class MultiSchemaViewCatalog
+            extends PaimonCatalog
+    {
+        private int listDatabasesCalls;
+        private final List<String> listedSchemas = new java.util.ArrayList<>();
+
+        private MultiSchemaViewCatalog()
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public List<String> listDatabases()
+        {
+            listDatabasesCalls++;
+            return List.of("schema_a", "schema_b");
+        }
+
+        @Override
+        public List<String> listViews(String databaseName)
+        {
+            listedSchemas.add(databaseName);
+            return switch (databaseName) {
+                case "schema_a" -> List.of("view_a");
+                case "schema_b" -> List.of("view_b");
+                default -> throw new AssertionError("Unexpected schema: " + databaseName);
+            };
+        }
+
+        @Override
+        public View getView(Identifier identifier)
+        {
+            if (identifier.getFullName().equals("schema_a.view_a")) {
+                return view(identifier, "SELECT a_value");
+            }
+            if (identifier.getFullName().equals("schema_b.view_b")) {
+                return view(identifier, "SELECT b_value");
+            }
+            throw new AssertionError("Unexpected view: " + identifier.getFullName());
+        }
+
+        private static View view(Identifier identifier, String sql)
+        {
+            return new ViewImpl(
+                    identifier,
+                    List.of(DataTypes.FIELD(0, "id", DataTypes.BIGINT())),
+                    sql,
+                    Map.of("trino", sql),
+                    null,
+                    Map.of());
+        }
+    }
+
+    private static class RuntimeFailingViewCatalog
+            extends TestingPaimonCatalog
+    {
+        private final RuntimeException failure;
+
+        private RuntimeFailingViewCatalog(RuntimeException failure)
+        {
+            super(null);
+            this.failure = failure;
+        }
+
+        @Override
+        public View getView(Identifier identifier)
+        {
+            throw failure;
+        }
+
+        @Override
+        public List<String> listViews(String databaseName)
+        {
+            throw failure;
+        }
+
+        @Override
+        public void dropView(Identifier identifier, boolean ignoreIfNotExists)
+        {
+            throw failure;
+        }
+
+        @Override
+        public void createView(Identifier identifier, View view, boolean ignoreIfExists)
+        {
+            throw failure;
+        }
+
+        @Override
+        public void renameView(Identifier fromView, Identifier toView, boolean ignoreIfNotExists)
+        {
+            throw failure;
+        }
+
+        @Override
+        public void alterView(Identifier identifier, List<org.apache.paimon.view.ViewChange> viewChanges,
+                boolean ignoreIfNotExists)
+        {
+            throw failure;
+        }
+    }
+
+    private static class FailingAlterViewCatalog
+            extends TestingPaimonCatalog
+    {
+        private final Exception failure;
+
+        private FailingAlterViewCatalog(Exception failure)
+        {
+            super(view(Map.of("trino", "SELECT id FROM table")));
+            this.failure = failure;
+        }
+
+        @Override
+        public void alterView(Identifier identifier, List<org.apache.paimon.view.ViewChange> viewChanges,
+                boolean ignoreIfNotExists)
+                throws Catalog.ViewNotExistException
+        {
+            if (failure instanceof Catalog.ViewNotExistException e) {
+                throw e;
+            }
+            if (failure instanceof RuntimeException e) {
+                throw e;
+            }
+            throw new AssertionError("Unexpected failure", failure);
+        }
+    }
+
+    private static class SchemaNotFoundViewCatalog
+            extends PaimonCatalog
+    {
+        private SchemaNotFoundViewCatalog()
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public void createView(Identifier identifier, View view, boolean ignoreIfExists)
+                throws Catalog.DatabaseNotExistException
+        {
+            throw new Catalog.DatabaseNotExistException(identifier.getDatabaseName());
+        }
+    }
+
+    private static TrinoFileSystemFactory unsupportedFileSystemFactory()
+    {
+        return identity -> {
+            throw new UnsupportedOperationException("filesystem is not used by this test");
+        };
+    }
+}

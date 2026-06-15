@@ -21,8 +21,12 @@ import org.apache.paimon.deletionvectors.DeletionVector;
 
 import java.io.IOException;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
+
+import static java.lang.Math.toIntExact;
+import static java.util.Objects.requireNonNull;
 
 public class PaimonPageSourceWrapper
         implements
@@ -34,8 +38,8 @@ public class PaimonPageSourceWrapper
 
     public PaimonPageSourceWrapper(ConnectorPageSource source, Optional<DeletionVector> deletionVector)
     {
-        this.source = source;
-        this.deletionVector = deletionVector;
+        this.source = requireNonNull(source, "source is null");
+        this.deletionVector = requireNonNull(deletionVector, "deletionVector is null");
     }
 
     public static ConnectorPageSource wrap(ConnectorPageSource connectorPageSource,
@@ -71,16 +75,25 @@ public class PaimonPageSourceWrapper
     @Override
     public Page getNextPage()
     {
-        int startPosition = (int) source.getCompletedPositions().orElseThrow();
+        OptionalInt startPosition = deletionVector.isPresent() ? OptionalInt.of(startPosition()) : OptionalInt.empty();
         Page next = source.getNextPage();
         if (next == null) {
+            return next;
+        }
+        if (deletionVector.isEmpty()) {
             return next;
         }
 
         int pageCount = next.getPositionCount();
 
-        return deletionVector.map(deletionVector -> convertToRetained(next, deletionVector, startPosition, pageCount))
-                .orElse(next);
+        return convertToRetained(next, deletionVector.get(), startPosition.orElseThrow(), pageCount);
+    }
+
+    private int startPosition()
+    {
+        return toIntExact(source.getCompletedPositions()
+                .orElseThrow(() -> new IllegalStateException(
+                        "Deletion-vector page source requires completed positions")));
     }
 
     @VisibleForTesting

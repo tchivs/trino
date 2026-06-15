@@ -13,10 +13,13 @@
  */
 package io.trino.plugin.paimon;
 
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
+
+import static java.util.Objects.requireNonNull;
 
 public class PaimonMergeTableHandle
         implements
@@ -25,9 +28,15 @@ public class PaimonMergeTableHandle
     private final PaimonTableHandle tableHandle;
 
     @JsonCreator
-    public PaimonMergeTableHandle(@JsonProperty("tableHandle") PaimonTableHandle tableHandle)
+    public PaimonMergeTableHandle(@JsonProperty(value = "tableHandle", required = true) PaimonTableHandle tableHandle)
     {
-        this.tableHandle = tableHandle;
+        this.tableHandle = requireNonNull(tableHandle, "tableHandle is null");
+    }
+
+    @JsonAnySetter
+    public void rejectUnknownJsonField(String name, Object value)
+    {
+        PaimonHandleJsonUtils.rejectUnknownHandleJsonField("PaimonMergeTableHandle", name, value);
     }
 
     @Override

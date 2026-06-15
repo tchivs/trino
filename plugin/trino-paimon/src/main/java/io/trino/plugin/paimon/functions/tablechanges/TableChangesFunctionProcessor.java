@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon.functions.tablechanges;
 
+import io.trino.plugin.paimon.PaimonColumnHandle;
 import io.trino.plugin.paimon.PaimonPageSourceProvider;
 import io.trino.plugin.paimon.PaimonSplit;
 import io.trino.plugin.paimon.PaimonTableHandle;
@@ -26,20 +27,36 @@ import io.trino.spi.function.table.TableFunctionSplitProcessor;
 
 import java.util.List;
 
+import static io.trino.spi.function.table.TableFunctionProcessorState.Blocked.blocked;
 import static io.trino.spi.function.table.TableFunctionProcessorState.Finished.FINISHED;
+import static java.util.Objects.requireNonNull;
 
 public class TableChangesFunctionProcessor
         implements
         TableFunctionSplitProcessor
 {
-    private static final Page EMPTY_PAGE = new Page(0);
-
     private final ConnectorPageSource pageSource;
 
     public TableChangesFunctionProcessor(ConnectorSession session, PaimonTableHandle handle, PaimonSplit split,
             PaimonPageSourceProvider pageSourceProvider)
     {
-        List<ColumnHandle> projectedColumns = List.copyOf(handle.getProjectedColumns().orElseThrow());
+        requireNonNull(session, "session is null");
+        requireNonNull(split, "split is null");
+        requireNonNull(pageSourceProvider, "pageSourceProvider is null");
+        List<?> rawProjectedColumns = requireNonNull(requireNonNull(handle, "handle is null").getProjectedColumns(),
+                "projectedColumns is null")
+                .orElseThrow(() -> new IllegalStateException(
+                        "Paimon table_changes requires explicit projected columns"));
+        List<ColumnHandle> projectedColumns = rawProjectedColumns
+                .stream()
+                .map(column -> {
+                    if (!(requireNonNull(column, "projectedColumns contains null column") instanceof PaimonColumnHandle paimonColumnHandle)) {
+                        throw new IllegalStateException("Paimon table_changes requires PaimonColumnHandle, got: "
+                                + column.getClass().getName());
+                    }
+                    return (ColumnHandle) paimonColumnHandle;
+                })
+                .toList();
         this.pageSource = pageSourceProvider.createPageSource(null, session, split, handle,
                 projectedColumns, DynamicFilter.EMPTY);
     }
@@ -52,10 +69,11 @@ public class TableChangesFunctionProcessor
         }
         Page dataPage = pageSource.getNextPage();
         if (dataPage == null) {
-            return TableFunctionProcessorState.Processed.produced(EMPTY_PAGE);
+            if (pageSource.isFinished()) {
+                return FINISHED;
+            }
+            return blocked(pageSource.isBlocked().thenRun(() -> {}));
         }
-        else {
-            return TableFunctionProcessorState.Processed.produced(dataPage);
-        }
+        return TableFunctionProcessorState.Processed.produced(dataPage);
     }
 }

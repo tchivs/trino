@@ -14,6 +14,7 @@
 package io.trino.plugin.paimon;
 
 import io.airlift.units.Duration;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.session.PropertyMetadata;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
@@ -22,9 +23,11 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static io.trino.plugin.base.session.PropertyMetadataUtil.durationProperty;
+import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static io.trino.spi.session.PropertyMetadata.doubleProperty;
 import static io.trino.spi.session.PropertyMetadata.longProperty;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static java.lang.String.format;
 import static org.apache.paimon.CoreOptions.SCAN_SNAPSHOT_ID;
 import static org.apache.paimon.CoreOptions.SCAN_TIMESTAMP_MILLIS;
 
@@ -43,7 +46,17 @@ public class PaimonSessionProperties
         sessionProperties = ImmutableList.<PropertyMetadata<?>>builder()
                 .add(longProperty(SCAN_TIMESTAMP, SCAN_TIMESTAMP_MILLIS.description().toString(), null, true))
                 .add(longProperty(SCAN_SNAPSHOT, SCAN_SNAPSHOT_ID.description().toString(), null, true))
-                .add(doubleProperty(MINIMUM_SPLIT_WEIGHT, "Minimum split weight", 0.05, false))
+                .add(doubleProperty(
+                        MINIMUM_SPLIT_WEIGHT,
+                        "Minimum split weight",
+                        0.05,
+                        value -> {
+                            if (!Double.isFinite(value) || value <= 0 || value > 1) {
+                                throw new TrinoException(INVALID_SESSION_PROPERTY,
+                                        format("%s must be > 0 and <= 1.0: %s", MINIMUM_SPLIT_WEIGHT, value));
+                            }
+                        },
+                        false))
                 .add(new PropertyMetadata<>(INSERT_EXISTING_PARTITIONS_BEHAVIOR,
                         "Behavior on insert existing partitions", VARCHAR, InsertExistingPartitionsBehavior.class,
                         InsertExistingPartitionsBehavior.APPEND, false,

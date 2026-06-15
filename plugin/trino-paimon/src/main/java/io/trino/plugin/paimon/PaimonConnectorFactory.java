@@ -25,6 +25,7 @@ import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Tracer;
 import io.trino.filesystem.manager.FileSystemModule;
 import io.trino.plugin.base.CatalogName;
+import io.trino.plugin.base.TypeDeserializerModule;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorMetadata;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSinkProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSourceProvider;
@@ -127,7 +128,7 @@ public class PaimonConnectorFactory
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             Bootstrap app = new Bootstrap(new EventModule(), new MBeanModule(),
                     new ConnectorObjectNameGeneratorModule("org.apache.paimon.trino", "paimon.trino"), new JsonModule(),
-                    new PaimonModule(), new MBeanServerModule(),
+                    new TypeDeserializerModule(context.getTypeManager()), new PaimonModule(), new MBeanServerModule(),
                     new FileSystemModule(catalogName, context.getNodeManager(), context.getOpenTelemetry()), binder -> {
                         binder.bind(OpenTelemetry.class).toInstance(context.getOpenTelemetry());
                         binder.bind(Tracer.class).toInstance(context.getTracer());

@@ -14,8 +14,8 @@
 package io.trino.plugin.paimon;
 
 import io.airlift.slice.Slice;
-import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
@@ -28,21 +28,26 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
+import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
-import org.apache.paimon.shade.guava30.com.google.common.collect.Maps;
+import org.apache.paimon.table.Table;
+import org.apache.paimon.types.DataTypeRoot;
+import org.apache.paimon.types.RowType;
 
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.IN_PREDICATE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.OR_FUNCTION_NAME;
+import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.fileindex.FileIndexCommon.toMapKey;
 
 public class PaimonFilterExtractor
@@ -65,26 +70,55 @@ public class PaimonFilterExtractor
      * @return an Optional containing the extracted TrinoFilter, or empty if no new
      *         filters
      */
-    public static Optional<TrinoFilter> extract(PaimonCatalog catalog, PaimonTableHandle paimonTableHandle,
+    public static Optional<TrinoFilter> extract(Catalog catalog, PaimonTableHandle paimonTableHandle,
+            ConnectorSession session,
             Constraint constraint)
     {
-        TupleDomain<PaimonColumnHandle> oldFilter = paimonTableHandle.getFilter();
-        TupleDomain<PaimonColumnHandle> newFilter = constraint.getSummary().transformKeys(PaimonColumnHandle.class::cast)
-                .intersect(oldFilter);
+        requireNonNull(catalog, "catalog is null");
+        requireNonNull(paimonTableHandle, "paimonTableHandle is null");
+        requireNonNull(session, "session is null");
+        requireNonNull(constraint, "constraint is null");
+        Table table = PaimonTableHandle.schemaAwareReadTable(
+                paimonTableHandle.tableWithDynamicOptions(catalog, session),
+                !paimonTableHandle.usesHistoricalReadSchema(session));
+        return extract(paimonTableHandle, constraint, PaimonTableHandle.effectiveReadRowType(table),
+                table.partitionKeys(), !table.rowType().equals(PaimonTableHandle.effectiveReadRowType(table)));
+    }
 
-        if (oldFilter.equals(newFilter)) {
-            return Optional.empty();
-        }
+    static Optional<TrinoFilter> extract(PaimonTableHandle paimonTableHandle, Constraint constraint, RowType rowType,
+            List<String> partitionKeys)
+    {
+        return extract(paimonTableHandle, constraint, rowType, partitionKeys, false);
+    }
+
+    static Optional<TrinoFilter> extract(PaimonTableHandle paimonTableHandle, Constraint constraint, RowType rowType,
+            List<String> partitionKeys, boolean virtualRowTrackingColumns)
+    {
+        requireNonNull(paimonTableHandle, "paimonTableHandle is null");
+        requireNonNull(constraint, "constraint is null");
+        requireNonNull(rowType, "rowType is null");
+        requireNonNull(partitionKeys, "partitionKeys is null");
+        TupleDomain<PaimonColumnHandle> oldFilter = paimonTableHandle.getFilter();
+        TupleDomain<PaimonColumnHandle> summaryFilter = constraint.getSummary().transformKeys(PaimonFilterExtractor::getSummaryColumn)
+                .intersect(oldFilter);
 
         Map<PaimonColumnHandle, Domain> trinoColumnHandleForExpressionFilter = extractTrinoColumnHandleForExpressionFilter(
                 constraint);
 
         LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
         LinkedHashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
-        new PaimonFilterConverter(paimonTableHandle.table(catalog).rowType()).convert(newFilter, acceptedDomains,
-                unsupportedDomains);
+        TupleDomain<PaimonColumnHandle> acceptedFilter;
+        if (summaryFilter.isNone()) {
+            acceptedFilter = TupleDomain.none();
+        }
+        else {
+            new PaimonFilterConverter(rowType).convert(summaryFilter, acceptedDomains, unsupportedDomains);
+            if (virtualRowTrackingColumns) {
+                moveVirtualEngineOnlyDomainsToUnsupported(acceptedDomains, unsupportedDomains);
+            }
+            acceptedFilter = TupleDomain.withColumnDomains(acceptedDomains);
+        }
 
-        List<String> partitionKeys = paimonTableHandle.table(catalog).partitionKeys();
         LinkedHashMap<PaimonColumnHandle, Domain> unenforcedDomains = new LinkedHashMap<>();
         acceptedDomains.forEach((columnHandle, domain) -> {
             if (!partitionKeys.contains(columnHandle.getColumnName())) {
@@ -92,7 +126,13 @@ public class PaimonFilterExtractor
             }
         });
 
-        acceptedDomains.putAll(trinoColumnHandleForExpressionFilter);
+        TupleDomain<PaimonColumnHandle> expressionFilter = TupleDomain.withColumnDomains(
+                trinoColumnHandleForExpressionFilter);
+        TupleDomain<PaimonColumnHandle> newFilter = oldFilter.intersect(acceptedFilter).intersect(expressionFilter);
+
+        if (oldFilter.equals(newFilter)) {
+            return Optional.empty();
+        }
 
         @SuppressWarnings({"unchecked", "rawtypes"})
         TupleDomain<ColumnHandle> remain = (TupleDomain) TupleDomain.withColumnDomains(unsupportedDomains)
@@ -103,7 +143,38 @@ public class PaimonFilterExtractor
                 : constraint.getExpression();
 
         return Optional
-                .of(new TrinoFilter(TupleDomain.withColumnDomains(acceptedDomains), remain, remainingExpression));
+                .of(new TrinoFilter(newFilter, remain, remainingExpression));
+    }
+
+    private static void moveVirtualEngineOnlyDomainsToUnsupported(
+            LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains,
+            LinkedHashMap<PaimonColumnHandle, Domain> unsupportedDomains)
+    {
+        acceptedDomains.entrySet().removeIf(entry -> {
+            if (!PaimonColumnHandle.isHiddenColumnName(entry.getKey().getColumnName())) {
+                return false;
+            }
+            if (isPaimonRowIdColumn(entry.getKey())) {
+                return false;
+            }
+            unsupportedDomains.put(entry.getKey(), entry.getValue());
+            return true;
+        });
+    }
+
+    private static boolean isPaimonRowIdColumn(PaimonColumnHandle columnHandle)
+    {
+        requireNonNull(columnHandle, "columnHandle is null");
+        return PaimonColumnHandle.PAIMON_ROW_ID_NAME.equalsIgnoreCase(columnHandle.getColumnName());
+    }
+
+    private static PaimonColumnHandle getSummaryColumn(ColumnHandle column)
+    {
+        if (!(requireNonNull(column, "constraint summary contains null column") instanceof PaimonColumnHandle paimonColumnHandle)) {
+            throw new IllegalStateException("Paimon filter extraction requires PaimonColumnHandle, got: "
+                    + column.getClass().getName());
+        }
+        return paimonColumnHandle;
     }
 
     /**
@@ -117,43 +188,48 @@ public class PaimonFilterExtractor
      */
     public static Map<PaimonColumnHandle, Domain> extractTrinoColumnHandleForExpressionFilter(Constraint constraint)
     {
-        Map<PaimonColumnHandle, Domain> expressionPredicates = Collections.emptyMap();
+        requireNonNull(constraint, "constraint is null");
+        return extractExpressionPredicates(constraint.getAssignments(), constraint.getExpression());
+    }
 
-        if (constraint.getExpression() instanceof Call expression) {
-            Map<String, ColumnHandle> assignments = constraint.getAssignments();
-
-            if (expression.getFunctionName().equals(EQUAL_OPERATOR_FUNCTION_NAME)) {
-                expressionPredicates = handleExpressionEqualOrIn(assignments, expression, false);
-            }
-            else if (expression.getFunctionName().equals(IN_PREDICATE_FUNCTION_NAME)) {
-                expressionPredicates = handleExpressionEqualOrIn(assignments, expression, true);
-            }
-            else if (expression.getFunctionName().equals(AND_FUNCTION_NAME)) {
-                expressionPredicates = handleAndArguments(assignments, expression);
-            }
-            else if (expression.getFunctionName().equals(OR_FUNCTION_NAME)) {
-                expressionPredicates = handleOrArguments(assignments, expression);
-            }
+    private static Map<PaimonColumnHandle, Domain> extractExpressionPredicates(Map<String, ColumnHandle> assignments,
+            ConnectorExpression expression)
+    {
+        if (!(expression instanceof Call call)) {
+            return Collections.emptyMap();
         }
-        return expressionPredicates;
+        if (call.getFunctionName().equals(EQUAL_OPERATOR_FUNCTION_NAME)) {
+            return handleExpressionEqualOrIn(assignments, call, false);
+        }
+        if (call.getFunctionName().equals(IN_PREDICATE_FUNCTION_NAME)) {
+            return handleExpressionEqualOrIn(assignments, call, true);
+        }
+        if (call.getFunctionName().equals(AND_FUNCTION_NAME)) {
+            return handleAndArguments(assignments, call);
+        }
+        if (call.getFunctionName().equals(OR_FUNCTION_NAME)) {
+            return handleOrArguments(assignments, call);
+        }
+        return Collections.emptyMap();
     }
 
     /** Expression filter support the case of "AND" and "IN". */
     private static Map<PaimonColumnHandle, Domain> handleAndArguments(Map<String, ColumnHandle> assignments,
             Call expression)
     {
-        Map<PaimonColumnHandle, Domain> expressionPredicates = new HashMap<>();
+        Map<PaimonColumnHandle, Domain> expressionPredicates = new LinkedHashMap<>();
 
-        expression.getArguments().stream().map(argument -> (Call) argument).forEach(argument -> {
-            if (argument.getFunctionName().equals(EQUAL_OPERATOR_FUNCTION_NAME)) {
-                expressionPredicates.putAll(handleExpressionEqualOrIn(assignments, argument, false));
-            }
-            else if (argument.getFunctionName().equals(IN_PREDICATE_FUNCTION_NAME)) {
-                expressionPredicates.putAll(handleExpressionEqualOrIn(assignments, argument, true));
-            }
-        });
+        expression.getArguments().forEach(argument ->
+                mergeConjuncts(expressionPredicates, extractExpressionPredicates(assignments, argument)));
 
         return expressionPredicates;
+    }
+
+    private static void mergeConjuncts(
+            Map<PaimonColumnHandle, Domain> target,
+            Map<PaimonColumnHandle, Domain> conjuncts)
+    {
+        conjuncts.forEach((column, domain) -> target.merge(column, domain, Domain::intersect));
     }
 
     /**
@@ -163,25 +239,19 @@ public class PaimonFilterExtractor
     private static Map<PaimonColumnHandle, Domain> handleOrArguments(Map<String, ColumnHandle> assignments,
             Call expression)
     {
-        Map<PaimonColumnHandle, Domain> combinedPredicates = new HashMap<>();
+        Map<PaimonColumnHandle, Domain> combinedPredicates = new LinkedHashMap<>();
+        Set<PaimonColumnHandle> extractedColumns = Set.of();
 
         // Collect all predicates from OR arguments
         for (ConnectorExpression argument : expression.getArguments()) {
-            if (!(argument instanceof Call call)) {
-                // Cannot handle non-Call arguments in OR, return empty map
+            Map<PaimonColumnHandle, Domain> argumentPredicates = extractExpressionPredicates(assignments, argument);
+            if (argumentPredicates.isEmpty()) {
                 return Collections.emptyMap();
             }
-
-            Map<PaimonColumnHandle, Domain> argumentPredicates;
-
-            if (call.getFunctionName().equals(EQUAL_OPERATOR_FUNCTION_NAME)) {
-                argumentPredicates = handleExpressionEqualOrIn(assignments, call, false);
+            if (extractedColumns.isEmpty()) {
+                extractedColumns = Set.copyOf(argumentPredicates.keySet());
             }
-            else if (call.getFunctionName().equals(IN_PREDICATE_FUNCTION_NAME)) {
-                argumentPredicates = handleExpressionEqualOrIn(assignments, call, true);
-            }
-            else {
-                // Unsupported function in OR, return empty map
+            else if (!extractedColumns.equals(Set.copyOf(argumentPredicates.keySet()))) {
                 return Collections.emptyMap();
             }
 
@@ -200,36 +270,75 @@ public class PaimonFilterExtractor
     private static Map<PaimonColumnHandle, Domain> handleExpressionEqualOrIn(Map<String, ColumnHandle> assignments,
             Call expression, boolean inClause)
     {
-        Call elementAtExpression = (Call) expression.getArguments().get(0);
+        if (expression.getArguments().size() != 2) {
+            return Collections.emptyMap();
+        }
+        ConnectorExpression left = expression.getArguments().get(0);
+        ConnectorExpression right = expression.getArguments().get(1);
+        ConnectorExpression elementAtArgument = left;
+        ConnectorExpression comparisonValue = right;
+        if (!inClause && right instanceof Call && !(left instanceof Call)) {
+            elementAtArgument = right;
+            comparisonValue = left;
+        }
+        if (!(elementAtArgument instanceof Call elementAtExpression)) {
+            return Collections.emptyMap();
+        }
 
         String functionName = elementAtExpression.getFunctionName().getName();
 
         switch (functionName) {
             case TRINO_MAP_ELEMENT_AT_FUNCTION_NAME : {
-                Variable columnExpression = (Variable) elementAtExpression.getArguments().get(0);
-                Constant columnKey = (Constant) elementAtExpression.getArguments().get(1);
+                if (elementAtExpression.getArguments().size() != 2) {
+                    return Collections.emptyMap();
+                }
+                if (!(elementAtExpression.getArguments().get(0) instanceof Variable columnExpression)) {
+                    return Collections.emptyMap();
+                }
+                if (!(elementAtExpression.getArguments().get(1) instanceof Constant columnKey)) {
+                    return Collections.emptyMap();
+                }
 
-                Constant elementAtValue = (Constant) expression.getArguments().get(1);
                 List<Range> values;
                 Type elementType;
                 if (inClause) {
-                    elementType = ((ArrayType) elementAtValue.getType()).getElementType();
-                    values = elementAtValue.getChildren().stream().filter(a -> ((Constant) a).getValue() != null)
-                            .map(arguemnt -> Range.equal(arguemnt.getType(), ((Constant) arguemnt).getValue()))
+                    if (!(comparisonValue instanceof Call arrayExpression)
+                            || !arrayExpression.getFunctionName().equals(ARRAY_CONSTRUCTOR_FUNCTION_NAME)
+                            || !(arrayExpression.getType() instanceof ArrayType arrayType)) {
+                        return Collections.emptyMap();
+                    }
+                    if (arrayExpression.getArguments().stream().anyMatch(argument -> !(argument instanceof Constant))) {
+                        return Collections.emptyMap();
+                    }
+                    elementType = arrayType.getElementType();
+                    if (arrayExpression.getArguments().stream()
+                            .map(Constant.class::cast)
+                            .anyMatch(argument -> argument.getValue() == null || !argument.getType().equals(elementType))) {
+                        return Collections.emptyMap();
+                    }
+                    values = arrayExpression.getArguments().stream()
+                            .map(Constant.class::cast)
+                            .map(argument -> Range.equal(argument.getType(), argument.getValue()))
                             .collect(Collectors.toList());
                 }
                 else {
+                    if (!(comparisonValue instanceof Constant elementAtValue)) {
+                        return Collections.emptyMap();
+                    }
                     elementType = elementAtValue.getType();
                     values = elementAtValue.getValue() == null
                             ? Collections.emptyList()
                             : ImmutableList.of(Range.equal(elementAtValue.getType(), elementAtValue.getValue()));
                 }
-                if (columnKey.getValue() == null) {
-                    throw new RuntimeException("Expression pares failed: " + expression);
+                if (values.isEmpty()) {
+                    return Collections.emptyMap();
+                }
+                if (!(columnKey.getValue() instanceof Slice nestedName)) {
+                    return Collections.emptyMap();
                 }
 
                 return handleElementAtArguments(assignments, columnExpression.getName(),
-                        ((Slice) columnKey.getValue()).toStringUtf8(), elementType, values);
+                        nestedName.toStringUtf8(), elementType, values);
             }
             default : {
                 return Collections.emptyMap();
@@ -244,12 +353,17 @@ public class PaimonFilterExtractor
     private static Map<PaimonColumnHandle, Domain> handleElementAtArguments(Map<String, ColumnHandle> assignments,
             String columnName, String nestedName, Type elementType, List<Range> ranges)
     {
-        Map<PaimonColumnHandle, Domain> expressionPredicates = Maps.newHashMap();
-        PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) assignments.get(columnName);
+        Map<PaimonColumnHandle, Domain> expressionPredicates = new LinkedHashMap<>();
+        if (!(assignments.get(columnName) instanceof PaimonColumnHandle paimonColumnHandle)) {
+            return expressionPredicates;
+        }
         Type trinoType = paimonColumnHandle.getTrinoType();
-        if (trinoType instanceof MapType) {
+        if (paimonColumnHandle.logicalType().getTypeRoot() == DataTypeRoot.MAP
+                && trinoType instanceof MapType mapType
+                && elementType.equals(mapType.getValueType())) {
             expressionPredicates.put(
-                    PaimonColumnHandle.of(toMapKey(columnName, nestedName), paimonColumnHandle.logicalType()),
+                    PaimonColumnHandle.of(toMapKey(columnName, nestedName), paimonColumnHandle.logicalType(),
+                            paimonColumnHandle.getTrinoType()),
                     Domain.create(SortedRangeSet.copyOf(elementType, ranges), false));
         }
         return expressionPredicates;

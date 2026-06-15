@@ -20,8 +20,11 @@ import io.trino.spi.connector.ConnectorPageSource;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
@@ -31,20 +34,62 @@ public class PaimonMergePageSourceWrapper
 {
     private final ConnectorPageSource pageSource;
     private final List<String> rowIdFields;
-    private final HashMap<String, Integer> fieldToIndex;
+    private final Map<String, Integer> fieldToIndex;
 
     public PaimonMergePageSourceWrapper(ConnectorPageSource pageSource, List<String> rowIdFields,
-            HashMap<String, Integer> fieldToIndex)
+            Map<String, Integer> fieldToIndex)
     {
-        this.pageSource = pageSource;
-        this.rowIdFields = List.copyOf(rowIdFields);
-        this.fieldToIndex = fieldToIndex;
+        this.pageSource = requireNonNull(pageSource, "pageSource is null");
+        this.rowIdFields = copyRowIdFields(rowIdFields);
+        this.fieldToIndex = copyFieldToIndex(fieldToIndex, this.rowIdFields);
     }
 
     public static PaimonMergePageSourceWrapper wrap(ConnectorPageSource pageSource,
-            List<String> rowIdFields, HashMap<String, Integer> fieldToIndex)
+            List<String> rowIdFields, Map<String, Integer> fieldToIndex)
     {
         return new PaimonMergePageSourceWrapper(pageSource, rowIdFields, fieldToIndex);
+    }
+
+    private static List<String> copyRowIdFields(List<String> rowIdFields)
+    {
+        requireNonNull(rowIdFields, "rowIdFields is null");
+        if (rowIdFields.isEmpty()) {
+            throw new IllegalArgumentException("rowIdFields is empty");
+        }
+        Set<String> seenFields = new HashSet<>();
+        for (String rowIdField : rowIdFields) {
+            requireNonNull(rowIdField, "rowIdFields contains null field");
+            if (rowIdField.isBlank()) {
+                throw new IllegalArgumentException("rowIdFields contains blank field");
+            }
+            if (!seenFields.add(rowIdField)) {
+                throw new IllegalArgumentException("rowIdFields contains duplicate field: " + rowIdField);
+            }
+        }
+        return List.copyOf(rowIdFields);
+    }
+
+    private static Map<String, Integer> copyFieldToIndex(Map<String, Integer> fieldToIndex,
+            List<String> rowIdFields)
+    {
+        requireNonNull(fieldToIndex, "fieldToIndex is null");
+        fieldToIndex.forEach((field, index) -> {
+            requireNonNull(field, "fieldToIndex contains null field");
+            if (field.isBlank()) {
+                throw new IllegalArgumentException("fieldToIndex contains blank field");
+            }
+            requireNonNull(index, "fieldToIndex contains null index for field '" + field + "'");
+            if (index < 0) {
+                throw new IllegalArgumentException(
+                        "fieldToIndex contains negative index for field '%s': %s".formatted(field, index));
+            }
+        });
+        for (String rowIdField : rowIdFields) {
+            if (!fieldToIndex.containsKey(rowIdField)) {
+                throw new IllegalArgumentException("Missing row id field: " + rowIdField);
+            }
+        }
+        return new HashMap<>(fieldToIndex);
     }
 
     @Override
@@ -82,8 +127,13 @@ public class PaimonMergePageSourceWrapper
         Block[] rowIdBlocks = new Block[rowIdFields.size()];
         for (int i = 0; i < rowIdFields.size(); i++) {
             String fieldName = rowIdFields.get(i);
-            rowIdBlocks[i] = nextPage.getBlock(requireNonNull(fieldToIndex.get(fieldName),
-                    "Missing row id field: " + fieldName));
+            int channelIndex = fieldToIndex.get(fieldName);
+            if (channelIndex >= nextPage.getChannelCount()) {
+                throw new IllegalStateException(
+                        "Row id field '%s' maps to channel %s, but page has %s channels"
+                                .formatted(fieldName, channelIndex, nextPage.getChannelCount()));
+            }
+            rowIdBlocks[i] = nextPage.getBlock(channelIndex);
         }
 
         // The rowIsNull array size must match rowCount (number of rows), not the number

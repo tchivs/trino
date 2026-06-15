@@ -23,6 +23,9 @@ import java.util.OptionalLong;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Objects.requireNonNull;
+
 public class PaimonSplitSource
         implements
         ConnectorSplitSource
@@ -33,19 +36,24 @@ public class PaimonSplitSource
 
     public PaimonSplitSource(List<PaimonSplit> splits, OptionalLong limit)
     {
+        requireNonNull(splits, "splits is null").forEach(split -> requireNonNull(split, "splits contains null split"));
         this.splits = new LinkedList<>(splits);
-        this.limit = limit;
+        this.limit = requireNonNull(limit, "limit is null");
+        checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
     }
 
     protected CompletableFuture<ConnectorSplitBatch> innerGetNextBatch(int maxSize)
     {
         List<ConnectorSplit> batch = new ArrayList<>();
         for (int i = 0; i < maxSize; i++) {
-            PaimonSplit split = splits.poll();
-            if (split == null || (limit.isPresent() && count >= limit.getAsLong())) {
+            if (limitReached()) {
                 break;
             }
-            count += split.decodeSplit().rowCount();
+            PaimonSplit split = splits.poll();
+            if (split == null) {
+                break;
+            }
+            split.decodeSplit().mergedRowCount().ifPresent(rowCount -> count += rowCount);
             batch.add(split);
         }
         return CompletableFuture.completedFuture(new ConnectorSplitBatch(batch, isFinished()));
@@ -54,6 +62,7 @@ public class PaimonSplitSource
     @Override
     public CompletableFuture<ConnectorSplitBatch> getNextBatch(int maxSize)
     {
+        checkArgument(maxSize > 0, "Cannot fetch a batch of zero size");
         return innerGetNextBatch(maxSize);
     }
 
@@ -65,6 +74,11 @@ public class PaimonSplitSource
     @Override
     public boolean isFinished()
     {
-        return splits.isEmpty() || (limit.isPresent() && count >= limit.getAsLong());
+        return splits.isEmpty() || limitReached();
+    }
+
+    private boolean limitReached()
+    {
+        return limit.isPresent() && count >= limit.getAsLong();
     }
 }

@@ -14,35 +14,77 @@
 package io.trino.plugin.paimon;
 
 import io.airlift.json.JsonCodec;
+import io.airlift.json.JsonCodecFactory;
+import io.airlift.json.ObjectMapperProvider;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.paimon.catalog.PaimonCatalog;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.Type;
 import io.trino.testing.TestingConnectorSession;
+import io.trino.type.TypeDeserializer;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextSearch;
+import org.apache.paimon.predicate.VectorSearch;
+import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FullTextSearchTable;
+import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_SNAPSHOT;
+import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_TIMESTAMP;
+import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TrinoTableHandleTest
 {
-    private final JsonCodec<PaimonTableHandle> codec = JsonCodec.jsonCodec(PaimonTableHandle.class);
+    private static final PaimonCatalog TESTING_CATALOG = new PaimonCatalog(new Options(), unsupportedFileSystemFactory());
+    private final JsonCodec<PaimonTableHandle> codec = tableHandleJsonCodec();
+    private static final ConnectorSession SESSION = TestingConnectorSession.builder()
+            .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+            .build();
+
+    private static JsonCodec<PaimonTableHandle> tableHandleJsonCodec()
+    {
+        ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
+        objectMapperProvider
+                .setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
+        return new JsonCodecFactory(objectMapperProvider).jsonCodec(PaimonTableHandle.class);
+    }
 
     @Test
     public void testPrestoTableHandle()
     {
         PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
-                Optional.empty(), OptionalLong.empty());
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
         testRoundTrip(expected);
     }
 
@@ -50,30 +92,455 @@ public class TrinoTableHandleTest
     public void testTableWithDynamicOptionsMergesHandleAndSessionOptions()
             throws Exception
     {
-        Map<String, String> handleOptions = Map.of(
-                CoreOptions.SCAN_TAG_NAME.key(), "tag-1",
-                CoreOptions.SCAN_SNAPSHOT_ID.key(), "5");
+        Map<String, String> handleOptions = Map.of("custom.option", "value");
         PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
-                Optional.empty(), OptionalLong.empty());
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
 
         AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
         Table table = capturingTable(copiedOptions);
-        Field tableField = PaimonTableHandle.class.getDeclaredField("table");
-        tableField.setAccessible(true);
-        tableField.set(handle, table);
+        setCachedTable(handle, TESTING_CATALOG, table);
 
         ConnectorSession session = TestingConnectorSession.builder()
                 .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
                 .setPropertyValues(Map.of(
-                        PaimonSessionProperties.SCAN_TIMESTAMP, 1234L,
-                        PaimonSessionProperties.SCAN_SNAPSHOT, 9L))
+                        SCAN_TIMESTAMP, 1234L))
                 .build();
 
-        assertThat(handle.tableWithDynamicOptions(null, session)).isSameAs(table);
+        assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, session)).isSameAs(table);
         assertThat(copiedOptions.get())
-                .containsEntry(CoreOptions.SCAN_TAG_NAME.key(), "tag-1")
+                .containsEntry("custom.option", "value")
                 .containsEntry(CoreOptions.SCAN_TIMESTAMP_MILLIS.key(), "1234")
-                .containsEntry(CoreOptions.SCAN_SNAPSHOT_ID.key(), "9");
+                .doesNotContainKey(CoreOptions.SCAN_SNAPSHOT_ID.key());
+    }
+
+    @Test
+    public void testTableWithDynamicOptionsPrefersExplicitTimeTravelSelectionOverSessionProperties()
+            throws Exception
+    {
+        Map<String, String> handleOptions = Map.of(CoreOptions.SCAN_VERSION.key(), "tag-1");
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
+        Table table = capturingTable(copiedOptions);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        SCAN_TIMESTAMP, 1234L,
+                        SCAN_SNAPSHOT, 9L))
+                .build();
+
+        assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, session)).isSameAs(table);
+        assertThat(copiedOptions.get())
+                .containsExactlyInAnyOrderEntriesOf(Map.of(CoreOptions.SCAN_VERSION.key(), "tag-1"));
+    }
+
+    @Test
+    public void testTableWithDynamicOptionsPrefersExplicitIncrementalSelectionOverSessionProperties()
+            throws Exception
+    {
+        Map<String, String> handleOptions = Map.of(
+                CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2",
+                CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "delta");
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
+        Table table = capturingTable(copiedOptions);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        SCAN_TIMESTAMP, 1234L,
+                        SCAN_SNAPSHOT, 9L))
+                .build();
+
+        assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, session)).isSameAs(table);
+        assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(handleOptions);
+    }
+
+    @Test
+    public void testTableWithDynamicOptionsRejectsConflictingSessionScanPropertiesForOrdinaryScans()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, capturingTable(new AtomicReference<>()));
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        SCAN_TIMESTAMP, 1234L,
+                        SCAN_SNAPSHOT, 9L))
+                .build();
+
+        assertThatThrownBy(() -> handle.tableWithDynamicOptions(TESTING_CATALOG, session))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_SESSION_PROPERTY.toErrorCode());
+                    assertThat(exception).hasMessage(
+                            "Only one of %s or %s session properties may be set",
+                            SCAN_TIMESTAMP, SCAN_SNAPSHOT);
+                });
+    }
+
+    @Test
+    public void testTableWithWriteDynamicOptionsDropsStartupSelections()
+            throws Exception
+    {
+        Map<String, String> handleOptions = Map.of(
+                "custom.option", "value",
+                CoreOptions.SCAN_VERSION.key(), "tag-1",
+                CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2");
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
+        FileStoreTable table = capturingFileStoreTable(copiedOptions);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
+        assertThat(copiedOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+    }
+
+    @Test
+    public void testTableWithWriteDynamicOptionsKeepsNonFileStoreTableUntouched()
+            throws Exception
+    {
+        Table table = tableWithComment("table comment");
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(CoreOptions.SCAN_VERSION.key(), "2"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
+    }
+
+    @Test
+    public void testHistoricalReadSchemaRecognizesExplicitVersionSelection()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user",
+                Map.of(CoreOptions.SCAN_VERSION.key(), "tag-1"));
+
+        assertThat(handle.usesHistoricalReadSchema(SESSION)).isTrue();
+    }
+
+    @Test
+    public void testHistoricalReadSchemaRecognizesSessionSnapshotSelection()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of());
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(SCAN_SNAPSHOT, 9L))
+                .build();
+
+        assertThat(handle.usesHistoricalReadSchema(session)).isTrue();
+    }
+
+    @Test
+    public void testSearchWrapperTablesFailFast()
+            throws Exception
+    {
+        PaimonTableHandle vectorSearchHandle = new PaimonTableHandle("test", "vector_search", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(vectorSearchHandle, TESTING_CATALOG, VectorSearchTable.create(innerTable(),
+                new VectorSearch(new float[] {1.0f}, 1, "embedding")));
+
+        assertThatThrownBy(() -> vectorSearchHandle.table(TESTING_CATALOG))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon vector search tables are not supported by the Trino connector");
+                });
+
+        PaimonTableHandle fullTextSearchHandle = new PaimonTableHandle("test", "full_text_search", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(fullTextSearchHandle, TESTING_CATALOG, FullTextSearchTable.create(innerTable(),
+                new FullTextSearch("paimon", 1, "content")));
+
+        assertThatThrownBy(() -> fullTextSearchHandle.table(TESTING_CATALOG))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon full-text search tables are not supported by the Trino connector");
+                });
+    }
+
+    @Test
+    public void testStaleTableHandleReportsTableNotFound()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "missing", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        assertThatThrownBy(() -> handle.table(new MissingTableCatalog()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(TABLE_NOT_FOUND.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon table 'test.missing' does not exist");
+                });
+    }
+
+    @Test
+    public void testMissingColumnReportsColumnNotFound()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, tableWithColumns());
+
+        assertThatThrownBy(() -> handle.columnHandle(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION, "missing"))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(COLUMN_NOT_FOUND.toErrorCode());
+                    assertThat(exception).hasMessage("Column 'missing' does not exist in Paimon table 'test.user'");
+                });
+    }
+
+    @Test
+    public void testColumnHandleRejectsCaseInsensitiveDuplicateFieldNames()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, tableWithRowType(DataTypes.ROW(
+                DataTypes.FIELD(0, "ID", DataTypes.INT()),
+                DataTypes.FIELD(1, "id", DataTypes.STRING()))));
+
+        assertThatThrownBy(() -> handle.columnHandle(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION, "id"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon row type contains case-insensitive duplicate field name 'id'");
+    }
+
+    @Test
+    public void testTableMetadataIncludesPaimonTableComment()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, tableWithComment("table comment"));
+
+        assertThat(handle.tableMetadata(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION).getComment())
+                .contains("table comment");
+    }
+
+    @Test
+    public void testTableMetadataIgnoresEmptyPaimonComments()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, tableWithRowTypeAndComment(
+                DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT(), "")),
+                ""));
+
+        var metadata = handle.tableMetadata(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION);
+        assertThat(metadata.getComment())
+                .isEmpty();
+        assertThat(metadata.getColumns().get(0).getComment())
+                .isNull();
+    }
+
+    @Test
+    public void testTableMetadataRefreshesLatestFileStoreSchema()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        AtomicReference<Boolean> copiedWithLatestSchema = new AtomicReference<>(false);
+        setCachedTable(handle, TESTING_CATALOG, staleFileStoreTable(copiedWithLatestSchema,
+                DataTypes.ROW(DataTypes.FIELD(0, "old_id", DataTypes.INT())),
+                DataTypes.ROW(DataTypes.FIELD(0, "new_id", DataTypes.BIGINT()))));
+
+        ConnectorTableMetadata metadata = handle.tableMetadata(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION);
+
+        assertThat(copiedWithLatestSchema.get()).isTrue();
+        assertThat(metadata.getColumns()).extracting(ColumnMetadata::getName).containsExactly("new_id");
+        assertThat(metadata.getColumns()).extracting(ColumnMetadata::getType).containsExactly(BIGINT);
+    }
+
+    @Test
+    public void testColumnHandleRefreshesLatestFileStoreSchema()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        AtomicReference<Boolean> copiedWithLatestSchema = new AtomicReference<>(false);
+        setCachedTable(handle, TESTING_CATALOG, staleFileStoreTable(copiedWithLatestSchema,
+                DataTypes.ROW(DataTypes.FIELD(0, "old_id", DataTypes.INT())),
+                DataTypes.ROW(DataTypes.FIELD(0, "new_id", DataTypes.BIGINT()))));
+
+        PaimonColumnHandle columnHandle = handle.columnHandle(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION, "new_id");
+
+        assertThat(copiedWithLatestSchema.get()).isTrue();
+        assertThat(columnHandle.getColumnName()).isEqualTo("new_id");
+        assertThat(columnHandle.getTrinoType()).isEqualTo(BIGINT);
+    }
+
+    @Test
+    public void testMetadataLookupDoesNotRefreshNonFileStoreTable()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        Table table = tableWithRowType(DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())));
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        assertThat(handle.columnMetadatas(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION))
+                .extracting(ColumnMetadata::getName)
+                .containsExactly("id");
+    }
+
+    @Test
+    public void testTableHandleRuntimeDependenciesAreRequired()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, tableWithColumns());
+
+        assertThatThrownBy(() -> handle.table(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("catalog is null");
+        assertThatThrownBy(() -> handle.tableWithDynamicOptions(null, TestingConnectorSession.SESSION))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("catalog is null");
+        assertThatThrownBy(() -> handle.tableWithDynamicOptions(TESTING_CATALOG, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThatThrownBy(() -> handle.tableMetadata(TESTING_CATALOG, null, SESSION))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("typeManager is null");
+        assertThatThrownBy(() -> handle.columnMetadatas(TESTING_CATALOG, null, SESSION))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("typeManager is null");
+        assertThatThrownBy(() -> handle.columnHandle(TESTING_CATALOG, null, SESSION, "id"))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("typeManager is null");
+        assertThatThrownBy(() -> handle.columnHandle(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("field is null");
+    }
+
+    @Test
+    public void testMergeTableHandleRejectsMissingTableHandle()
+    {
+        JsonCodec<PaimonMergeTableHandle> mergeHandleCodec = new JsonCodecFactory(new ObjectMapperProvider())
+                .jsonCodec(PaimonMergeTableHandle.class);
+
+        assertThatThrownBy(() -> mergeHandleCodec.fromJson("{}"))
+                .rootCause()
+                .hasMessageContaining("Missing required creator property 'tableHandle'");
+    }
+
+    @Test
+    public void testMergeTableHandleRejectsUnknownJsonFields()
+    {
+        JsonCodec<PaimonMergeTableHandle> mergeHandleCodec = new JsonCodecFactory(new ObjectMapperProvider())
+                .jsonCodec(PaimonMergeTableHandle.class);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("test", "user", Collections.emptyMap(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = appendJsonField(mergeHandleCodec.toJson(new PaimonMergeTableHandle(tableHandle)),
+                "\"unexpectedField\":true");
+
+        assertThatThrownBy(() -> mergeHandleCodec.fromJson(json))
+                .hasRootCauseMessage("Unknown PaimonMergeTableHandle JSON field: unexpectedField");
+    }
+
+    @Test
+    public void testMergeTableHandleAcceptsTrinoTypedJsonField()
+    {
+        JsonCodec<PaimonMergeTableHandle> mergeHandleCodec = new JsonCodecFactory(new ObjectMapperProvider())
+                .jsonCodec(PaimonMergeTableHandle.class);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("test", "user", Collections.emptyMap(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = appendJsonField(mergeHandleCodec.toJson(new PaimonMergeTableHandle(tableHandle)),
+                "\"@type\":\"%s\"".formatted(typedHandleId(PaimonMergeTableHandle.class)));
+
+        assertThat(mergeHandleCodec.fromJson(json).getTableHandle()).isEqualTo(tableHandle);
+    }
+
+    @Test
+    public void testMergeTableHandleRejectsInvalidTrinoTypedJsonField()
+    {
+        JsonCodec<PaimonMergeTableHandle> mergeHandleCodec = new JsonCodecFactory(new ObjectMapperProvider())
+                .jsonCodec(PaimonMergeTableHandle.class);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("test", "user", Collections.emptyMap(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = appendJsonField(mergeHandleCodec.toJson(new PaimonMergeTableHandle(tableHandle)),
+                "\"@type\":{\"name\":\"paimon\"}");
+
+        assertThatThrownBy(() -> mergeHandleCodec.fromJson(json))
+                .hasRootCauseMessage("Invalid PaimonMergeTableHandle JSON @type field");
+    }
+
+    @Test
+    public void testMergeTableHandleRejectsConnectorNameOnlyTypedJsonField()
+    {
+        JsonCodec<PaimonMergeTableHandle> mergeHandleCodec = new JsonCodecFactory(new ObjectMapperProvider())
+                .jsonCodec(PaimonMergeTableHandle.class);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("test", "user", Collections.emptyMap(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = appendJsonField(mergeHandleCodec.toJson(new PaimonMergeTableHandle(tableHandle)),
+                "\"@type\":\"paimon\"");
+
+        assertThatThrownBy(() -> mergeHandleCodec.fromJson(json))
+                .hasRootCauseMessage("Invalid PaimonMergeTableHandle JSON @type field");
+    }
+
+    @Test
+    public void testTableHandleRejectsUnknownJsonFields()
+    {
+        PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = appendJsonField(codec.toJson(expected), "\"unexpectedField\":true");
+
+        assertThatThrownBy(() -> codec.fromJson(json))
+                .hasRootCauseMessage("Unknown PaimonTableHandle JSON field: unexpectedField");
+    }
+
+    @Test
+    public void testTableHandleAcceptsTrinoTypedJsonField()
+    {
+        PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = appendJsonField(codec.toJson(expected), "\"@type\":\"%s\"".formatted(typedHandleId(PaimonTableHandle.class)));
+
+        assertThat(codec.fromJson(json)).isEqualTo(expected);
+    }
+
+    @Test
+    public void testTableHandleRejectsInvalidTrinoTypedJsonField()
+    {
+        PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = appendJsonField(codec.toJson(expected), "\"@type\":[\"paimon\"]");
+
+        assertThatThrownBy(() -> codec.fromJson(json))
+                .hasRootCauseMessage("Invalid PaimonTableHandle JSON @type field");
+    }
+
+    @Test
+    public void testTableHandleRejectsConnectorNameOnlyTypedJsonField()
+    {
+        PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = appendJsonField(codec.toJson(expected), "\"@type\":\"paimon\"");
+
+        assertThatThrownBy(() -> codec.fromJson(json))
+                .hasRootCauseMessage("Invalid PaimonTableHandle JSON @type field");
+    }
+
+    @Test
+    public void testTableHandleAcceptsTrinoTypedJsonFieldInWriteColumns()
+    {
+        List<ColumnHandle> writeColumns = List.of(
+                PaimonColumnHandle.of("id", DataTypes.INT()),
+                PaimonColumnHandle.of("name", DataTypes.STRING()));
+        PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty())
+                .withWriteColumns(writeColumns);
+        String json = codec.toJson(expected)
+                .replace("\"columnName\":\"id\"",
+                        "\"@type\":\"%s\",\"columnName\":\"id\"".formatted(typedHandleId(PaimonColumnHandle.class)));
+
+        assertThat(codec.fromJson(json)).isEqualTo(expected);
     }
 
     private void testRoundTrip(PaimonTableHandle expected)
@@ -87,6 +554,115 @@ public class TrinoTableHandleTest
         assertThat(actual.getProjectedColumns()).isEqualTo(expected.getProjectedColumns());
         assertThat(actual.getWriteColumns()).isEqualTo(expected.getWriteColumns());
         assertThat(actual.getLimit()).isEqualTo(expected.getLimit());
+    }
+
+    private static String appendJsonField(String json, String field)
+    {
+        return json.substring(0, json.length() - 1) + "," + field + "}";
+    }
+
+    private static String removeJsonField(String json, String fieldName)
+    {
+        int fieldStart = findTopLevelJsonField(json, fieldName);
+        int valueStart = json.indexOf(':', fieldStart) + 1;
+        int fieldEnd = findJsonValueEnd(json, valueStart);
+
+        int removeStart = fieldStart;
+        int removeEnd = fieldEnd;
+        if (fieldStart > 1 && json.charAt(fieldStart - 1) == ',') {
+            removeStart = fieldStart - 1;
+        }
+        else if (fieldEnd < json.length() - 1 && json.charAt(fieldEnd) == ',') {
+            removeEnd = fieldEnd + 1;
+        }
+        return json.substring(0, removeStart) + json.substring(removeEnd);
+    }
+
+    private static String replaceJsonField(String json, String fieldName, String replacementValue)
+    {
+        int fieldStart = findTopLevelJsonField(json, fieldName);
+        int valueStart = json.indexOf(':', fieldStart) + 1;
+        int fieldEnd = findJsonValueEnd(json, valueStart);
+        return json.substring(0, valueStart) + replacementValue + json.substring(fieldEnd);
+    }
+
+    private static int findTopLevelJsonField(String json, String fieldName)
+    {
+        String quotedField = "\"" + fieldName + "\"";
+        boolean inString = false;
+        boolean escaped = false;
+        int depth = 0;
+        for (int index = 0; index < json.length(); index++) {
+            char value = json.charAt(index);
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                }
+                else if (value == '\\') {
+                    escaped = true;
+                }
+                else if (value == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (value == '"') {
+                if (depth == 1 && json.startsWith(quotedField, index)) {
+                    return index;
+                }
+                inString = true;
+            }
+            else if (value == '{' || value == '[') {
+                depth++;
+            }
+            else if (value == '}' || value == ']') {
+                depth--;
+            }
+        }
+        throw new IllegalArgumentException("JSON field not found: " + fieldName);
+    }
+
+    private static int findJsonValueEnd(String json, int valueStart)
+    {
+        boolean inString = false;
+        boolean escaped = false;
+        int depth = 0;
+        for (int index = valueStart; index < json.length(); index++) {
+            char value = json.charAt(index);
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                }
+                else if (value == '\\') {
+                    escaped = true;
+                }
+                else if (value == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (value == '"') {
+                inString = true;
+            }
+            else if (value == '{' || value == '[') {
+                depth++;
+            }
+            else if (value == '}' || value == ']') {
+                if (depth == 0) {
+                    return index;
+                }
+                depth--;
+            }
+            else if (value == ',' && depth == 0) {
+                return index;
+            }
+        }
+        return json.length() - 1;
+    }
+
+    private static String typedHandleId(Class<?> handleClass)
+    {
+        return "paimon:" + handleClass.getName();
     }
 
     @Test
@@ -103,22 +679,189 @@ public class TrinoTableHandleTest
     }
 
     @Test
-    public void testLegacyJsonMissingOptionalFields()
+    public void testEmptyWriteColumnsFailFast()
     {
-        PaimonTableHandle actual = codec.fromJson("""
-                {
-                  "schemaName": "test",
-                  "tableName": "user"
-                }
-                """);
+        PaimonTableHandle missingWriteColumns = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
 
-        assertThat(actual.getSchemaName()).isEqualTo("test");
-        assertThat(actual.getTableName()).isEqualTo("user");
-        assertThat(actual.getDynamicOptions()).isEmpty();
-        assertThat(actual.getFilter()).isEqualTo(TupleDomain.all());
-        assertThat(actual.getProjectedColumns()).isEmpty();
-        assertThat(actual.getWriteColumns()).isEmpty();
-        assertThat(actual.getLimit()).isEmpty();
+        assertThatThrownBy(() -> missingWriteColumns.withWriteColumns(List.of()))
+                .hasMessage("writeColumns is empty");
+
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.of(List.<PaimonColumnHandle>of()), OptionalLong.empty()))
+                .hasMessage("writeColumns is empty");
+
+        assertThatThrownBy(() -> PaimonPageSinkProvider.getWriteColumns(missingWriteColumns))
+                .hasMessage("Paimon page sink requires explicit write columns");
+    }
+
+    @Test
+    public void testJsonRejectsEmptyWriteColumns()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        assertThatThrownBy(() -> codec.fromJson(replaceJsonField(codec.toJson(handle), "writeColumns", "[]")))
+                .hasRootCauseMessage("writeColumns is empty");
+    }
+
+    @Test
+    public void testWriteColumnsRejectNulls()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        assertThatThrownBy(() -> handle.withWriteColumns(null))
+                .hasMessage("writeColumns is null");
+        assertThatThrownBy(() -> handle.withWriteColumns(Collections.singletonList(null)))
+                .hasMessage("column is null");
+    }
+
+    @Test
+    public void testWriteColumnsRequirePaimonColumnHandles()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        ColumnHandle wrongColumn = new ColumnHandle() {};
+
+        assertThatThrownBy(() -> handle.withWriteColumns(List.of(wrongColumn)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon table handle requires PaimonColumnHandle, got: %s",
+                        wrongColumn.getClass().getName());
+    }
+
+    @Test
+    public void testTableHandleRejectsNullDynamicOptions()
+    {
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.singletonMap("", "value"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
+                .hasMessage("dynamicOptions contains blank key");
+
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.singletonMap(null, "value"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
+                .hasMessage("dynamicOptions contains null key");
+
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.singletonMap("scan.tag-name", null),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
+                .hasMessage("dynamicOptions contains null value for key 'scan.tag-name'");
+
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.singletonMap("scan.tag-name", " "),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
+                .hasMessage("dynamicOptions contains blank value for key 'scan.tag-name'");
+    }
+
+    @Test
+    public void testTableHandleRejectsBlankSchemaAndTableNames()
+    {
+        assertThatThrownBy(() -> new PaimonTableHandle("", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty()))
+                .hasMessage("schemaName is blank");
+
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty()))
+                .hasMessage("tableName is blank");
+    }
+
+    @Test
+    public void testTableHandleRejectsNullProjectionAndWriteColumns()
+    {
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.of(Collections.singletonList(null)), Optional.empty(), OptionalLong.empty()))
+                .hasMessage("projectedColumns contains null column");
+
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.of(Collections.singletonList(null)), OptionalLong.empty()))
+                .hasMessage("writeColumns contains null column");
+    }
+
+    @Test
+    public void testTableHandleRejectsWrongProjectionAndWriteColumnTypes()
+    {
+        ColumnHandle wrongColumn = new ColumnHandle() {};
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        Optional<List<PaimonColumnHandle>> projectedColumns = (Optional) Optional.of(List.of(wrongColumn));
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        Optional<List<PaimonColumnHandle>> writeColumns = (Optional) Optional.of(List.of(wrongColumn));
+
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                projectedColumns, Optional.empty(), OptionalLong.empty()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("projectedColumns requires PaimonColumnHandle, got: %s",
+                        wrongColumn.getClass().getName());
+
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), writeColumns, OptionalLong.empty()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("writeColumns requires PaimonColumnHandle, got: %s",
+                        wrongColumn.getClass().getName());
+    }
+
+    @Test
+    public void testJsonRejectsNullDynamicOptionValue()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        assertThatThrownBy(() -> codec.fromJson(replaceJsonField(codec.toJson(handle), "dynamicOptions", "{\"\":\"value\"}")))
+                .hasRootCauseMessage("dynamicOptions contains blank key");
+
+        String json = replaceJsonField(codec.toJson(handle), "dynamicOptions", "{\"scan.tag-name\":null}");
+
+        assertThatThrownBy(() -> codec.fromJson(json))
+                .hasRootCauseMessage("dynamicOptions contains null value for key 'scan.tag-name'");
+
+        assertThatThrownBy(() -> codec.fromJson(replaceJsonField(codec.toJson(handle), "dynamicOptions", "{\"scan.tag-name\":\" \"}")))
+                .hasRootCauseMessage("dynamicOptions contains blank value for key 'scan.tag-name'");
+    }
+
+    @Test
+    public void testJsonRejectsNullProjectionAndWriteColumnElements()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        assertThatThrownBy(() -> codec.fromJson(replaceJsonField(codec.toJson(handle), "projectedColumns", "[null]")))
+                .hasRootCauseMessage("projectedColumns contains null column");
+        assertThatThrownBy(() -> codec.fromJson(replaceJsonField(codec.toJson(handle), "writeColumns", "[null]")))
+                .hasRootCauseMessage("writeColumns contains null column");
+    }
+
+    @Test
+    public void testJsonMissingPlanFieldsFails()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = codec.toJson(handle);
+
+        assertMissingTableHandleJsonField(json, "schemaName");
+        assertMissingTableHandleJsonField(json, "tableName");
+        assertMissingTableHandleJsonField(json, "dynamicOptions");
+        assertMissingTableHandleJsonField(json, "filter");
+        assertMissingTableHandleJsonField(json, "projectedColumns");
+        assertMissingTableHandleJsonField(json, "writeColumns");
+        assertMissingTableHandleJsonField(json, "limit");
+    }
+
+    @Test
+    public void testNegativeLimitFailsFast()
+    {
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.of(-1)))
+                .hasMessage("limit must be non-negative");
+
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.of(1));
+        String json = codec.toJson(handle).replace("\"limit\":1", "\"limit\":-1");
+
+        assertThatThrownBy(() -> codec.fromJson(json))
+                .hasRootCauseMessage("limit must be non-negative");
+    }
+
+    private void assertMissingTableHandleJsonField(String json, String fieldName)
+    {
+        assertThatThrownBy(() -> codec.fromJson(removeJsonField(json, fieldName)))
+                .rootCause()
+                .hasMessageContaining("Missing required creator property '%s'".formatted(fieldName));
     }
 
     private static Table capturingTable(AtomicReference<Map<String, String>> copiedOptions)
@@ -143,5 +886,149 @@ public class TrinoTableHandleTest
                 });
         tableReference.set(table);
         return table;
+    }
+
+    private static FileStoreTable capturingFileStoreTable(AtomicReference<Map<String, String>> copiedOptions)
+    {
+        AtomicReference<FileStoreTable> tableReference = new AtomicReference<>();
+        FileStoreTable table = (FileStoreTable) Proxy.newProxyInstance(
+                FileStoreTable.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("copyWithoutTimeTravel")) {
+                        copiedOptions.set(Map.copyOf((Map<String, String>) args[0]));
+                        return tableReference.get();
+                    }
+                    if (method.getName().equals("toString")) {
+                        return "capturingFileStoreTable";
+                    }
+                    if (method.getName().equals("hashCode")) {
+                        return System.identityHashCode(proxy);
+                    }
+                    if (method.getName().equals("equals")) {
+                        return proxy == args[0];
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
+        tableReference.set(table);
+        return table;
+    }
+
+    private static InnerTable innerTable()
+    {
+        return (InnerTable) Proxy.newProxyInstance(
+                InnerTable.class.getClassLoader(),
+                new Class<?>[] {InnerTable.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("toString")) {
+                        return "testing-inner-table";
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Table tableWithColumns()
+    {
+        return tableWithComment(null);
+    }
+
+    private static Table tableWithComment(String comment)
+    {
+        return tableWithRowTypeAndComment(DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())), comment);
+    }
+
+    private static Table tableWithRowType(RowType rowType)
+    {
+        return tableWithRowTypeAndComment(rowType, null);
+    }
+
+    private static FileStoreTable staleFileStoreTable(
+            AtomicReference<Boolean> copiedWithLatestSchema,
+            RowType staleRowType,
+            RowType latestRowType)
+    {
+        FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
+                Table.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(new org.apache.paimon.options.Options());
+                    case "rowType" -> latestRowType;
+                    case "comment" -> Optional.empty();
+                    case "toString" -> "latest-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        return (FileStoreTable) Proxy.newProxyInstance(
+                Table.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithLatestSchema" -> {
+                        copiedWithLatestSchema.set(true);
+                        yield latestTable;
+                    }
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(new org.apache.paimon.options.Options());
+                    case "rowType" -> staleRowType;
+                    case "comment" -> Optional.empty();
+                    case "toString" -> "stale-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Table tableWithRowTypeAndComment(RowType rowType, String comment)
+    {
+        return (Table) Proxy.newProxyInstance(
+                Table.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "rowType" -> rowType;
+                    case "comment" -> Optional.ofNullable(comment);
+                    case "toString" -> "tableWithColumns";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static PaimonCatalog testingCatalog()
+    {
+        return TESTING_CATALOG;
+    }
+
+    private static class MissingTableCatalog
+            extends PaimonCatalog
+    {
+        private MissingTableCatalog()
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+        }
+
+        @Override
+        public Table getTable(Identifier identifier)
+                throws Catalog.TableNotExistException
+        {
+            assertThat(identifier.getDatabaseName()).isEqualTo("test");
+            assertThat(identifier.getObjectName()).isEqualTo("missing");
+            throw new Catalog.TableNotExistException(identifier);
+        }
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+    }
+
+    private static TrinoFileSystemFactory unsupportedFileSystemFactory()
+    {
+        return identity -> {
+            throw new UnsupportedOperationException("filesystem is not used by this test");
+        };
+    }
+
+    private static void setCachedTable(PaimonTableHandle handle, Catalog catalog, Table table)
+            throws Exception
+    {
+        Field tableField = PaimonTableHandle.class.getDeclaredField("tablesByCatalog");
+        tableField.setAccessible(true);
+        IdentityHashMap<Catalog, Table> tablesByCatalog = new IdentityHashMap<>();
+        tablesByCatalog.put(catalog, table);
+        tableField.set(handle, tablesByCatalog);
     }
 }

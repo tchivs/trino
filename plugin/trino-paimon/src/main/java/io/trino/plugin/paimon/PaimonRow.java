@@ -15,9 +15,7 @@ package io.trino.plugin.paimon;
 
 import io.airlift.slice.Slice;
 import io.trino.spi.Page;
-import io.trino.spi.block.ArrayBlock;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.SqlMap;
 import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
@@ -28,7 +26,6 @@ import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeUtils;
-import io.trino.spi.type.VarcharType;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Blob;
 import org.apache.paimon.data.Decimal;
@@ -39,8 +36,14 @@ import org.apache.paimon.data.InternalVector;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.GenericVariantBuilder;
 import org.apache.paimon.data.variant.Variant;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeChecks;
+import org.apache.paimon.types.DataTypeRoot;
+import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.RowKind;
+import org.apache.paimon.types.VectorType;
 
+import java.io.IOException;
 import java.io.Serializable;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -57,10 +60,12 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Math.toIntExact;
+import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.shade.guava30.com.google.common.base.Verify.verify;
 
 public class PaimonRow
@@ -71,30 +76,50 @@ public class PaimonRow
     private final RowKind rowKind;
     private final Page singlePage;
     private final List<Type> types;
+    private final List<DataType> logicalTypes;
 
-    public PaimonRow(Page singlePage, RowKind rowKind)
+    public PaimonRow(Page singlePage, RowKind rowKind, List<Type> types, List<DataType> logicalTypes)
     {
-        this(singlePage, rowKind, Collections.nCopies(singlePage.getChannelCount(), null));
-    }
-
-    public PaimonRow(Page singlePage, RowKind rowKind, List<Type> types)
-    {
+        requireNonNull(singlePage, "singlePage is null");
+        requireNonNull(rowKind, "rowKind is null");
         verify(singlePage.getPositionCount() == 1, "singlePage must have only one row");
+        requireNonNull(types, "types is null");
+        requireNonNull(logicalTypes, "logicalTypes is null");
         verify(types.size() == singlePage.getChannelCount(), "types size must match page channel count");
+        verify(logicalTypes.size() == singlePage.getChannelCount(), "logicalTypes size must match page channel count");
         this.singlePage = singlePage;
         this.rowKind = rowKind;
-        this.types = Collections.unmodifiableList(new ArrayList<>(types));
+        this.types = copyTypes(types);
+        this.logicalTypes = copyLogicalTypes(logicalTypes);
     }
 
-    /** Helper method to parse Variant from JSON stored in VARCHAR block. */
-    private static Variant parseVariantFromBlock(Block block, int position)
+    private static List<Type> copyTypes(List<Type> types)
     {
+        requireNonNull(types, "types is null");
+        return Collections.unmodifiableList(new ArrayList<>(types.stream()
+                .map(type -> requireNonNull(type, "type is null"))
+                .toList()));
+    }
+
+    private static List<DataType> copyLogicalTypes(List<DataType> logicalTypes)
+    {
+        requireNonNull(logicalTypes, "logicalTypes is null");
+        return Collections.unmodifiableList(new ArrayList<>(logicalTypes.stream()
+                .map(type -> requireNonNull(type, "logicalType is null"))
+                .toList()));
+    }
+
+    private static Variant parseVariantFromBlock(Block block, int position, Type type)
+    {
+        if (!type.getBaseName().equals(JSON)) {
+            throw new UnsupportedOperationException("Paimon VARIANT requires Trino JSON type metadata");
+        }
         try {
-            Slice slice = (Slice) TypeUtils.readNativeValue(VarcharType.VARCHAR, block, position);
+            Slice slice = (Slice) TypeUtils.readNativeValue(type, block, position);
             String json = slice.toStringUtf8();
             return GenericVariantBuilder.parseJson(json, true);
         }
-        catch (Exception e) {
+        catch (IOException e) {
             throw new RuntimeException("Failed to parse Variant from JSON", e);
         }
     }
@@ -238,7 +263,7 @@ public class PaimonRow
         if (isNullAt(i)) {
             return null;
         }
-        return parseVariantFromBlock(singlePage.getBlock(i), 0);
+        return parseVariantFromBlock(singlePage.getBlock(i), 0, types.get(i));
     }
 
     @Override
@@ -258,16 +283,17 @@ public class PaimonRow
         }
         Type type = types.get(i);
         if (type instanceof ArrayType arrayType) {
-            return new TrinoArray(arrayType.getObject(singlePage.getBlock(i), 0), arrayType.getElementType());
+            return new TrinoArray(arrayType.getObject(singlePage.getBlock(i), 0), arrayType.getElementType(),
+                    nestedLogicalType(i, 0));
         }
-        ArrayBlock arrayBlock = (ArrayBlock) singlePage.getBlock(i);
-        return new TrinoArray(arrayBlock.getArray(0), null);
+        throw new UnsupportedOperationException("Array type metadata is required");
     }
 
     @Override
     public InternalVector getVector(int i)
     {
-        throw new UnsupportedOperationException();
+        InternalArray array = getArray(i);
+        return array == null ? null : asVector(array, logicalType(i));
     }
 
     @Override
@@ -279,22 +305,34 @@ public class PaimonRow
         Type type = types.get(i);
         if (type instanceof MapType mapType) {
             SqlMap sqlMap = mapType.getObject(singlePage.getBlock(i), 0);
-            return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType());
+            return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType(),
+                    mapKeyLogicalType(logicalType(i)), mapValueLogicalType(logicalType(i)),
+                    isMultiset(logicalType(i)));
         }
         throw new UnsupportedOperationException("Map type metadata is required");
     }
 
     @Override
-    public InternalRow getRow(int i, int i1)
+    public InternalRow getRow(int i, int numFields)
     {
         if (isNullAt(i)) {
             return null;
         }
         Type type = types.get(i);
         if (type instanceof io.trino.spi.type.RowType rowType) {
-            return new TrinoNestedRow(rowType.getObject(singlePage.getBlock(i), 0), rowKind, rowType.getTypeParameters());
+            validateRowFieldCount(numFields, rowType.getFields().size());
+            return new TrinoNestedRow(rowType.getObject(singlePage.getBlock(i), 0), rowKind,
+                    rowType.getTypeParameters(), nestedLogicalTypes(i));
         }
-        return new TrinoNestedRow((RowBlock) singlePage.getBlock(i).getSingleValueBlock(0), rowKind, null);
+        throw new UnsupportedOperationException("Row type metadata is required");
+    }
+
+    private static void validateRowFieldCount(int requestedFieldCount, int actualFieldCount)
+    {
+        if (requestedFieldCount != actualFieldCount) {
+            throw new IllegalArgumentException("Paimon ROW field count mismatch: expected "
+                    + requestedFieldCount + ", got " + actualFieldCount);
+        }
     }
 
     /** Base class for InternalArray implementations wrapping Trino Block. */
@@ -304,11 +342,13 @@ public class PaimonRow
     {
         protected final Block block;
         protected final Type type;
+        protected final DataType logicalType;
 
-        AbstractTrinoArray(Block block, Type type)
+        AbstractTrinoArray(Block block, Type type, DataType logicalType)
         {
             this.block = block;
-            this.type = type;
+            this.type = requireNonNull(type, "type is null");
+            this.logicalType = requireNonNull(logicalType, "logicalType is null");
         }
 
         /** Get the actual position in the block for a logical position. */
@@ -402,7 +442,7 @@ public class PaimonRow
             if (isNullAt(pos)) {
                 return null;
             }
-            return parseVariantFromBlock(block, getPosition(pos));
+            return parseVariantFromBlock(block, getPosition(pos), type);
         }
 
         @Override
@@ -421,16 +461,17 @@ public class PaimonRow
                 return null;
             }
             if (type instanceof ArrayType arrayType) {
-                return new TrinoArray(arrayType.getObject(block, getPosition(pos)), arrayType.getElementType());
+                return new TrinoArray(arrayType.getObject(block, getPosition(pos)), arrayType.getElementType(),
+                        nestedLogicalType(0));
             }
-            ArrayBlock nestedBlock = (ArrayBlock) block;
-            return new TrinoArray(nestedBlock.getArray(getPosition(pos)), null);
+            throw new UnsupportedOperationException("Array type metadata is required");
         }
 
         @Override
         public InternalVector getVector(int pos)
         {
-            throw new UnsupportedOperationException();
+            InternalArray array = getArray(pos);
+            return array == null ? null : asVector(array, logicalType);
         }
 
         @Override
@@ -441,7 +482,8 @@ public class PaimonRow
             }
             if (type instanceof MapType mapType) {
                 SqlMap sqlMap = mapType.getObject(block, getPosition(pos));
-                return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType());
+                return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType(),
+                        mapKeyLogicalType(logicalType), mapValueLogicalType(logicalType), isMultiset(logicalType));
             }
             throw new UnsupportedOperationException("Map type metadata is required");
         }
@@ -453,10 +495,11 @@ public class PaimonRow
                 return null;
             }
             if (type instanceof io.trino.spi.type.RowType rowType) {
+                validateRowFieldCount(numFields, rowType.getFields().size());
                 return new TrinoNestedRow(rowType.getObject(block, getPosition(pos)), RowKind.INSERT,
-                        rowType.getTypeParameters());
+                        rowType.getTypeParameters(), nestedLogicalTypes());
             }
-            return new TrinoNestedRow((RowBlock) block.getSingleValueBlock(getPosition(pos)), RowKind.INSERT, null);
+            throw new UnsupportedOperationException("Row type metadata is required");
         }
 
         @Override
@@ -528,6 +571,16 @@ public class PaimonRow
             }
             return result;
         }
+
+        private DataType nestedLogicalType(int index)
+        {
+            return DataTypeChecks.getNestedTypes(logicalType).get(index);
+        }
+
+        private List<DataType> nestedLogicalTypes()
+        {
+            return DataTypeChecks.getNestedTypes(logicalType);
+        }
     }
 
     /** TrinoArray implementation for {@link InternalArray}. */
@@ -535,14 +588,9 @@ public class PaimonRow
             extends
             AbstractTrinoArray
     {
-        TrinoArray(Block block)
+        TrinoArray(Block block, Type type, DataType logicalType)
         {
-            this(block, null);
-        }
-
-        TrinoArray(Block block, Type type)
-        {
-            super(block, type);
+            super(block, type, logicalType);
         }
 
         @Override
@@ -558,9 +606,241 @@ public class PaimonRow
         }
     }
 
-    /** TrinoMap implementation for {@link InternalMap}. */
-    private record TrinoMap(SqlMap sqlMap, Type keyType, Type valueType) implements InternalMap
+    private DataType logicalType(int index)
     {
+        return logicalTypes.get(index);
+    }
+
+    private DataType nestedLogicalType(int columnIndex, int nestedIndex)
+    {
+        return DataTypeChecks.getNestedTypes(logicalType(columnIndex)).get(nestedIndex);
+    }
+
+    private List<DataType> nestedLogicalTypes(int columnIndex)
+    {
+        return DataTypeChecks.getNestedTypes(logicalType(columnIndex));
+    }
+
+    private static InternalVector asVector(InternalArray array, DataType logicalType)
+    {
+        if (!(logicalType instanceof VectorType vectorType)) {
+            throw new UnsupportedOperationException("Paimon VECTOR logical type metadata is required");
+        }
+        validateVector(array, vectorType);
+        if (array instanceof InternalVector vector) {
+            return vector;
+        }
+        return new TrinoVector(array);
+    }
+
+    private static DataType mapKeyLogicalType(DataType logicalType)
+    {
+        return switch (logicalType.getTypeRoot()) {
+            case MAP, MULTISET -> DataTypeChecks.getNestedTypes(logicalType).get(0);
+            default -> throw new UnsupportedOperationException("Paimon MAP or MULTISET logical type metadata is required");
+        };
+    }
+
+    private static DataType mapValueLogicalType(DataType logicalType)
+    {
+        return switch (logicalType.getTypeRoot()) {
+            case MAP -> DataTypeChecks.getNestedTypes(logicalType).get(1);
+            case MULTISET -> new IntType(false);
+            default -> throw new UnsupportedOperationException("Paimon MAP or MULTISET logical type metadata is required");
+        };
+    }
+
+    private static boolean isMultiset(DataType logicalType)
+    {
+        return logicalType.getTypeRoot() == DataTypeRoot.MULTISET;
+    }
+
+    private static void validateVector(InternalArray array, VectorType vectorType)
+    {
+        if (array.size() != vectorType.getLength()) {
+            throw new IllegalArgumentException("Paimon VECTOR length mismatch: expected "
+                    + vectorType.getLength() + ", got " + array.size());
+        }
+        for (int position = 0; position < array.size(); position++) {
+            if (array.isNullAt(position)) {
+                throw new IllegalArgumentException("Paimon VECTOR does not allow null elements");
+            }
+        }
+    }
+
+    private record TrinoVector(InternalArray array) implements InternalVector
+    {
+        @Override
+        public int size()
+        {
+            return array.size();
+        }
+
+        @Override
+        public boolean isNullAt(int pos)
+        {
+            return array.isNullAt(pos);
+        }
+
+        @Override
+        public boolean getBoolean(int pos)
+        {
+            return array.getBoolean(pos);
+        }
+
+        @Override
+        public byte getByte(int pos)
+        {
+            return array.getByte(pos);
+        }
+
+        @Override
+        public short getShort(int pos)
+        {
+            return array.getShort(pos);
+        }
+
+        @Override
+        public int getInt(int pos)
+        {
+            return array.getInt(pos);
+        }
+
+        @Override
+        public long getLong(int pos)
+        {
+            return array.getLong(pos);
+        }
+
+        @Override
+        public float getFloat(int pos)
+        {
+            return array.getFloat(pos);
+        }
+
+        @Override
+        public double getDouble(int pos)
+        {
+            return array.getDouble(pos);
+        }
+
+        @Override
+        public BinaryString getString(int pos)
+        {
+            return array.getString(pos);
+        }
+
+        @Override
+        public Decimal getDecimal(int pos, int precision, int scale)
+        {
+            return array.getDecimal(pos, precision, scale);
+        }
+
+        @Override
+        public Timestamp getTimestamp(int pos, int precision)
+        {
+            return array.getTimestamp(pos, precision);
+        }
+
+        @Override
+        public byte[] getBinary(int pos)
+        {
+            return array.getBinary(pos);
+        }
+
+        @Override
+        public Variant getVariant(int pos)
+        {
+            return array.getVariant(pos);
+        }
+
+        @Override
+        public Blob getBlob(int pos)
+        {
+            return array.getBlob(pos);
+        }
+
+        @Override
+        public InternalArray getArray(int pos)
+        {
+            return array.getArray(pos);
+        }
+
+        @Override
+        public InternalVector getVector(int pos)
+        {
+            return array.getVector(pos);
+        }
+
+        @Override
+        public InternalMap getMap(int pos)
+        {
+            return array.getMap(pos);
+        }
+
+        @Override
+        public InternalRow getRow(int pos, int numFields)
+        {
+            return array.getRow(pos, numFields);
+        }
+
+        @Override
+        public boolean[] toBooleanArray()
+        {
+            return array.toBooleanArray();
+        }
+
+        @Override
+        public byte[] toByteArray()
+        {
+            return array.toByteArray();
+        }
+
+        @Override
+        public short[] toShortArray()
+        {
+            return array.toShortArray();
+        }
+
+        @Override
+        public int[] toIntArray()
+        {
+            return array.toIntArray();
+        }
+
+        @Override
+        public long[] toLongArray()
+        {
+            return array.toLongArray();
+        }
+
+        @Override
+        public float[] toFloatArray()
+        {
+            return array.toFloatArray();
+        }
+
+        @Override
+        public double[] toDoubleArray()
+        {
+            return array.toDoubleArray();
+        }
+    }
+
+    /** TrinoMap implementation for {@link InternalMap}. */
+    private record TrinoMap(SqlMap sqlMap, Type keyType, Type valueType, DataType keyLogicalType,
+                            DataType valueLogicalType, boolean rejectNullValues) implements InternalMap
+    {
+        private TrinoMap
+        {
+            if (rejectNullValues) {
+                if (!valueType.equals(INTEGER)) {
+                    throw new UnsupportedOperationException("Paimon MULTISET requires Trino integer count type metadata");
+                }
+                validateNoNullValues(sqlMap);
+            }
+        }
+
         @Override
         public int size()
         {
@@ -573,7 +853,7 @@ public class PaimonRow
             Block keyBlock = sqlMap.getRawKeyBlock();
             int offset = sqlMap.getRawOffset();
             int count = sqlMap.getSize();
-            return new TrinoArrayView(keyBlock, offset, count, keyType);
+            return new TrinoArrayView(keyBlock, offset, count, keyType, keyLogicalType);
         }
 
         @Override
@@ -582,7 +862,19 @@ public class PaimonRow
             Block valueBlock = sqlMap.getRawValueBlock();
             int offset = sqlMap.getRawOffset();
             int count = sqlMap.getSize();
-            return new TrinoArrayView(valueBlock, offset, count, valueType);
+            return new TrinoArrayView(valueBlock, offset, count, valueType, valueLogicalType);
+        }
+
+        private static void validateNoNullValues(SqlMap sqlMap)
+        {
+            Block valueBlock = sqlMap.getRawValueBlock();
+            int offset = sqlMap.getRawOffset();
+            int count = sqlMap.getSize();
+            for (int index = 0; index < count; index++) {
+                if (valueBlock.isNull(offset + index)) {
+                    throw new IllegalArgumentException("Paimon MULTISET does not allow null counts");
+                }
+            }
         }
     }
 
@@ -594,17 +886,18 @@ public class PaimonRow
         private final SqlRow sqlRow;
         private final RowKind rowKind;
         private final List<Type> types;
+        private final List<DataType> logicalTypes;
 
-        TrinoNestedRow(RowBlock rowBlock, RowKind rowKind, List<Type> types)
-        {
-            this(rowBlock.getRow(0), rowKind, types);
-        }
-
-        TrinoNestedRow(SqlRow sqlRow, RowKind rowKind, List<Type> types)
+        TrinoNestedRow(SqlRow sqlRow, RowKind rowKind, List<Type> types, List<DataType> logicalTypes)
         {
             this.sqlRow = sqlRow;
             this.rowKind = rowKind;
-            this.types = types == null ? Collections.nCopies(sqlRow.getFieldCount(), null) : types;
+            requireNonNull(types, "types is null");
+            requireNonNull(logicalTypes, "logicalTypes is null");
+            verify(types.size() == sqlRow.getFieldCount(), "types size must match row field count");
+            verify(logicalTypes.size() == sqlRow.getFieldCount(), "logicalTypes size must match row field count");
+            this.types = copyTypes(types);
+            this.logicalTypes = copyLogicalTypes(logicalTypes);
         }
 
         @Override
@@ -725,7 +1018,7 @@ public class PaimonRow
                 return null;
             }
             Block fieldBlock = sqlRow.getRawFieldBlock(pos);
-            return parseVariantFromBlock(fieldBlock, sqlRow.getRawIndex());
+            return parseVariantFromBlock(fieldBlock, sqlRow.getRawIndex(), types.get(pos));
         }
 
         @Override
@@ -746,16 +1039,17 @@ public class PaimonRow
             Block fieldBlock = sqlRow.getRawFieldBlock(pos);
             Type type = types.get(pos);
             if (type instanceof ArrayType arrayType) {
-                return new TrinoArray(arrayType.getObject(fieldBlock, sqlRow.getRawIndex()), arrayType.getElementType());
+                return new TrinoArray(arrayType.getObject(fieldBlock, sqlRow.getRawIndex()), arrayType.getElementType(),
+                        nestedLogicalType(pos, 0));
             }
-            ArrayBlock arrayBlock = (ArrayBlock) fieldBlock;
-            return new TrinoArray(arrayBlock.getArray(sqlRow.getRawIndex()), null);
+            throw new UnsupportedOperationException("Array type metadata is required");
         }
 
         @Override
         public InternalVector getVector(int pos)
         {
-            throw new UnsupportedOperationException();
+            InternalArray array = getArray(pos);
+            return array == null ? null : asVector(array, logicalType(pos));
         }
 
         @Override
@@ -768,7 +1062,9 @@ public class PaimonRow
             Type type = types.get(pos);
             if (type instanceof MapType mapType) {
                 SqlMap sqlMap = mapType.getObject(fieldBlock, sqlRow.getRawIndex());
-                return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType());
+                return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType(),
+                        mapKeyLogicalType(logicalType(pos)), mapValueLogicalType(logicalType(pos)),
+                        isMultiset(logicalType(pos)));
             }
             throw new UnsupportedOperationException("Map type metadata is required");
         }
@@ -782,10 +1078,26 @@ public class PaimonRow
             Block fieldBlock = sqlRow.getRawFieldBlock(pos);
             Type type = types.get(pos);
             if (type instanceof io.trino.spi.type.RowType rowType) {
+                validateRowFieldCount(numFields, rowType.getFields().size());
                 return new TrinoNestedRow(rowType.getObject(fieldBlock, sqlRow.getRawIndex()), rowKind,
-                        rowType.getTypeParameters());
+                        rowType.getTypeParameters(), nestedLogicalTypes(pos));
             }
-            return new TrinoNestedRow((RowBlock) fieldBlock.getSingleValueBlock(sqlRow.getRawIndex()), rowKind, null);
+            throw new UnsupportedOperationException("Row type metadata is required");
+        }
+
+        private DataType logicalType(int index)
+        {
+            return logicalTypes.get(index);
+        }
+
+        private DataType nestedLogicalType(int columnIndex, int nestedIndex)
+        {
+            return DataTypeChecks.getNestedTypes(logicalType(columnIndex)).get(nestedIndex);
+        }
+
+        private List<DataType> nestedLogicalTypes(int columnIndex)
+        {
+            return DataTypeChecks.getNestedTypes(logicalType(columnIndex));
         }
     }
 
@@ -800,14 +1112,9 @@ public class PaimonRow
         private final int offset;
         private final int length;
 
-        TrinoArrayView(Block block, int offset, int length)
+        TrinoArrayView(Block block, int offset, int length, Type type, DataType logicalType)
         {
-            this(block, offset, length, null);
-        }
-
-        TrinoArrayView(Block block, int offset, int length, Type type)
-        {
-            super(block, type);
+            super(block, type, logicalType);
             this.offset = offset;
             this.length = length;
         }

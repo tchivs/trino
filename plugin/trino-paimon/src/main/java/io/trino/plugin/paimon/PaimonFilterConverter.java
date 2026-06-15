@@ -43,6 +43,8 @@ import org.apache.paimon.predicate.In;
 import org.apache.paimon.predicate.LeafPredicate;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.RowType;
 
 import java.math.BigDecimal;
@@ -71,7 +73,7 @@ public class PaimonFilterConverter
 
     public PaimonFilterConverter(RowType rowType)
     {
-        this.rowType = rowType;
+        this.rowType = requireNonNull(rowType, "rowType is null");
         this.builder = new PredicateBuilder(rowType);
     }
 
@@ -85,19 +87,6 @@ public class PaimonFilterConverter
         return convert(tupleDomain, new LinkedHashMap<>(), new LinkedHashMap<>(), true);
     }
 
-    // TODO: Enhancement - SUPPORTS_DEREFERENCE_PUSHDOWN
-    // Current implementation doesn't support nested field predicates (e.g., WHERE
-    // address.city = 'Beijing').
-    // To support dereference pushdown:
-    // 1. Parse nested paths from column names (e.g., ["address", "city"])
-    // 2. Use Paimon's nested field predicate API with proper path resolution
-    // 3. Ensure correct type conversion for nested ROW types
-    // Reference:
-    // tmp-docs/PUSHDOWN_OPTIMIZATION_GUIDE.md#4-supports_dereference_pushdown
-    // Paimon API:
-    // /opt/source/paimon/paimon-common/src/main/java/org/apache/paimon/types/RowType.java
-    // Estimated effort: 8-12 hours
-    // Priority: P2 (Medium value, moderate cost)
     public Optional<Predicate> convert(TupleDomain<PaimonColumnHandle> tupleDomain,
             HashMap<PaimonColumnHandle, Domain> acceptedDomains, HashMap<PaimonColumnHandle, Domain> unsupportedDomains)
     {
@@ -108,6 +97,9 @@ public class PaimonFilterConverter
             HashMap<PaimonColumnHandle, Domain> acceptedDomains, HashMap<PaimonColumnHandle, Domain> unsupportedDomains,
             boolean includeFileIndexColumns)
     {
+        requireNonNull(tupleDomain, "tupleDomain is null");
+        requireNonNull(acceptedDomains, "acceptedDomains is null");
+        requireNonNull(unsupportedDomains, "unsupportedDomains is null");
         if (tupleDomain.isAll()) {
             // alwaysTrue - no filtering needed, return empty to skip filter
             return Optional.empty();
@@ -138,13 +130,13 @@ public class PaimonFilterConverter
             int index = fieldNames.indexOf(FieldNameUtils.toLowerCase(field));
             if (index != -1) {
                 try {
-                    conjuncts
-                            .add(toPredicate(index, columnHandle.getColumnName(), columnHandle.getTrinoType(), domain));
+                    conjuncts.add(toPredicate(index, columnHandle.getColumnName(), columnHandle.logicalType(),
+                            columnHandle.getTrinoType(), domain, nestedColumn.isPresent()));
                     acceptedDomains.put(columnHandle, domain);
                     continue;
                 }
                 catch (UnsupportedOperationException exception) {
-                    LOG.warn("Unsupported predicate, maybe the type of column is not supported yet.", exception);
+                    LOG.debug(exception, "Predicate is not supported for pushdown");
                 }
             }
             unsupportedDomains.put(columnHandle, domain);
@@ -156,8 +148,13 @@ public class PaimonFilterConverter
         return Optional.of(and(conjuncts));
     }
 
-    private Predicate toPredicate(int columnIndex, String field, Type type, Domain domain)
+    private Predicate toPredicate(int columnIndex, String field, DataType logicalType, Type type, Domain domain,
+            boolean fileIndexNestedColumn)
     {
+        if (fileIndexNestedColumn) {
+            return toFileIndexMapElementPredicate(columnIndex, field, logicalType, type, domain);
+        }
+
         if (domain.isAll()) {
             // alwaysTrue for this column - no predicate needed, throw to skip
             throw new UnsupportedOperationException("Domain is ALL, no predicate needed for column: " + field);
@@ -178,50 +175,10 @@ public class PaimonFilterConverter
             return builder.isNotNull((columnIndex));
         }
 
-        // Structural types (Array, Row, Map) support for NULL checks only
-        // For non-NULL predicates, we throw UnsupportedOperationException to fail fast.
-        // Ignoring these expressions could lead to data loss in case of deletions.
-        if (type instanceof ArrayType || type instanceof io.trino.spi.type.RowType) {
-            if (domain.getValues().isNone()) {
-                // Only NULL values allowed - already handled above at line 141-146
-                // This should not be reached, but keeping for safety
-                if (domain.isNullAllowed()) {
-                    return builder.isNull(columnIndex);
-                }
-                return PredicateBuilder.alwaysFalse();
-            }
-
-            if (domain.getValues().isAll()) {
-                // All non-NULL values allowed - already handled above at line 148-154
-                // This should not be reached, but keeping for safety
-                if (!domain.isNullAllowed()) {
-                    return builder.isNotNull(columnIndex);
-                }
-                throw new UnsupportedOperationException("Domain allows all values including null for column: " + field);
-            }
-
-            // For structural types, we cannot push down predicates beyond NULL checks
-            // because Paimon's predicate system doesn't support value-based filtering on
-            // complex types
+        // Structural types support only NULL checks at the Paimon predicate layer.
+        if (type instanceof ArrayType || type instanceof MapType || type instanceof io.trino.spi.type.RowType) {
             throw new UnsupportedOperationException(
                     "Value-based predicates on structural types are not supported: " + type);
-        }
-
-        if (type instanceof MapType) {
-            List<Range> orderedRanges = domain.getValues().getRanges().getOrderedRanges();
-            List<Object> values = new ArrayList<>();
-            List<Predicate> predicates = new ArrayList<>();
-            for (Range range : orderedRanges) {
-                if (range.isSingleValue()) {
-                    values.add(getLiteralValue(((MapType) type).getValueType(), range.getLowBoundedValue()));
-                }
-            }
-            if (!values.isEmpty()) {
-                Predicate predicate = new LeafPredicate(In.INSTANCE, PaimonTypeUtils.toPaimonType(type), columnIndex,
-                        field, values);
-                predicates.add(predicate);
-            }
-            return or(predicates);
         }
 
         if (type.isOrderable()) {
@@ -250,6 +207,42 @@ public class PaimonFilterConverter
         throw new UnsupportedOperationException();
     }
 
+    private Predicate toFileIndexMapElementPredicate(int columnIndex, String field, DataType logicalType, Type type,
+            Domain domain)
+    {
+        if (!(type instanceof MapType mapType)) {
+            throw new UnsupportedOperationException("File-index nested predicates require a map column: " + field);
+        }
+        if (logicalType.getTypeRoot() != DataTypeRoot.MAP) {
+            throw new UnsupportedOperationException("File-index nested predicates require a Paimon MAP column: " + field);
+        }
+
+        if (domain.isAll()) {
+            throw new UnsupportedOperationException("Domain is ALL, no predicate needed for file-index column: " + field);
+        }
+        if (domain.isNullAllowed()) {
+            throw new UnsupportedOperationException("File-index map element predicates with NULL are not supported: " + field);
+        }
+        if (domain.getValues().isNone()) {
+            return PredicateBuilder.alwaysFalse();
+        }
+        if (domain.getValues().isAll()) {
+            throw new UnsupportedOperationException("Only equality/IN file-index map element predicates are supported: " + field);
+        }
+
+        List<Object> values = new ArrayList<>();
+        for (Range range : domain.getValues().getRanges().getOrderedRanges()) {
+            if (!range.isSingleValue()) {
+                throw new UnsupportedOperationException("Only equality/IN file-index map element predicates are supported: " + field);
+            }
+            values.add(getLiteralValue(mapType.getValueType(), range.getSingleValue()));
+        }
+        if (values.isEmpty()) {
+            return PredicateBuilder.alwaysFalse();
+        }
+        return new LeafPredicate(In.INSTANCE, logicalType, columnIndex, field, values);
+    }
+
     private Predicate toPredicate(int columnIndex, Range range)
     {
         Type type = range.getType();
@@ -259,19 +252,6 @@ public class PaimonFilterConverter
             return builder.equal(columnIndex, value);
         }
 
-        // TODO: Enhancement - SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_INEQUALITY
-        // Current implementation supports VARCHAR equality (name = 'Alice') but not
-        // inequality.
-        // To support VARCHAR inequality predicates (name > 'Alice', name LIKE 'A%'):
-        // 1. VARCHAR range queries already work via builder.greaterThan/lessThan (lines
-        // 238-254)
-        // 2. Need to add LIKE pattern support by detecting startsWith patterns
-        // 3. Verify Paimon statistics support VARCHAR range filtering for effective
-        // pruning
-        // Reference:
-        // tmp-docs/PUSHDOWN_OPTIMIZATION_GUIDE.md#2-supports_predicate_pushdown_with_varchar_inequality
-        // Estimated effort: 6-8 hours
-        // Priority: P1 (High value, moderate cost)
         List<Predicate> conjuncts = new ArrayList<>(2);
         if (!range.isLowUnbounded()) {
             Object low = getLiteralValue(type, range.getLowBoundedValue());

@@ -88,6 +88,30 @@ public class TestTrinoMetadata
     }
 
     @Test
+    public void testCreateSchemaExistingSchema()
+    {
+        String schemaName = "test_create_schema_" + System.currentTimeMillis();
+
+        assertUpdate("CREATE SCHEMA " + schemaName);
+        assertQueryFails("CREATE SCHEMA " + schemaName, ".*Schema 'paimon\\.%s' already exists.*".formatted(schemaName));
+        assertUpdate("CREATE SCHEMA IF NOT EXISTS " + schemaName);
+
+        assertUpdate("DROP SCHEMA " + schemaName);
+    }
+
+    @Test
+    public void testDropNonEmptySchemaRequiresCascade()
+    {
+        String schemaName = "test_drop_schema_" + System.currentTimeMillis();
+        String tableName = schemaName + ".values_table";
+
+        assertUpdate("CREATE SCHEMA " + schemaName);
+        assertUpdate("CREATE TABLE " + tableName + " (id BIGINT)");
+        assertQueryFails("DROP SCHEMA " + schemaName, ".*Cannot drop non-empty schema '%s'.*".formatted(schemaName));
+        assertUpdate("DROP SCHEMA " + schemaName + " CASCADE");
+    }
+
+    @Test
     public void testGetTableProperties()
     {
         String tableName = "test_properties_" + System.currentTimeMillis();

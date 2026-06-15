@@ -46,9 +46,12 @@ import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
+import org.apache.paimon.data.variant.Variant;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.types.DataType;
-import org.apache.paimon.types.DataTypeChecks;
+import org.apache.paimon.types.IntType;
+import org.apache.paimon.types.MultisetType;
+import org.apache.paimon.types.VectorType;
 import org.apache.paimon.utils.CloseableIterator;
 import org.apache.paimon.utils.InternalRowUtils;
 
@@ -61,7 +64,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static io.trino.plugin.base.util.JsonTypeUtil.jsonParse;
 import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimeMillisToTrinoPicos;
 import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampToTrino;
 import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampToTrinoTimestampWithTimeZone;
@@ -72,8 +78,10 @@ import static io.trino.spi.type.Decimals.encodeShortScaledValue;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
 
 public class PaimonPageSource
         implements
@@ -90,14 +98,20 @@ public class PaimonPageSource
     private boolean isFinished;
     private long numReturn;
 
-    public PaimonPageSource(RecordReader<InternalRow> reader, List<ColumnHandle> projectedColumns, OptionalLong limit)
+    public PaimonPageSource(RecordReader<InternalRow> reader, List<? extends ColumnHandle> projectedColumns,
+            OptionalLong limit)
     {
-        this.iterator = reader.toCloseableIterator();
-        this.limit = limit;
+        this.limit = requireNonNull(limit, "limit is null");
+        checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
+        this.iterator = requireNonNull(reader, "reader is null").toCloseableIterator();
         this.columnTypes = new ArrayList<>();
         this.logicalTypes = new ArrayList<>();
+        requireNonNull(projectedColumns, "projectedColumns is null");
         for (ColumnHandle handle : projectedColumns) {
-            PaimonColumnHandle paimonColumnHandle = (PaimonColumnHandle) handle;
+            if (!(requireNonNull(handle, "projectedColumns contains null column") instanceof PaimonColumnHandle paimonColumnHandle)) {
+                throw new IllegalArgumentException("Paimon page source requires PaimonColumnHandle, got: "
+                        + handle.getClass().getName());
+            }
             columnTypes.add(paimonColumnHandle.getTrinoType());
             logicalTypes.add(paimonColumnHandle.logicalType());
         }
@@ -107,7 +121,10 @@ public class PaimonPageSource
 
     private static void writeSlice(BlockBuilder output, Type type, Object value)
     {
-        if (type instanceof VarcharType || type instanceof io.trino.spi.type.CharType) {
+        if (type.getBaseName().equals(JSON)) {
+            type.writeSlice(output, jsonParse(utf8Slice(((Variant) value).toJson())));
+        }
+        else if (type instanceof VarcharType || type instanceof io.trino.spi.type.CharType) {
             type.writeSlice(output, wrappedBuffer(((BinaryString) value).toBytes()));
         }
         else if (type instanceof VarbinaryType) {
@@ -291,7 +308,7 @@ public class PaimonPageSource
             try {
                 arrayBlockBuilder.buildEntry((ArrayValueBuilder<Throwable>) elementBuilder -> {
                     InternalArray arrayData = (InternalArray) value;
-                    DataType elementType = DataTypeChecks.getNestedTypes(logicalType).get(0);
+                    DataType elementType = arrayElementLogicalType(logicalType);
                     for (int i = 0; i < arrayData.size(); i++) {
                         appendTo(type.getTypeParameters().get(0), elementType,
                                 InternalRowUtils.get(arrayData, i, elementType), elementBuilder);
@@ -299,25 +316,27 @@ public class PaimonPageSource
                 });
             }
             catch (Throwable e) {
-                throw new RuntimeException(e);
+                throw propagateBlockBuilderFailure(e);
             }
             return;
         }
         if (type instanceof RowType) {
             RowBlockBuilder rowBlockBuilder = (RowBlockBuilder) output;
+            org.apache.paimon.types.RowType rowLogicalType = rowLogicalType(logicalType);
+            validateRowFieldCount(type.getTypeParameters().size(), rowLogicalType.getFieldCount());
             try {
                 rowBlockBuilder.buildEntry((RowValueBuilder<Throwable>) fieldBuilders -> {
                     InternalRow rowData = (InternalRow) value;
                     for (int index = 0; index < type.getTypeParameters().size(); index++) {
                         Type fieldType = type.getTypeParameters().get(index);
-                        DataType fieldLogicalType = ((org.apache.paimon.types.RowType) logicalType).getTypeAt(index);
+                        DataType fieldLogicalType = rowLogicalType.getTypeAt(index);
                         appendTo(fieldType, fieldLogicalType, InternalRowUtils.get(rowData, index, fieldLogicalType),
                                 fieldBuilders.get(index));
                     }
                 });
             }
             catch (Throwable e) {
-                throw new RuntimeException(e);
+                throw propagateBlockBuilderFailure(e);
             }
             return;
         }
@@ -325,8 +344,22 @@ public class PaimonPageSource
             InternalMap mapData = (InternalMap) value;
             InternalArray keyArray = mapData.keyArray();
             InternalArray valueArray = mapData.valueArray();
-            DataType keyType = ((org.apache.paimon.types.MapType) logicalType).getKeyType();
-            DataType valueType = ((org.apache.paimon.types.MapType) logicalType).getValueType();
+            DataType keyType;
+            DataType valueType;
+            if (logicalType instanceof org.apache.paimon.types.MapType mapType) {
+                keyType = mapType.getKeyType();
+                valueType = mapType.getValueType();
+            }
+            else if (logicalType instanceof MultisetType multisetType) {
+                if (!type.getTypeParameters().get(1).equals(INTEGER)) {
+                    throw new UnsupportedOperationException("Paimon MULTISET requires Trino integer count type metadata");
+                }
+                keyType = multisetType.getElementType();
+                valueType = new IntType(false);
+            }
+            else {
+                throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unhandled Paimon logical type for Map: " + logicalType);
+            }
             MapBlockBuilder mapBlockBuilder = (MapBlockBuilder) output;
             try {
                 mapBlockBuilder.buildEntry((MapValueBuilder<Throwable>) (keyBuilder, valueBuilder) -> {
@@ -339,10 +372,48 @@ public class PaimonPageSource
                 });
             }
             catch (Throwable e) {
-                throw new RuntimeException(e);
+                throw propagateBlockBuilderFailure(e);
             }
             return;
         }
         throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unhandled type for Block: " + type.getTypeSignature());
+    }
+
+    private static DataType arrayElementLogicalType(DataType logicalType)
+    {
+        if (logicalType instanceof VectorType vectorType) {
+            return vectorType.getElementType();
+        }
+        if (logicalType instanceof org.apache.paimon.types.ArrayType arrayType) {
+            return arrayType.getElementType();
+        }
+        throw new UnsupportedOperationException("Paimon ARRAY or VECTOR logical type metadata is required");
+    }
+
+    private static org.apache.paimon.types.RowType rowLogicalType(DataType logicalType)
+    {
+        if (logicalType instanceof org.apache.paimon.types.RowType rowType) {
+            return rowType;
+        }
+        throw new UnsupportedOperationException("Paimon ROW logical type metadata is required");
+    }
+
+    private static void validateRowFieldCount(int trinoFieldCount, int paimonFieldCount)
+    {
+        if (trinoFieldCount != paimonFieldCount) {
+            throw new IllegalArgumentException("Paimon ROW field count mismatch: expected "
+                    + paimonFieldCount + ", got " + trinoFieldCount);
+        }
+    }
+
+    private static RuntimeException propagateBlockBuilderFailure(Throwable failure)
+    {
+        if (failure instanceof RuntimeException runtimeException) {
+            return runtimeException;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        return new RuntimeException(failure);
     }
 }

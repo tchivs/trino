@@ -1,0 +1,202 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.plugin.paimon;
+
+import io.airlift.slice.Slice;
+import io.trino.spi.Page;
+import io.trino.spi.connector.ConnectorPageSink;
+import org.apache.paimon.table.sink.BatchTableWrite;
+import org.apache.paimon.table.sink.CommitMessage;
+import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.RowKind;
+import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+
+import static io.trino.spi.connector.ConnectorMergeSink.DELETE_OPERATION_NUMBER;
+import static io.trino.spi.connector.ConnectorMergeSink.INSERT_OPERATION_NUMBER;
+import static io.trino.spi.connector.ConnectorMergeSink.UPDATE_DELETE_OPERATION_NUMBER;
+import static io.trino.spi.connector.ConnectorMergeSink.UPDATE_INSERT_OPERATION_NUMBER;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.TinyintType.TINYINT;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+public class PaimonMergeSinkTest
+{
+    @Test
+    public void testMergeRowsAreRoutedToDeleteAndInsertPages()
+    {
+        CapturingPageSink pageSink = new CapturingPageSink();
+        PaimonMergeSink mergeSink = new PaimonMergeSink(pageSink, 1);
+
+        mergeSink.storeMergedRows(new Page(4,
+                integerBlock(10, 20, 30, 40),
+                tinyintBlock(INSERT_OPERATION_NUMBER, DELETE_OPERATION_NUMBER, UPDATE_INSERT_OPERATION_NUMBER,
+                        UPDATE_DELETE_OPERATION_NUMBER),
+                integerBlock(100, 200, 300, 400)));
+
+        assertThat(pageSink.rowKinds).containsExactly(RowKind.DELETE, RowKind.INSERT);
+        assertThat(pageSink.pages).hasSize(2);
+        assertThat(pageSink.pages.get(0).getChannelCount()).isEqualTo(1);
+        assertThat(pageSink.pages.get(0).getPositionCount()).isEqualTo(2);
+        assertThat(INTEGER.getInt(pageSink.pages.get(0).getBlock(0), 0)).isEqualTo(20);
+        assertThat(INTEGER.getInt(pageSink.pages.get(0).getBlock(0), 1)).isEqualTo(40);
+        assertThat(pageSink.pages.get(1).getChannelCount()).isEqualTo(1);
+        assertThat(pageSink.pages.get(1).getPositionCount()).isEqualTo(2);
+        assertThat(INTEGER.getInt(pageSink.pages.get(1).getBlock(0), 0)).isEqualTo(10);
+        assertThat(INTEGER.getInt(pageSink.pages.get(1).getBlock(0), 1)).isEqualTo(30);
+    }
+
+    @Test
+    public void testEmptyMergePageIsNoOp()
+    {
+        CapturingPageSink pageSink = new CapturingPageSink();
+        PaimonMergeSink mergeSink = new PaimonMergeSink(pageSink, 1);
+
+        mergeSink.storeMergedRows(new Page(0,
+                integerBlock(),
+                tinyintBlock(),
+                integerBlock()));
+
+        assertThat(pageSink.pages).isEmpty();
+        assertThat(pageSink.rowKinds).isEmpty();
+    }
+
+    @Test
+    public void testInvalidMergePageShapeFailsFast()
+    {
+        PaimonMergeSink mergeSink = new PaimonMergeSink(new CapturingPageSink(), 1);
+
+        assertThatThrownBy(() -> mergeSink.storeMergedRows(new Page(1,
+                integerBlock(1),
+                tinyintBlock(INSERT_OPERATION_NUMBER))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("inputPage channelCount (2) must equal dataColumns size (1) + 2");
+    }
+
+    @Test
+    public void testInvalidMergeOperationFailsFast()
+    {
+        PaimonMergeSink mergeSink = new PaimonMergeSink(new CapturingPageSink(), 1);
+
+        assertThatThrownBy(() -> mergeSink.storeMergedRows(new Page(1,
+                integerBlock(1),
+                tinyintBlock(3),
+                integerBlock(10))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Invalid merge operation: 3");
+    }
+
+    @Test
+    public void testConstructorRequiresPaimonPageSink()
+    {
+        assertThatThrownBy(() -> new PaimonMergeSink(null, 1))
+                .hasMessage("pageSink is null");
+        assertThatThrownBy(() -> new PaimonMergeSink(new ConnectorPageSink()
+        {
+            @Override
+            public CompletableFuture<?> appendPage(Page page)
+            {
+                return NOT_BLOCKED;
+            }
+
+            @Override
+            public CompletableFuture<Collection<Slice>> finish()
+            {
+                return CompletableFuture.completedFuture(List.of());
+            }
+
+            @Override
+            public void abort() {}
+        }, 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("PaimonMergeSink requires PaimonPageSink");
+        assertThatThrownBy(() -> new PaimonMergeSink(new CapturingPageSink(), -1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("dataColumnCount must be non-negative: -1");
+    }
+
+    @Test
+    public void testAbortClosesUnderlyingPageSink()
+    {
+        CapturingPageSink pageSink = new CapturingPageSink();
+        PaimonMergeSink mergeSink = new PaimonMergeSink(pageSink, 1);
+
+        mergeSink.abort();
+
+        assertThat(pageSink.aborted).isTrue();
+    }
+
+    private static io.trino.spi.block.Block integerBlock(int... values)
+    {
+        io.trino.spi.block.BlockBuilder builder = INTEGER.createFixedSizeBlockBuilder(values.length);
+        for (int value : values) {
+            INTEGER.writeLong(builder, value);
+        }
+        return builder.build();
+    }
+
+    private static io.trino.spi.block.Block tinyintBlock(int... values)
+    {
+        io.trino.spi.block.BlockBuilder builder = TINYINT.createFixedSizeBlockBuilder(values.length);
+        for (int value : values) {
+            TINYINT.writeLong(builder, value);
+        }
+        return builder.build();
+    }
+
+    private static BatchTableWrite writer()
+    {
+        return (BatchTableWrite) Proxy.newProxyInstance(
+                PaimonMergeSinkTest.class.getClassLoader(),
+                new Class<?>[] {BatchTableWrite.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "prepareCommit" -> List.<CommitMessage>of();
+                    case "close" -> null;
+                    case "toString" -> "testing-writer";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static class CapturingPageSink
+            extends PaimonPageSink
+    {
+        private final List<Page> pages = new ArrayList<>();
+        private final List<RowKind> rowKinds = new ArrayList<>();
+        private boolean aborted;
+
+        private CapturingPageSink()
+        {
+            super(writer(), List.of(INTEGER), List.of(DataTypes.INT()));
+        }
+
+        @Override
+        public void writePage(Page page, RowKind rowKind)
+        {
+            pages.add(page);
+            rowKinds.add(rowKind);
+        }
+
+        @Override
+        public void abort()
+        {
+            aborted = true;
+        }
+    }
+}

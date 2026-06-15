@@ -24,23 +24,34 @@ import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.function.table.TableFunctionProcessorProvider;
 import io.trino.spi.function.table.TableFunctionSplitProcessor;
 
+import static java.util.Objects.requireNonNull;
+
 public class TableChangesFunctionProcessorProvider
         implements
         TableFunctionProcessorProvider
 {
-    private final PaimonPageSourceProvider icebergPageSourceProvider;
+    private final PaimonPageSourceProvider pageSourceProvider;
 
     @Inject
-    public TableChangesFunctionProcessorProvider(PaimonPageSourceProvider icebergPageSourceProvider)
+    public TableChangesFunctionProcessorProvider(PaimonPageSourceProvider pageSourceProvider)
     {
-        this.icebergPageSourceProvider = icebergPageSourceProvider;
+        this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
     }
 
     @Override
     public TableFunctionSplitProcessor getSplitProcessor(ConnectorSession session, ConnectorTableFunctionHandle handle,
             ConnectorSplit split)
     {
+        requireNonNull(session, "session is null");
+        requireNonNull(handle, "handle is null");
+        requireNonNull(split, "split is null");
+        if (!(handle instanceof PaimonTableHandle tableHandle)) {
+            throw new IllegalArgumentException("handle must be PaimonTableHandle, got: " + handle.getClass().getName());
+        }
+        if (!(split instanceof PaimonSplit paimonSplit)) {
+            throw new IllegalArgumentException("split must be PaimonSplit, got: " + split.getClass().getName());
+        }
         return new ClassLoaderSafeTableFunctionSplitProcessor(new TableChangesFunctionProcessor(session,
-                (PaimonTableHandle) handle, (PaimonSplit) split, icebergPageSourceProvider), getClass().getClassLoader());
+                tableHandle, paimonSplit, pageSourceProvider), getClass().getClassLoader());
     }
 }

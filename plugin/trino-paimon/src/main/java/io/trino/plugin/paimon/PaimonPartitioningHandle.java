@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -23,30 +24,64 @@ import org.apache.paimon.utils.InstantiationUtil;
 import java.io.IOException;
 import java.util.Arrays;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Objects.requireNonNull;
+
 public record PaimonPartitioningHandle(byte[] schema) implements ConnectorPartitioningHandle
 {
     @JsonCreator
-    public PaimonPartitioningHandle(@JsonProperty("schema") byte[] schema)
+    public PaimonPartitioningHandle(@JsonProperty(value = "schema", required = true) byte[] schema)
     {
-        this.schema = schema;
+        requireNonNull(schema, "schema is null");
+        checkArgument(schema.length > 0, "schema is empty");
+        byte[] schemaCopy = schema.clone();
+        deserializeTableSchema(schemaCopy);
+        this.schema = schemaCopy;
+    }
+
+    @JsonAnySetter
+    public void rejectUnknownJsonField(String name, Object value)
+    {
+        PaimonHandleJsonUtils.rejectUnknownHandleJsonField("PaimonPartitioningHandle", name, value);
     }
 
     @Override
     @JsonProperty
     public byte[] schema()
     {
-        return schema;
+        return schema.clone();
     }
 
     @JsonIgnore
     public TableSchema getOriginalSchema()
     {
+        return deserializeTableSchema(schema);
+    }
+
+    private static TableSchema deserializeTableSchema(byte[] schema)
+    {
         try {
-            return InstantiationUtil.deserializeObject(this.schema, getClass().getClassLoader());
+            Object deserialized = InstantiationUtil.deserializeObject(schema, PaimonPartitioningHandle.class.getClassLoader());
+            checkArgument(deserialized instanceof TableSchema, "schema must contain a serialized Paimon TableSchema");
+            return (TableSchema) deserialized;
         }
         catch (IOException | ClassNotFoundException e) {
-            throw new RuntimeException(e);
+            throw new IllegalArgumentException("schema must contain a serialized Paimon TableSchema");
         }
+    }
+
+    @Override
+    @JsonIgnore
+    public boolean isSingleNode()
+    {
+        return ConnectorPartitioningHandle.super.isSingleNode();
+    }
+
+    @Override
+    @JsonIgnore
+    public boolean isCoordinatorOnly()
+    {
+        return ConnectorPartitioningHandle.super.isCoordinatorOnly();
     }
 
     @Override
@@ -59,7 +94,7 @@ public record PaimonPartitioningHandle(byte[] schema) implements ConnectorPartit
             return false;
         }
         PaimonPartitioningHandle that = (PaimonPartitioningHandle) o;
-        return Arrays.equals(schema, that.schema());
+        return Arrays.equals(schema, that.schema);
     }
 
     @Override

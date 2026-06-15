@@ -23,6 +23,9 @@ import io.trino.spi.type.Type;
 
 import java.util.List;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Objects.requireNonNull;
+
 public class PaimonNodePartitioningProvider
         implements
         ConnectorNodePartitioningProvider
@@ -36,8 +39,19 @@ public class PaimonNodePartitioningProvider
     public BucketFunction getBucketFunction(ConnectorTransactionHandle transactionHandle, ConnectorSession session,
             ConnectorPartitioningHandle partitioningHandle, List<Type> partitionChannelTypes, int workerCount)
     {
-        // todo support dynamic bucket tables
-        PaimonPartitioningHandle paimonPartitioningHandle = (PaimonPartitioningHandle) partitioningHandle;
+        PaimonPartitioningHandle paimonPartitioningHandle = getPartitioningHandle(partitioningHandle);
+        requireNonNull(partitionChannelTypes, "partitionChannelTypes is null");
+        partitionChannelTypes.forEach(type -> requireNonNull(type, "partitionChannelTypes contains null type"));
+        checkArgument(workerCount > 0, "workerCount must be positive: %s", workerCount);
         return new FixedBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, workerCount);
+    }
+
+    static PaimonPartitioningHandle getPartitioningHandle(ConnectorPartitioningHandle partitioningHandle)
+    {
+        if (!(requireNonNull(partitioningHandle, "partitioningHandle is null") instanceof PaimonPartitioningHandle paimonPartitioningHandle)) {
+            throw new IllegalStateException("Paimon node partitioning requires PaimonPartitioningHandle, got: "
+                    + partitioningHandle.getClass().getName());
+        }
+        return paimonPartitioningHandle;
     }
 }

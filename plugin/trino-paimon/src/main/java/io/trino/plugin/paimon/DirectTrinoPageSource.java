@@ -21,8 +21,10 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.LinkedList;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 
 import static java.lang.Math.toIntExact;
+import static java.util.Objects.requireNonNull;
 
 public class DirectTrinoPageSource
         implements
@@ -42,8 +44,12 @@ public class DirectTrinoPageSource
 
     public DirectTrinoPageSource(LinkedList<ConnectorPageSource> pageSourceQueue, OptionalLong limit)
     {
-        this.pageSourceQueue = pageSourceQueue;
-        this.limit = limit;
+        this.pageSourceQueue = requireNonNull(pageSourceQueue, "pageSourceQueue is null");
+        this.pageSourceQueue.forEach(source -> requireNonNull(source, "pageSourceQueue contains null source"));
+        this.limit = requireNonNull(limit, "limit is null");
+        if (this.limit.isPresent() && this.limit.getAsLong() < 0) {
+            throw new IllegalArgumentException("limit must be non-negative");
+        }
         this.current = pageSourceQueue.poll();
     }
 
@@ -85,7 +91,7 @@ public class DirectTrinoPageSource
 
             if (limit.isPresent() && completedPositions + dataPage.getPositionCount() > limit.getAsLong()) {
                 int remainingPositions = toIntExact(limit.getAsLong() - completedPositions);
-                Page limitedPage = dataPage.getRegion(0, remainingPositions);
+                Page limitedPage = dataPage.getRegion(0, remainingPositions).getLoadedPage();
                 completedPositions += limitedPage.getPositionCount();
                 close();
                 return limitedPage;
@@ -172,6 +178,15 @@ public class DirectTrinoPageSource
     public long getMemoryUsage()
     {
         return current == null ? 0 : current.getMemoryUsage();
+    }
+
+    @Override
+    public CompletableFuture<?> isBlocked()
+    {
+        if (closed || current == null || limitReached() || current.isFinished()) {
+            return NOT_BLOCKED;
+        }
+        return current.isBlocked();
     }
 
     @Override

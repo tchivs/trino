@@ -18,9 +18,11 @@ import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoInputFile;
 import io.trino.filesystem.TrinoOutputFile;
+import io.trino.filesystem.local.LocalFileSystem;
 import io.trino.filesystem.memory.MemoryFileSystem;
 import org.apache.paimon.fs.Path;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -48,10 +50,18 @@ public class TestPaimonFileIO
     }
 
     @Test
+    public void testConstructorRequiresPath()
+    {
+        assertThatThrownBy(() -> new PaimonFileIO(new MemoryFileSystem(), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("path is null");
+    }
+
+    @Test
     public void testObjectStoreMkdirsCreatesDirectoryMarker()
             throws IOException
     {
-        PaimonFileIO fileIO = new PaimonFileIO(new MemoryFileSystem(), null);
+        PaimonFileIO fileIO = objectStoreFileIO(new MemoryFileSystem());
         Path databasePath = new Path("memory:///warehouse/minio_smoke.db");
 
         assertThat(fileIO.exists(databasePath)).isFalse();
@@ -67,7 +77,7 @@ public class TestPaimonFileIO
     public void testListStatusReturnsOnlyDirectChildren()
             throws IOException
     {
-        PaimonFileIO fileIO = new PaimonFileIO(new MemoryFileSystem(), null);
+        PaimonFileIO fileIO = objectStoreFileIO(new MemoryFileSystem());
         Path tablePath = new Path("memory:///warehouse/minio_smoke.db/orders");
         Path nestedPath = new Path(tablePath, "manifest");
         Path directFile = new Path(tablePath, "schema-0");
@@ -86,10 +96,100 @@ public class TestPaimonFileIO
     }
 
     @Test
+    public void testObjectStoreExistingDirectoryWithoutMarkerIsDetectedFromChildDirectory()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new MemoryFileSystem());
+        Path tablePath = new Path("memory:///warehouse/minio_smoke.db/orders");
+        Path manifestPath = new Path(tablePath, "manifest");
+        Path manifestFile = new Path(manifestPath, "manifest-list-0");
+
+        fileIO.writeFile(manifestFile, "manifest", false);
+
+        assertThat(fileIO.exists(tablePath)).isTrue();
+        assertThat(fileIO.getFileStatus(tablePath).isDir()).isTrue();
+        assertThat(fileIO.listStatus(tablePath))
+                .singleElement()
+                .satisfies(status -> {
+                    assertThat(status.isDir()).isTrue();
+                    assertThat(status.getPath().toString()).isEqualTo(manifestPath.toString());
+                });
+    }
+
+    @Test
+    public void testObjectStoreExistingDirectoryWithoutMarkerIsDetectedFromDirectFile()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new MemoryFileSystem());
+        Path schemaPath = new Path("memory:///warehouse/minio_smoke.db/orders/schema");
+        Path schemaFile = new Path(schemaPath, "schema-0");
+
+        fileIO.writeFile(schemaFile, "schema", false);
+
+        assertThat(fileIO.exists(schemaPath)).isTrue();
+        assertThat(fileIO.getFileStatus(schemaPath).isDir()).isTrue();
+        assertThat(fileIO.listStatus(schemaPath))
+                .singleElement()
+                .satisfies(status -> {
+                    assertThat(status.isDir()).isFalse();
+                    assertThat(status.getPath().toString()).isEqualTo(schemaFile.toString());
+                });
+    }
+
+    @Test
+    public void testListStatusOnFileReturnsFile()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new MemoryFileSystem());
+        Path file = new Path("memory:///warehouse/minio_smoke.db/orders/schema-0");
+
+        fileIO.writeFile(file, "schema", false);
+
+        assertThat(fileIO.listStatus(file))
+                .singleElement()
+                .satisfies(status -> {
+                    assertThat(status.isDir()).isFalse();
+                    assertThat(status.getPath().toString()).isEqualTo(file.toString());
+                    assertThat(status.getLen()).isEqualTo(6);
+                });
+    }
+
+    @Test
+    public void testListDirectoriesOnFileReturnsEmpty()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new MemoryFileSystem());
+        Path file = new Path("memory:///warehouse/minio_smoke.db/orders/schema-0");
+
+        fileIO.writeFile(file, "schema", false);
+
+        assertThat(fileIO.listDirectories(file)).isEmpty();
+    }
+
+    @Test
+    public void testListStatusOnFileDoesNotProbeFileAsDirectory()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new StrictFileListingFileSystem());
+        Path file = new Path("memory:///warehouse/minio_smoke.db/orders/schema-0");
+
+        fileIO.writeFile(file, "schema", false);
+
+        assertThat(fileIO.getFileStatus(file).isDir()).isFalse();
+        assertThat(fileIO.listStatus(file))
+                .singleElement()
+                .satisfies(status -> {
+                    assertThat(status.isDir()).isFalse();
+                    assertThat(status.getPath().toString()).isEqualTo(file.toString());
+                });
+        assertThat(fileIO.listDirectories(file)).isEmpty();
+    }
+
+    @Test
     public void testNonRecursiveDeleteAllowsOnlyDirectoryMarker()
             throws IOException
     {
-        PaimonFileIO fileIO = new PaimonFileIO(new MemoryFileSystem(), null);
+        PaimonFileIO fileIO = objectStoreFileIO(new MemoryFileSystem());
         Path emptyDirectory = new Path("memory:///warehouse/minio_smoke.db/empty_table");
 
         fileIO.mkdirs(emptyDirectory);
@@ -102,7 +202,7 @@ public class TestPaimonFileIO
     public void testNonRecursiveDeleteFailsWhenDirectChildDirectoryExists()
             throws IOException
     {
-        PaimonFileIO fileIO = new PaimonFileIO(new MemoryFileSystem(), null);
+        PaimonFileIO fileIO = objectStoreFileIO(new MemoryFileSystem());
         Path tablePath = new Path("memory:///warehouse/minio_smoke.db/orders");
         Path nestedPath = new Path(tablePath, "manifest");
 
@@ -120,7 +220,7 @@ public class TestPaimonFileIO
     public void testObjectStoreRenameFileFallsBackToCopyAndDelete()
             throws IOException
     {
-        PaimonFileIO fileIO = new PaimonFileIO(new NoRenameFileSystem(), null);
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
         Path source = new Path("memory:///warehouse/minio_smoke.db/orders/schema/.schema-0.tmp");
         Path target = new Path("memory:///warehouse/minio_smoke.db/orders/schema/schema-0");
 
@@ -134,10 +234,56 @@ public class TestPaimonFileIO
     }
 
     @Test
+    public void testObjectStoreRenameMissingFileReturnsFalse()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
+        Path source = new Path("memory:///warehouse/minio_smoke.db/orders/schema/.schema-0.tmp");
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/schema/schema-0");
+
+        assertThat(fileIO.rename(source, target)).isFalse();
+        assertThat(fileIO.exists(source)).isFalse();
+        assertThat(fileIO.exists(target)).isFalse();
+    }
+
+    @Test
+    public void testObjectStoreRenameFileToExistingTargetReturnsFalse()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
+        Path source = new Path("memory:///warehouse/minio_smoke.db/orders/schema/.schema-0.tmp");
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/schema/schema-0");
+
+        fileIO.writeFile(source, "new-schema", false);
+        fileIO.writeFile(target, "old-schema", false);
+
+        assertThat(fileIO.rename(source, target)).isFalse();
+        assertThat(fileIO.readFileUtf8(source)).isEqualTo("new-schema");
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("old-schema");
+    }
+
+    @Test
+    public void testObjectStoreRenameFileToExistingDirectory()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
+        Path source = new Path("memory:///warehouse/minio_smoke.db/orders/_temporary/.schema-0.tmp");
+        Path targetDirectory = new Path("memory:///warehouse/minio_smoke.db/orders/schema");
+        Path target = new Path(targetDirectory, source.getName());
+
+        fileIO.writeFile(source, "schema", false);
+        fileIO.mkdirs(targetDirectory);
+
+        assertThat(fileIO.rename(source, targetDirectory)).isTrue();
+        assertThat(fileIO.exists(source)).isFalse();
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("schema");
+    }
+
+    @Test
     public void testObjectStoreRenameMarkerDirectoryFails()
             throws IOException
     {
-        PaimonFileIO fileIO = new PaimonFileIO(new NoRenameFileSystem(), null);
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
         Path source = new Path("memory:///warehouse/minio_smoke.db/orders");
         Path target = new Path("memory:///warehouse/minio_smoke.db/orders_renamed");
 
@@ -154,7 +300,7 @@ public class TestPaimonFileIO
     public void testObjectStoreRenameRealDirectoryFails()
             throws IOException
     {
-        PaimonFileIO fileIO = new PaimonFileIO(new NoRenameFileSystem(), null);
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
         Path source = new Path("memory:///warehouse/minio_smoke.db/orders");
         Path target = new Path("memory:///warehouse/minio_smoke.db/orders_renamed");
 
@@ -166,6 +312,99 @@ public class TestPaimonFileIO
                 .hasMessageContaining("does not support directory renames");
         assertThat(fileIO.exists(source)).isTrue();
         assertThat(fileIO.exists(target)).isFalse();
+    }
+
+    @Test
+    public void testObjectStoreRenameDirectoryFailsEvenWhenTargetExists()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
+        Path source = new Path("memory:///warehouse/minio_smoke.db/orders");
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders_renamed");
+
+        fileIO.mkdirs(source);
+        fileIO.mkdirs(target);
+
+        assertThatThrownBy(() -> fileIO.rename(source, target))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("does not support directory renames");
+        assertThat(fileIO.exists(source)).isTrue();
+        assertThat(fileIO.exists(target)).isTrue();
+    }
+
+    @Test
+    public void testLocalRenameMissingFileReturnsFalse(@TempDir java.nio.file.Path tempDirectory)
+            throws IOException
+    {
+        PaimonFileIO fileIO = localFileIO(tempDirectory);
+        Path source = new Path("local:///warehouse/orders/schema/.schema-0.tmp");
+        Path target = new Path("local:///warehouse/orders/schema/schema-0");
+
+        assertThat(fileIO.rename(source, target)).isFalse();
+        assertThat(fileIO.exists(source)).isFalse();
+        assertThat(fileIO.exists(target)).isFalse();
+    }
+
+    @Test
+    public void testLocalRenameFileToExistingTargetReturnsFalse(@TempDir java.nio.file.Path tempDirectory)
+            throws IOException
+    {
+        PaimonFileIO fileIO = localFileIO(tempDirectory);
+        Path source = new Path("local:///warehouse/orders/schema/.schema-0.tmp");
+        Path target = new Path("local:///warehouse/orders/schema/schema-0");
+
+        fileIO.writeFile(source, "new-schema", false);
+        fileIO.writeFile(target, "old-schema", false);
+
+        assertThat(fileIO.rename(source, target)).isFalse();
+        assertThat(fileIO.readFileUtf8(source)).isEqualTo("new-schema");
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("old-schema");
+    }
+
+    @Test
+    public void testLocalRenameFileToExistingDirectory(@TempDir java.nio.file.Path tempDirectory)
+            throws IOException
+    {
+        PaimonFileIO fileIO = localFileIO(tempDirectory);
+        Path source = new Path("local:///warehouse/orders/_temporary/.schema-0.tmp");
+        Path targetDirectory = new Path("local:///warehouse/orders/schema");
+        Path target = new Path(targetDirectory, source.getName());
+
+        fileIO.writeFile(source, "schema", false);
+        fileIO.mkdirs(targetDirectory);
+
+        assertThat(fileIO.rename(source, targetDirectory)).isTrue();
+        assertThat(fileIO.exists(source)).isFalse();
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("schema");
+    }
+
+    @Test
+    public void testLocalRenameDirectoryToExistingDirectory(@TempDir java.nio.file.Path tempDirectory)
+            throws IOException
+    {
+        PaimonFileIO fileIO = localFileIO(tempDirectory);
+        Path source = new Path("local:///warehouse/orders/schema");
+        Path sourceFile = new Path(source, "schema-0");
+        Path targetDirectory = new Path("local:///warehouse/orders_renamed");
+        Path target = new Path(targetDirectory, source.getName());
+
+        fileIO.writeFile(sourceFile, "schema", false);
+        fileIO.mkdirs(targetDirectory);
+
+        assertThat(fileIO.rename(source, targetDirectory)).isTrue();
+        assertThat(fileIO.exists(source)).isFalse();
+        assertThat(fileIO.exists(target)).isTrue();
+        assertThat(fileIO.readFileUtf8(new Path(target, "schema-0"))).isEqualTo("schema");
+    }
+
+    private static PaimonFileIO objectStoreFileIO(TrinoFileSystem fileSystem)
+    {
+        return new PaimonFileIO(fileSystem, new Path("s3://bucket/warehouse"));
+    }
+
+    private static PaimonFileIO localFileIO(java.nio.file.Path tempDirectory)
+    {
+        return new PaimonFileIO(new LocalFileSystem(tempDirectory), new Path("local:///warehouse"));
     }
 
     private static class NoRenameFileSystem
@@ -259,6 +498,30 @@ public class TestPaimonFileIO
                 throws IOException
         {
             return delegate.createTemporaryDirectory(targetPath, temporaryPrefix, relativePrefix);
+        }
+    }
+
+    private static class StrictFileListingFileSystem
+            extends NoRenameFileSystem
+    {
+        @Override
+        public FileIterator listFiles(Location location)
+                throws IOException
+        {
+            if (newInputFile(location).exists()) {
+                throw new IOException("Cannot list files under regular file: " + location);
+            }
+            return super.listFiles(location);
+        }
+
+        @Override
+        public Set<Location> listDirectories(Location location)
+                throws IOException
+        {
+            if (newInputFile(location).exists()) {
+                throw new IOException("Cannot list directories under regular file: " + location);
+            }
+            return super.listDirectories(location);
         }
     }
 }

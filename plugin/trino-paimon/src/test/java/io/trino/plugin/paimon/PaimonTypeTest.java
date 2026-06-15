@@ -30,6 +30,7 @@ import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
+import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.types.DataField;
@@ -43,11 +44,17 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 
+import static io.trino.spi.type.StandardTypes.JSON;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class PaimonTypeTest
 {
+    private static final Type JSON_TYPE = TESTING_TYPE_MANAGER.getType(new TypeSignature(JSON));
+
     @Test
     public void testFromPaimonType()
     {
@@ -68,6 +75,9 @@ public class PaimonTypeTest
 
         Type blobType = PaimonTypeUtils.fromPaimonType(DataTypes.BLOB());
         assertThat(requireNonNull(blobType).getDisplayName()).isEqualTo("varbinary");
+
+        Type variantType = PaimonTypeUtils.fromPaimonType(DataTypes.VARIANT(), TESTING_TYPE_MANAGER);
+        assertThat(requireNonNull(variantType).getDisplayName()).isEqualTo("json");
 
         assertThat(PaimonTypeUtils.fromPaimonType(DataTypes.DECIMAL(38, 0)).getDisplayName()).isEqualTo("decimal(38,0)");
 
@@ -120,6 +130,9 @@ public class PaimonTypeTest
         Type arrayType = PaimonTypeUtils.fromPaimonType(DataTypes.ARRAY(DataTypes.STRING()));
         assertThat(requireNonNull(arrayType).getDisplayName()).isEqualTo("array(varchar)");
 
+        Type vectorType = PaimonTypeUtils.fromPaimonType(DataTypes.VECTOR(3, DataTypes.FLOAT()));
+        assertThat(requireNonNull(vectorType).getDisplayName()).isEqualTo("array(real)");
+
         Type multisetType = PaimonTypeUtils.fromPaimonType(DataTypes.MULTISET(DataTypes.STRING()));
         assertThat(requireNonNull(multisetType).getDisplayName()).isEqualTo("map(varchar, integer)");
 
@@ -138,13 +151,17 @@ public class PaimonTypeTest
         assertThat(charType.asSQLString()).isEqualTo("CHAR(1)");
 
         DataType varCharType = PaimonTypeUtils.toPaimonType(VarcharType.createUnboundedVarcharType());
-        assertThat(varCharType.asSQLString()).isEqualTo("VARCHAR(2147483646)");
+        assertThat(varCharType.asSQLString()).isEqualTo("STRING");
+        assertThat(PaimonTypeUtils.fromPaimonType(varCharType)).isEqualTo(VarcharType.createUnboundedVarcharType());
 
         DataType booleanType = PaimonTypeUtils.toPaimonType(BooleanType.BOOLEAN);
         assertThat(booleanType.asSQLString()).isEqualTo("BOOLEAN");
 
         DataType varbinaryType = PaimonTypeUtils.toPaimonType(VarbinaryType.VARBINARY);
         assertThat(varbinaryType.asSQLString()).isEqualTo("BYTES");
+
+        DataType variantType = PaimonTypeUtils.toPaimonType(TESTING_TYPE_MANAGER.getType(new TypeSignature(JSON)));
+        assertThat(variantType.asSQLString()).isEqualTo("VARIANT");
 
         DataType decimalType = PaimonTypeUtils.toPaimonType(DecimalType.createDecimalType(2, 2));
         assertThat(decimalType.asSQLString()).isEqualTo("DECIMAL(2, 2)");
@@ -200,14 +217,15 @@ public class PaimonTypeTest
 
         DataType mapType = PaimonTypeUtils.toPaimonType(
                 new MapType(IntegerType.INTEGER, VarcharType.createUnboundedVarcharType(), new TypeOperators()));
-        assertThat(mapType.asSQLString()).isEqualTo("MAP<INT, VARCHAR(2147483646)>");
+        assertThat(mapType.asSQLString()).isEqualTo("MAP<INT, STRING>");
 
         List<RowType.Field> fields = new ArrayList<>();
         fields.add(new RowType.Field(java.util.Optional.of("id"), IntegerType.INTEGER));
         fields.add(new RowType.Field(java.util.Optional.of("name"), VarcharType.createUnboundedVarcharType()));
         Type type = RowType.from(fields);
         DataType rowType = PaimonTypeUtils.toPaimonType(type);
-        assertThat(rowType.asSQLString()).isEqualTo("ROW<`id` INT, `name` VARCHAR(2147483646)>");
+        assertThat(rowType.asSQLString()).isEqualTo("ROW<`id` INT, `name` STRING>");
+        assertThat(PaimonTypeUtils.fromPaimonType(rowType)).isEqualTo(type);
 
         DataType nextRowType = PaimonTypeUtils.toPaimonType(type);
         assertThat(nextRowType).isEqualTo(rowType);
@@ -215,6 +233,65 @@ public class PaimonTypeTest
         DataType anonymousRowType = PaimonTypeUtils.toPaimonType(RowType.anonymous(List.of(
                 IntegerType.INTEGER,
                 VarcharType.createUnboundedVarcharType())));
-        assertThat(anonymousRowType.asSQLString()).isEqualTo("ROW<`f0` INT, `f1` VARCHAR(2147483646)>");
+        assertThat(anonymousRowType.asSQLString()).isEqualTo("ROW<`f0` INT, `f1` STRING>");
+    }
+
+    @Test
+    public void testNestedVariantRequiresTypeManager()
+    {
+        assertThatThrownBy(() -> PaimonTypeUtils.fromPaimonType(DataTypes.ARRAY(DataTypes.VARIANT())))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon VARIANT requires TypeManager for Trino JSON type");
+        assertThatThrownBy(() -> PaimonTypeUtils.fromPaimonType(DataTypes.MULTISET(DataTypes.VARIANT())))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon VARIANT requires TypeManager for Trino JSON type");
+    }
+
+    @Test
+    public void testNestedVariantFromPaimonType()
+    {
+        assertThat(PaimonTypeUtils.fromPaimonType(DataTypes.ARRAY(DataTypes.VARIANT()), TESTING_TYPE_MANAGER))
+                .isEqualTo(new ArrayType(JSON_TYPE));
+        assertThat(PaimonTypeUtils.fromPaimonType(
+                DataTypes.MAP(DataTypes.STRING(), DataTypes.VARIANT()), TESTING_TYPE_MANAGER))
+                .isEqualTo(new MapType(VARCHAR, JSON_TYPE, new TypeOperators()));
+        assertThat(PaimonTypeUtils.fromPaimonType(
+                DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.VARIANT())), TESTING_TYPE_MANAGER))
+                .isEqualTo(RowType.from(List.of(RowType.field("payload", JSON_TYPE))));
+        assertThat(PaimonTypeUtils.fromPaimonType(DataTypes.MULTISET(DataTypes.VARIANT()), TESTING_TYPE_MANAGER))
+                .isEqualTo(new MapType(JSON_TYPE, IntegerType.INTEGER, new TypeOperators()));
+    }
+
+    @Test
+    public void testNestedJsonToPaimonVariant()
+    {
+        assertThat(PaimonTypeUtils.toPaimonType(new ArrayType(JSON_TYPE)).asSQLString())
+                .isEqualTo("ARRAY<VARIANT>");
+        assertThat(PaimonTypeUtils.toPaimonType(new MapType(IntegerType.INTEGER, JSON_TYPE, new TypeOperators()))
+                .asSQLString())
+                .isEqualTo("MAP<INT, VARIANT>");
+        assertThat(PaimonTypeUtils.toPaimonType(RowType.from(List.of(RowType.field("payload", JSON_TYPE))))
+                .asSQLString())
+                .isEqualTo("ROW<`payload` VARIANT>");
+        assertThat(PaimonTypeUtils.toPaimonType(new MapType(JSON_TYPE, IntegerType.INTEGER, new TypeOperators()))
+                .asSQLString())
+                .isEqualTo("MAP<VARIANT, INT>");
+    }
+
+    @Test
+    public void testTypeMappingRejectsNullInputs()
+    {
+        assertThatThrownBy(() -> PaimonTypeUtils.fromPaimonType(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("type is null");
+        assertThatThrownBy(() -> PaimonTypeUtils.fromPaimonType(null, TESTING_TYPE_MANAGER))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("type is null");
+        assertThatThrownBy(() -> PaimonTypeUtils.fromPaimonType(DataTypes.INT(), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("typeManager is null");
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("trinoType is null");
     }
 }

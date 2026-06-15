@@ -14,6 +14,10 @@
 package io.trino.plugin.paimon;
 
 import io.airlift.slice.Slices;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.paimon.catalog.PaimonCatalog;
+import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.Constant;
@@ -23,12 +27,14 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TinyintType;
+import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.predicate.CompoundPredicate;
@@ -37,20 +43,33 @@ import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
 import org.apache.paimon.predicate.PredicateVisitor;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.SpecialFields;
+import org.apache.paimon.table.Table;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.types.VarCharType;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.IN_PREDICATE_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.OR_FUNCTION_NAME;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -61,9 +80,16 @@ import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.apache.paimon.fileindex.FileIndexCommon.toMapKey;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TrinoFilterConverterTest
 {
+    private static final PaimonCatalog TESTING_CATALOG = new PaimonCatalog(new org.apache.paimon.options.Options(),
+            unsupportedFileSystemFactory());
+    private static final ConnectorSession TESTING_SESSION = TestingConnectorSession.builder()
+            .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+            .build();
+
     @Test
     public void testAll()
     {
@@ -263,6 +289,26 @@ public class TrinoFilterConverterTest
     }
 
     @Test
+    public void testFilterConverterRejectsNullInputs()
+    {
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "id", new IntType())));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+
+        assertThatThrownBy(() -> new PaimonFilterConverter(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("rowType is null");
+        assertThatThrownBy(() -> converter.convert(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("tupleDomain is null");
+        assertThatThrownBy(() -> converter.convert(TupleDomain.all(), null, new LinkedHashMap<>()))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("acceptedDomains is null");
+        assertThatThrownBy(() -> converter.convert(TupleDomain.all(), new LinkedHashMap<>(), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("unsupportedDomains is null");
+    }
+
+    @Test
     public void testMapElementPredicateIsOnlyConvertedForFileIndex()
     {
         org.apache.paimon.types.MapType mapType = new org.apache.paimon.types.MapType(
@@ -286,7 +332,73 @@ public class TrinoFilterConverterTest
         assertThat(fileIndexPredicate).isInstanceOf(LeafPredicate.class);
         LeafPredicate leafPredicate = (LeafPredicate) fileIndexPredicate;
         assertThat(leafPredicate.fieldNames()).containsExactly(toMapKey("properties", "region"));
+        assertThat(leafPredicate.fieldRefOptional().orElseThrow().type()).isEqualTo(mapElement.logicalType());
         assertThat(leafPredicate.literals()).containsExactly(BinaryString.fromString("ap-south"));
+    }
+
+    @Test
+    public void testPredicateConversionRejectsCaseInsensitiveDuplicateFieldNames()
+    {
+        RowType rowType = new RowType(List.of(
+                new DataField(0, "ID", new IntType()),
+                new DataField(1, "id", new VarCharType(VarCharType.MAX_LENGTH))));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", new IntType());
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(ImmutableMap.of(idColumn,
+                Domain.singleValue(INTEGER, 1L)));
+
+        assertThatThrownBy(() -> converter.convert(domain))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon row type contains case-insensitive duplicate field name 'id'");
+    }
+
+    @Test
+    public void testTopLevelMapValuePredicateIsNotConvertedAsMapElementPredicate()
+    {
+        org.apache.paimon.types.MapType mapType = new org.apache.paimon.types.MapType(
+                new VarCharType(VarCharType.MAX_LENGTH), new VarCharType(VarCharType.MAX_LENGTH));
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "properties", mapType)));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PaimonColumnHandle mapColumn = PaimonColumnHandle.of("properties", mapType);
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(ImmutableMap.of(mapColumn,
+                Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south"))));
+
+        LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
+        LinkedHashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
+        Optional<Predicate> rowPredicate = converter.convert(domain, acceptedDomains, unsupportedDomains);
+
+        assertThat(rowPredicate).isEmpty();
+        assertThat(acceptedDomains).isEmpty();
+        assertThat(unsupportedDomains).containsEntry(mapColumn, domain.getDomains().orElseThrow().get(mapColumn));
+        assertThat(converter.convertForFileIndex(domain)).isEmpty();
+    }
+
+    @Test
+    public void testMapElementFileIndexPredicateOnlySupportsSingleValues()
+    {
+        org.apache.paimon.types.MapType mapType = new org.apache.paimon.types.MapType(
+                new VarCharType(VarCharType.MAX_LENGTH), new VarCharType(VarCharType.MAX_LENGTH));
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "properties", mapType)));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"), mapType);
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(ImmutableMap.of(mapElement,
+                Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, Slices.utf8Slice("ap-south"))), false)));
+
+        assertThat(converter.convertForFileIndex(domain)).isEmpty();
+    }
+
+    @Test
+    public void testMultisetElementPredicateIsNotConvertedAsMapElementPredicate()
+    {
+        org.apache.paimon.types.MultisetType multisetType = new org.apache.paimon.types.MultisetType(
+                new VarCharType(VarCharType.MAX_LENGTH));
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "tags", multisetType)));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PaimonColumnHandle multisetElement = PaimonColumnHandle.of(toMapKey("tags", "red"), multisetType);
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(ImmutableMap.of(multisetElement,
+                Domain.singleValue(INTEGER, 2L)));
+
+        assertThat(converter.convertForFileIndex(domain)).isEmpty();
     }
 
     @Test
@@ -313,5 +425,506 @@ public class TrinoFilterConverterTest
                 new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
                         new VarCharType(VarCharType.MAX_LENGTH)))))).convert(TupleDomain.withColumnDomains(extracted)))
                 .isEmpty();
+    }
+
+    @Test
+    public void testMapElementExpressionFilterIsAppliedWhenSummaryIsUnchanged()
+    {
+        org.apache.paimon.types.MapType mapType = new org.apache.paimon.types.MapType(
+                new VarCharType(VarCharType.MAX_LENGTH), new VarCharType(VarCharType.MAX_LENGTH));
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "properties", mapType)));
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties", mapType);
+        Call expression = mapElementEquals("properties", "region");
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+        PaimonTableHandle table = new PaimonTableHandle("schema", "table", Map.of());
+
+        PaimonFilterExtractor.TrinoFilter firstFilter = PaimonFilterExtractor
+                .extract(table, constraint, rowType, List.of())
+                .orElseThrow();
+
+        PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"),
+                properties.logicalType(), properties.getTrinoType());
+        assertThat(firstFilter.filter().getDomains().orElseThrow()).containsOnly(Map.entry(mapElement,
+                Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south"))));
+        assertThat(firstFilter.remainFilter()).isEqualTo(TupleDomain.all());
+        assertThat(firstFilter.remainingExpression()).isEqualTo(expression);
+
+        PaimonTableHandle filteredTable = table.copy(firstFilter.filter());
+        assertThat(PaimonFilterExtractor.extract(filteredTable, constraint, rowType, List.of())).isEmpty();
+    }
+
+    @Test
+    public void testTupleDomainNoneIsAppliedAsFilter()
+    {
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "id", new IntType())));
+        PaimonTableHandle table = new PaimonTableHandle("schema", "table", Map.of());
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        Constraint constraint = new Constraint((TupleDomain<ColumnHandle>) (TupleDomain) TupleDomain.none());
+
+        PaimonFilterExtractor.TrinoFilter filter = PaimonFilterExtractor
+                .extract(table, constraint, rowType, List.of())
+                .orElseThrow();
+
+        assertThat(filter.filter()).isEqualTo(TupleDomain.none());
+        assertThat(filter.remainFilter()).isEqualTo(TupleDomain.all());
+        assertThat(filter.remainingExpression()).isEqualTo(Constant.TRUE);
+
+        PaimonTableHandle filteredTable = table.copy(filter.filter());
+        assertThat(PaimonFilterExtractor.extract(filteredTable, constraint, rowType, List.of())).isEmpty();
+    }
+
+    @Test
+    public void testFilterExtractionSummaryRequiresPaimonColumnHandles()
+    {
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "id", new IntType())));
+        PaimonTableHandle table = new PaimonTableHandle("schema", "table", Map.of());
+        ColumnHandle wrongColumn = new ColumnHandle() {};
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(
+                wrongColumn, Domain.singleValue(INTEGER, 1L))));
+
+        assertThatThrownBy(() -> PaimonFilterExtractor.extract(table, constraint, rowType, List.of()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon filter extraction requires PaimonColumnHandle, got: %s",
+                        wrongColumn.getClass().getName());
+    }
+
+    @Test
+    public void testFilterExtractorRejectsNullInputs()
+    {
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "id", new IntType())));
+        PaimonTableHandle table = new PaimonTableHandle("schema", "table", Map.of());
+        Constraint constraint = new Constraint(TupleDomain.all());
+
+        assertThatThrownBy(() -> PaimonFilterExtractor.extract(null, table, TESTING_SESSION, constraint))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("catalog is null");
+        assertThatThrownBy(() -> PaimonFilterExtractor.extract(TESTING_CATALOG, null, TESTING_SESSION, constraint))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("paimonTableHandle is null");
+        assertThatThrownBy(() -> PaimonFilterExtractor.extract(TESTING_CATALOG, table, null, constraint))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThatThrownBy(() -> PaimonFilterExtractor.extract(TESTING_CATALOG, table, TESTING_SESSION, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("constraint is null");
+        assertThatThrownBy(() -> PaimonFilterExtractor.extract(table, null, rowType, List.of()))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("constraint is null");
+        assertThatThrownBy(() -> PaimonFilterExtractor.extract(null, constraint, rowType, List.of()))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("paimonTableHandle is null");
+        assertThatThrownBy(() -> PaimonFilterExtractor.extract(table, constraint, null, List.of()))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("rowType is null");
+        assertThatThrownBy(() -> PaimonFilterExtractor.extract(table, constraint, rowType, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("partitionKeys is null");
+        assertThatThrownBy(() -> PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("constraint is null");
+    }
+
+    @Test
+    public void testCatalogFilterExtractionRefreshesLatestFileStoreSchema()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        RowType staleRowType = new RowType(Collections.singletonList(new DataField(0, "old_id", new IntType())));
+        RowType latestRowType = new RowType(Collections.singletonList(new DataField(0, "new_id", new IntType())));
+        PaimonTableHandle table = new PaimonTableHandle("schema", "table", Map.of());
+        setCachedTable(table, TESTING_CATALOG,
+                staleFileStoreTable(copiedWithLatestSchema, staleRowType, latestRowType, List.of("new_id")));
+        PaimonColumnHandle latestColumn = PaimonColumnHandle.of("new_id", DataTypes.INT());
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(
+                latestColumn, Domain.singleValue(INTEGER, 1L))));
+
+        PaimonFilterExtractor.TrinoFilter filter = PaimonFilterExtractor.extract(testingCatalog(), table,
+                TESTING_SESSION, constraint)
+                .orElseThrow();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(filter.filter().getDomains().orElseThrow()).containsOnlyKeys(latestColumn);
+    }
+
+    @Test
+    public void testCatalogFilterExtractionLeavesBaseTableRowTrackingHiddenColumnForEngine()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        RowType baseRowType = new RowType(Collections.singletonList(new DataField(0, "id", new IntType())));
+        PaimonTableHandle table = new PaimonTableHandle("schema", "table", Map.of());
+        setCachedTable(table, TESTING_CATALOG, rowTrackingFileStoreTable(copiedWithLatestSchema, baseRowType));
+        PaimonColumnHandle rowIdColumn = PaimonColumnHandle.of("_row_id", SpecialFields.ROW_ID.type());
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(
+                rowIdColumn, Domain.singleValue(BIGINT, 7L))));
+
+        PaimonFilterExtractor.TrinoFilter filter = PaimonFilterExtractor.extract(testingCatalog(), table,
+                TESTING_SESSION, constraint)
+                .orElseThrow();
+
+        assertThat(filter.filter().getDomains().orElseThrow()).containsOnlyKeys(rowIdColumn);
+        assertThat(filter.remainFilter()).isEqualTo(constraint.getSummary());
+    }
+
+    @Test
+    public void testMapElementInExpressionExtraction()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, IN_PREDICATE_FUNCTION_NAME, List.of(
+                mapElement("properties", properties.getTrinoType(), "region"),
+                new Call(new ArrayType(VARCHAR), ARRAY_CONSTRUCTOR_FUNCTION_NAME,
+                        List.of(
+                                new Constant(Slices.utf8Slice("ap-south"), VARCHAR),
+                                new Constant(Slices.utf8Slice("eu-west"), VARCHAR)))));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        Map<PaimonColumnHandle, Domain> extracted = PaimonFilterExtractor
+                .extractTrinoColumnHandleForExpressionFilter(constraint);
+
+        PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"),
+                properties.logicalType(), properties.getTrinoType());
+        assertThat(extracted).containsOnlyKeys(mapElement);
+        assertThat(extracted.get(mapElement)).isEqualTo(Domain.multipleValues(VARCHAR,
+                List.of(Slices.utf8Slice("ap-south"), Slices.utf8Slice("eu-west"))));
+    }
+
+    @Test
+    public void testMapElementReverseEqualExpressionExtraction()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(
+                new Constant(Slices.utf8Slice("ap-south"), VARCHAR),
+                mapElement("properties", properties.getTrinoType(), "region")));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        Map<PaimonColumnHandle, Domain> extracted = PaimonFilterExtractor
+                .extractTrinoColumnHandleForExpressionFilter(constraint);
+
+        PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"),
+                properties.logicalType(), properties.getTrinoType());
+        assertThat(extracted).containsOnlyKeys(mapElement);
+        assertThat(extracted.get(mapElement)).isEqualTo(Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south")));
+    }
+
+    @Test
+    public void testAndExpressionIntersectsRepeatedMapElementPredicates()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(
+                new Call(BOOLEAN, IN_PREDICATE_FUNCTION_NAME, List.of(
+                        mapElement("properties", properties.getTrinoType(), "region"),
+                        new Call(new ArrayType(VARCHAR), ARRAY_CONSTRUCTOR_FUNCTION_NAME,
+                                List.of(
+                                        new Constant(Slices.utf8Slice("ap-south"), VARCHAR),
+                                        new Constant(Slices.utf8Slice("eu-west"), VARCHAR))))),
+                mapElementEquals("properties", "region")));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        Map<PaimonColumnHandle, Domain> extracted = PaimonFilterExtractor
+                .extractTrinoColumnHandleForExpressionFilter(constraint);
+
+        PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"),
+                properties.logicalType(), properties.getTrinoType());
+        assertThat(extracted).containsOnlyKeys(mapElement);
+        assertThat(extracted.get(mapElement)).isEqualTo(Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south")));
+    }
+
+    @Test
+    public void testNestedAndExpressionExtractsMapElementPredicates()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(
+                new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(
+                        new Call(BOOLEAN, IN_PREDICATE_FUNCTION_NAME, List.of(
+                                mapElement("properties", properties.getTrinoType(), "region"),
+                                new Call(new ArrayType(VARCHAR), ARRAY_CONSTRUCTOR_FUNCTION_NAME,
+                                        List.of(
+                                                new Constant(Slices.utf8Slice("ap-south"), VARCHAR),
+                                                new Constant(Slices.utf8Slice("eu-west"), VARCHAR))))),
+                        mapElementEquals("properties", "region"))),
+                mapElementEquals("properties", "zone", "primary")));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        Map<PaimonColumnHandle, Domain> extracted = PaimonFilterExtractor
+                .extractTrinoColumnHandleForExpressionFilter(constraint);
+
+        PaimonColumnHandle region = PaimonColumnHandle.of(toMapKey("properties", "region"),
+                properties.logicalType(), properties.getTrinoType());
+        PaimonColumnHandle zone = PaimonColumnHandle.of(toMapKey("properties", "zone"),
+                properties.logicalType(), properties.getTrinoType());
+        assertThat(extracted).containsOnlyKeys(region, zone);
+        assertThat(extracted.get(region)).isEqualTo(Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south")));
+        assertThat(extracted.get(zone)).isEqualTo(Domain.singleValue(VARCHAR, Slices.utf8Slice("primary")));
+    }
+
+    @Test
+    public void testMultisetElementExpressionIsNotExtractedAsMapFileIndexPredicate()
+    {
+        PaimonColumnHandle tags = PaimonColumnHandle.of("tags",
+                new org.apache.paimon.types.MultisetType(new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(
+                mapElement("tags", tags.getTrinoType(), "red"),
+                new Constant(2L, INTEGER)));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("tags", tags));
+
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(constraint)).isEmpty();
+    }
+
+    @Test
+    public void testMapElementExpressionExtractionRequiresMapValueType()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(
+                mapElement("properties", properties.getTrinoType(), "region"),
+                new Constant(1L, BIGINT)));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(constraint)).isEmpty();
+    }
+
+    @Test
+    public void testMapElementInExpressionExtractionRequiresMapValueType()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, IN_PREDICATE_FUNCTION_NAME, List.of(
+                mapElement("properties", properties.getTrinoType(), "region"),
+                new Call(new ArrayType(BIGINT), ARRAY_CONSTRUCTOR_FUNCTION_NAME,
+                        List.of(
+                                new Constant(1L, BIGINT),
+                                new Constant(2L, BIGINT)))));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(constraint)).isEmpty();
+    }
+
+    @Test
+    public void testMapElementInExpressionDoesNotPartiallyExtractNonConstantValues()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, IN_PREDICATE_FUNCTION_NAME, List.of(
+                mapElement("properties", properties.getTrinoType(), "region"),
+                new Call(new ArrayType(VARCHAR), ARRAY_CONSTRUCTOR_FUNCTION_NAME,
+                        List.of(
+                                new Constant(Slices.utf8Slice("ap-south"), VARCHAR),
+                                new Variable("fallback", VARCHAR)))));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(constraint)).isEmpty();
+    }
+
+    @Test
+    public void testUnsupportedMapElementExpressionsAreNotExtracted()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Constraint missingAssignment = new Constraint(TupleDomain.all(), mapElementEquals("properties", "region"),
+                Map.of());
+        Constraint nullMapKey = new Constraint(TupleDomain.all(), new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME,
+                List.of(
+                        new Call(VARCHAR, new FunctionName("element_at"), List.of(
+                                new Variable("properties", properties.getTrinoType()),
+                                new Constant(null, VARCHAR))),
+                        new Constant(Slices.utf8Slice("ap-south"), VARCHAR))),
+                Map.of("properties", properties));
+        Constraint nonMapAssignment = new Constraint(TupleDomain.all(), mapElementEquals("properties", "region"),
+                Map.of("properties", PaimonColumnHandle.of("properties", new VarCharType(VarCharType.MAX_LENGTH))));
+
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(missingAssignment)).isEmpty();
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(nullMapKey)).isEmpty();
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(nonMapAssignment)).isEmpty();
+    }
+
+    @Test
+    public void testOrExpressionDoesNotPartiallyExtractUnsupportedDisjunct()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(
+                mapElementEquals("properties", "region"),
+                new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(
+                        new Variable("id", BIGINT),
+                        new Constant(1L, BIGINT)))));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(constraint)).isEmpty();
+    }
+
+    @Test
+    public void testOrExpressionUnionsSameMapElementKey()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(
+                mapElementEquals("properties", "region"),
+                mapElementEquals("properties", "region", "eu-west")));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        Map<PaimonColumnHandle, Domain> extracted = PaimonFilterExtractor
+                .extractTrinoColumnHandleForExpressionFilter(constraint);
+
+        PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"),
+                properties.logicalType(), properties.getTrinoType());
+        assertThat(extracted).containsOnlyKeys(mapElement);
+        assertThat(extracted.get(mapElement)).isEqualTo(Domain.multipleValues(VARCHAR,
+                List.of(Slices.utf8Slice("ap-south"), Slices.utf8Slice("eu-west"))));
+    }
+
+    @Test
+    public void testNestedOrExpressionUnionsSameMapElementKey()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(
+                new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(
+                        mapElementEquals("properties", "region"),
+                        mapElementEquals("properties", "region", "eu-west"))),
+                mapElementEquals("properties", "region", "us-east")));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        Map<PaimonColumnHandle, Domain> extracted = PaimonFilterExtractor
+                .extractTrinoColumnHandleForExpressionFilter(constraint);
+
+        PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"),
+                properties.logicalType(), properties.getTrinoType());
+        assertThat(extracted).containsOnlyKeys(mapElement);
+        assertThat(extracted.get(mapElement)).isEqualTo(Domain.multipleValues(VARCHAR,
+                List.of(Slices.utf8Slice("ap-south"), Slices.utf8Slice("eu-west"), Slices.utf8Slice("us-east"))));
+    }
+
+    @Test
+    public void testOrExpressionDoesNotExtractDifferentMapElementKeys()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(
+                mapElementEquals("properties", "region"),
+                mapElementEquals("properties", "zone")));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(constraint)).isEmpty();
+    }
+
+    private static Call mapElementEquals(String columnName, String key)
+    {
+        return mapElementEquals(columnName, key, "ap-south");
+    }
+
+    private static Call mapElementEquals(String columnName, String key, String value)
+    {
+        return new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(
+                mapElement(columnName, VARCHAR, key),
+                new Constant(Slices.utf8Slice(value), VARCHAR)));
+    }
+
+    private static Call mapElement(String columnName, io.trino.spi.type.Type mapType, String key)
+    {
+        return new Call(VARCHAR, new FunctionName("element_at"), List.of(
+                new Variable(columnName, mapType),
+                new Constant(Slices.utf8Slice(key), VARCHAR)));
+    }
+
+    private static FileStoreTable staleFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            RowType staleRowType,
+            RowType latestRowType,
+            List<String> latestPartitionKeys)
+    {
+        FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
+                TrinoFilterConverterTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(new org.apache.paimon.options.Options());
+                    case "rowType" -> latestRowType;
+                    case "partitionKeys" -> latestPartitionKeys;
+                    case "toString" -> "latest-filter-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        return (FileStoreTable) Proxy.newProxyInstance(
+                TrinoFilterConverterTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithLatestSchema" -> {
+                        copiedWithLatestSchema.set(true);
+                        yield latestTable;
+                    }
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(new org.apache.paimon.options.Options());
+                    case "rowType" -> staleRowType;
+                    case "partitionKeys" -> List.of("old_id");
+                    case "toString" -> "stale-filter-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static FileStoreTable rowTrackingFileStoreTable(AtomicBoolean copiedWithLatestSchema, RowType rowType)
+    {
+        FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
+                TrinoFilterConverterTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of();
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(
+                            new org.apache.paimon.options.Options(
+                                    Map.of(org.apache.paimon.CoreOptions.ROW_TRACKING_ENABLED.key(), "true")));
+                    case "toString" -> "latest-row-tracking-filter-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        return (FileStoreTable) Proxy.newProxyInstance(
+                TrinoFilterConverterTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithLatestSchema" -> {
+                        copiedWithLatestSchema.set(true);
+                        yield latestTable;
+                    }
+                    case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of();
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(
+                            new org.apache.paimon.options.Options(
+                                    Map.of(org.apache.paimon.CoreOptions.ROW_TRACKING_ENABLED.key(), "true")));
+                    case "toString" -> "stale-row-tracking-filter-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static PaimonCatalog testingCatalog()
+    {
+        return TESTING_CATALOG;
+    }
+
+    private static TrinoFileSystemFactory unsupportedFileSystemFactory()
+    {
+        return identity -> {
+            throw new UnsupportedOperationException("filesystem is not used by this test");
+        };
+    }
+
+    private static void setCachedTable(PaimonTableHandle handle, org.apache.paimon.catalog.Catalog catalog, Table table)
+            throws Exception
+    {
+        Field tableField = PaimonTableHandle.class.getDeclaredField("tablesByCatalog");
+        tableField.setAccessible(true);
+        IdentityHashMap<org.apache.paimon.catalog.Catalog, Table> tablesByCatalog = new IdentityHashMap<>();
+        tablesByCatalog.put(catalog, table);
+        tableField.set(handle, tablesByCatalog);
     }
 }

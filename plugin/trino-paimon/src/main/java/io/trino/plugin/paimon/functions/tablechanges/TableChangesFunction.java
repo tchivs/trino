@@ -24,7 +24,6 @@ import io.trino.plugin.paimon.PaimonTableOptionUtils;
 import io.trino.plugin.paimon.PaimonTypeUtils;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.TrinoException;
-import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTransactionHandle;
@@ -34,12 +33,15 @@ import io.trino.spi.function.table.Argument;
 import io.trino.spi.function.table.Descriptor;
 import io.trino.spi.function.table.ScalarArgument;
 import io.trino.spi.function.table.ScalarArgumentSpecification;
+import io.trino.spi.function.table.TableArgument;
 import io.trino.spi.function.table.TableFunctionAnalysis;
 import io.trino.spi.predicate.TupleDomain;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
+import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 
 import java.util.ArrayList;
@@ -49,17 +51,18 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 
+import static io.trino.plugin.base.util.Functions.checkFunctionArgument;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.function.table.ReturnTypeSpecification.GenericTable.GENERIC_TABLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toUnmodifiableSet;
 
 public class TableChangesFunction
         extends
         AbstractConnectorTableFunction
 {
-    private static final Slice INVALID_VALUE = Slices.utf8Slice("invalid");
     private static final String FUNCTION_NAME = "table_changes";
     private static final String SCHEMA_NAME_VAR_NAME = "SCHEMA_NAME";
     private static final String TABLE_NAME_VAR_NAME = "TABLE_NAME";
@@ -81,9 +84,9 @@ public class TableChangesFunction
                         .defaultValue(
                                 Slices.utf8Slice(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.defaultValue().toString()))
                         .type(VARCHAR).build(),
-                ScalarArgumentSpecification.builder().name(INCREMENTAL_BETWEEN).defaultValue(INVALID_VALUE)
+                ScalarArgumentSpecification.builder().name(INCREMENTAL_BETWEEN).defaultValue(null)
                         .type(VARCHAR).build(),
-                ScalarArgumentSpecification.builder().name(INCREMENTAL_BETWEEN_TIMESTAMP).defaultValue(INVALID_VALUE)
+                ScalarArgumentSpecification.builder().name(INCREMENTAL_BETWEEN_TIMESTAMP).defaultValue(null)
                         .type(VARCHAR).build()),
                 GENERIC_TABLE);
         this.trinoMetadata = requireNonNull(trinoMetadataFactory, "trinoMetadataFactory is null").create();
@@ -91,78 +94,151 @@ public class TableChangesFunction
 
     private static String getSchemaName(Map<String, Argument> arguments)
     {
-        if (argumentExists(arguments, SCHEMA_NAME_VAR_NAME)) {
-            return ((Slice) checkNonNull(((ScalarArgument) arguments.get(SCHEMA_NAME_VAR_NAME)).getValue()))
-                    .toStringUtf8();
-        }
-        throw new TrinoException(INVALID_FUNCTION_ARGUMENT, SCHEMA_NAME_VAR_NAME + " argument not found");
+        return getRequiredNonBlankVarcharArgument(arguments, SCHEMA_NAME_VAR_NAME);
     }
 
     private static String getTableName(Map<String, Argument> arguments)
     {
-        if (argumentExists(arguments, TABLE_NAME_VAR_NAME)) {
-            return ((Slice) checkNonNull(((ScalarArgument) arguments.get(TABLE_NAME_VAR_NAME)).getValue()))
-                    .toStringUtf8();
-        }
-        throw new TrinoException(INVALID_FUNCTION_ARGUMENT, TABLE_NAME_VAR_NAME + " argument not found");
+        return getRequiredNonBlankVarcharArgument(arguments, TABLE_NAME_VAR_NAME);
     }
 
-    private static boolean argumentExists(Map<String, Argument> arguments, String key)
+    private static String getRequiredNonBlankVarcharArgument(Map<String, Argument> arguments, String key)
     {
-        Argument argument = arguments.get(key);
-        if (argument instanceof ScalarArgument) {
-            return !((ScalarArgument) argument).getNullableValue().isNull();
-        }
-        throw new IllegalArgumentException("Unsupported argument type: " + argument);
+        String value = getRequiredVarcharArgument(arguments, key).toStringUtf8();
+        checkFunctionArgument(!value.isBlank(), FUNCTION_NAME + " argument " + key + " may not be blank");
+        return value;
     }
 
-    private static Object checkNonNull(Object argumentValue)
+    private static Slice getRequiredVarcharArgument(Map<String, Argument> arguments, String key)
     {
-        if (argumentValue == null) {
-            throw new TrinoException(INVALID_FUNCTION_ARGUMENT, FUNCTION_NAME + " arguments may not be null");
+        Object value = getScalarArgument(arguments, key).getValue();
+        if (value == null) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT, FUNCTION_NAME + " argument " + key + " may not be null");
         }
-        return argumentValue;
+        return checkVarcharArgumentValue(value, key);
+    }
+
+    private static Optional<Slice> getOptionalVarcharArgument(Map<String, Argument> arguments, String key)
+    {
+        Object value = getScalarArgument(arguments, key).getValue();
+        if (value == null) {
+            return Optional.empty();
+        }
+        return Optional.of(checkVarcharArgumentValue(value, key));
+    }
+
+    private static ScalarArgument getScalarArgument(Map<String, Argument> arguments, String key)
+    {
+        Argument argument = requireNonNull(arguments, "arguments is null").get(key);
+        if (argument == null) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT, key + " argument not found");
+        }
+        if (argument instanceof ScalarArgument scalarArgument) {
+            return scalarArgument;
+        }
+        throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "Unsupported argument type for " + key + ": " + argumentTypeName(argument));
+    }
+
+    private static String argumentTypeName(Argument argument)
+    {
+        if (argument instanceof TableArgument) {
+            return "table";
+        }
+        return argument.getClass().getName();
+    }
+
+    private static Slice checkVarcharArgumentValue(Object argumentValue, String key)
+    {
+        if (argumentValue instanceof Slice slice) {
+            return slice;
+        }
+        throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "Unsupported argument value for " + key + ": " + argumentValue.getClass().getName());
+    }
+
+    private static void validateIncrementalWindow(String argumentName, Slice value)
+    {
+        String[] parts = value.toStringUtf8().split(",", -1);
+        if (parts.length != 2 || parts[0].isBlank() || parts[1].isBlank()) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
+                    argumentName + " must be two non-empty values separated by a comma");
+        }
+    }
+
+    private static void validateIncrementalBetweenScanMode(String value)
+    {
+        try {
+            Options.fromMap(Map.of(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), value))
+                    .get(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE);
+        }
+        catch (IllegalArgumentException e) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
+                    "Invalid " + INCREMENTAL_BETWEEN_SCAN_MODE + ": " + value, e);
+        }
+    }
+
+    private static Table latestAnalysisTable(Table table)
+    {
+        requireNonNull(table, "table is null");
+        if (table instanceof FileStoreTable fileStoreTable) {
+            return fileStoreTable.copyWithLatestSchema();
+        }
+        return table;
     }
 
     @Override
     public TableFunctionAnalysis analyze(ConnectorSession session, ConnectorTransactionHandle transaction,
             Map<String, Argument> arguments, ConnectorAccessControl accessControl)
     {
+        requireNonNull(session, "session is null");
+        requireNonNull(arguments, "arguments is null");
+        requireNonNull(accessControl, "accessControl is null");
         String schema = getSchemaName(arguments);
         String table = getTableName(arguments);
 
-        Slice incrementalBetweenValue = (Slice) ((ScalarArgument) arguments.get(INCREMENTAL_BETWEEN)).getValue();
-        Slice incrementalBetweenTimestamp = (Slice) ((ScalarArgument) arguments.get(INCREMENTAL_BETWEEN_TIMESTAMP))
-                .getValue();
-        if (incrementalBetweenValue.equals(INVALID_VALUE) && incrementalBetweenTimestamp.equals(INVALID_VALUE)) {
+        String incrementalBetweenScanMode = getRequiredNonBlankVarcharArgument(arguments, INCREMENTAL_BETWEEN_SCAN_MODE);
+        validateIncrementalBetweenScanMode(incrementalBetweenScanMode);
+        Optional<Slice> incrementalBetweenValue = getOptionalVarcharArgument(arguments, INCREMENTAL_BETWEEN);
+        Optional<Slice> incrementalBetweenTimestamp = getOptionalVarcharArgument(arguments, INCREMENTAL_BETWEEN_TIMESTAMP);
+        if (incrementalBetweenValue.isEmpty() && incrementalBetweenTimestamp.isEmpty()) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
                     "Either " + INCREMENTAL_BETWEEN + " or " + INCREMENTAL_BETWEEN_TIMESTAMP + " must be provided");
         }
+        if (incrementalBetweenValue.isPresent() && incrementalBetweenTimestamp.isPresent()) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
+                    "Only one of " + INCREMENTAL_BETWEEN + " or " + INCREMENTAL_BETWEEN_TIMESTAMP + " may be provided");
+        }
+        incrementalBetweenValue.ifPresent(value -> validateIncrementalWindow(INCREMENTAL_BETWEEN, value));
+        incrementalBetweenTimestamp.ifPresent(value -> validateIncrementalWindow(INCREMENTAL_BETWEEN_TIMESTAMP, value));
 
         SchemaTableName schemaTableName = new SchemaTableName(schema, table);
         try {
             PaimonCatalog catalog = trinoMetadata.catalog();
-            catalog.initSession(session);
-            Table paimonTable = catalog.getTable(Identifier.create(schema, table));
-            Map<String, String> options = new HashMap<>(paimonTable.options());
-            if (!incrementalBetweenValue.equals(INVALID_VALUE)) {
-                options.put(CoreOptions.INCREMENTAL_BETWEEN.key(), incrementalBetweenValue.toStringUtf8());
+            Catalog sessionCatalog = catalog.forSession(session);
+            Table paimonTable = latestAnalysisTable(sessionCatalog.getTable(Identifier.create(schema, table)));
+            Map<String, String> options = new HashMap<>();
+            if (incrementalBetweenValue.isPresent()) {
+                options.put(CoreOptions.INCREMENTAL_BETWEEN.key(), incrementalBetweenValue.orElseThrow().toStringUtf8());
             }
-            if (!incrementalBetweenTimestamp.equals(INVALID_VALUE)) {
+            if (incrementalBetweenTimestamp.isPresent()) {
                 options.put(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
-                        incrementalBetweenTimestamp.toStringUtf8());
+                        incrementalBetweenTimestamp.orElseThrow().toStringUtf8());
             }
+            options.put(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), incrementalBetweenScanMode);
 
             ImmutableList.Builder<Descriptor.Field> columns = ImmutableList.builder();
-            List<ColumnHandle> projectedColumns = new ArrayList<>();
+            List<PaimonColumnHandle> projectedColumns = new ArrayList<>();
             paimonTable.rowType().getFields().stream().forEach(column -> {
                 columns.add(
-                        new Descriptor.Field(column.name(), Optional.of(PaimonTypeUtils.fromPaimonType(column.type()))));
-                projectedColumns.add(PaimonColumnHandle.of(column.name(), column.type()));
+                        new Descriptor.Field(column.name(), Optional.of(PaimonTypeUtils.fromPaimonType(column.type(),
+                                trinoMetadata.typeManager()))));
+                projectedColumns.add(PaimonColumnHandle.of(column.name(), column.type(), trinoMetadata.typeManager()));
             });
+            accessControl.checkCanSelectFromColumns(null, schemaTableName, projectedColumns.stream()
+                    .map(PaimonColumnHandle::getColumnName)
+                    .collect(toUnmodifiableSet()));
             return TableFunctionAnalysis.builder().returnedType(new Descriptor(columns.build()))
                     .handle(new PaimonTableHandle(schema, table, options, TupleDomain.all(),
-                            Optional.of(projectedColumns), OptionalLong.empty()))
+                            Optional.of(projectedColumns), Optional.empty(), OptionalLong.empty()))
                     .build();
         }
         catch (Catalog.TableNotExistException e) {

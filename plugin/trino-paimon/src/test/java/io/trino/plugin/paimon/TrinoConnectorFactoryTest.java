@@ -16,6 +16,7 @@ package io.trino.plugin.paimon;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -23,7 +24,9 @@ import org.junit.jupiter.api.io.TempDir;
 import java.util.HashMap;
 import java.util.Map;
 
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TrinoConnectorFactoryTest
 {
@@ -37,6 +40,24 @@ public class TrinoConnectorFactoryTest
         ConnectorFactory factory = new PaimonConnectorFactory();
         Connector connector = factory.create("paimon", config, new TestingConnectorContext());
         assertThat(connector).isNotNull();
+    }
+
+    @Test
+    public void testMetadataFactoryRejectsNullDependencies()
+    {
+        assertThatThrownBy(() -> new PaimonMetadataFactory(null, session -> {
+            throw new UnsupportedOperationException("not used");
+        }, TESTING_TYPE_MANAGER))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("options is null");
+        assertThatThrownBy(() -> new PaimonMetadataFactory(new Options(), null, TESTING_TYPE_MANAGER))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("fileSystemFactory is null");
+        assertThatThrownBy(() -> new PaimonMetadataFactory(new Options(), session -> {
+            throw new UnsupportedOperationException("not used");
+        }, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("typeManager is null");
     }
 
     @Test

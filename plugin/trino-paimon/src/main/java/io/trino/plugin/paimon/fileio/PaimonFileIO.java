@@ -27,13 +27,13 @@ import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.fs.SeekableInputStream;
 import org.apache.paimon.utils.FileIOUtils;
 
-import javax.annotation.Nullable;
-
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+
+import static java.util.Objects.requireNonNull;
 
 public class PaimonFileIO
         implements
@@ -44,10 +44,10 @@ public class PaimonFileIO
     private final TrinoFileSystem trinoFileSystem;
     private final boolean objectStore;
 
-    public PaimonFileIO(TrinoFileSystem trinoFileSystem, @Nullable Path path)
+    public PaimonFileIO(TrinoFileSystem trinoFileSystem, Path path)
     {
-        this.trinoFileSystem = trinoFileSystem;
-        this.objectStore = path == null || checkObjectStore(path.toUri().getScheme());
+        this.trinoFileSystem = requireNonNull(trinoFileSystem, "trinoFileSystem is null");
+        this.objectStore = checkObjectStore(requireNonNull(path, "path is null").toUri().getScheme());
     }
 
     private static boolean checkObjectStore(String scheme)
@@ -132,6 +132,9 @@ public class PaimonFileIO
             trinoFileSystem.listDirectories(Location.of(path.toString()))
                     .forEach(l -> fileStatusList.add(new PaimonDirectoryFileStatus(new Path(l.toString()))));
         }
+        else if (existFile(location)) {
+            fileStatusList.add(status(path));
+        }
         return fileStatusList.toArray(new FileStatus[0]);
     }
 
@@ -139,7 +142,11 @@ public class PaimonFileIO
     public FileStatus[] listDirectories(Path path)
             throws IOException
     {
-        return trinoFileSystem.listDirectories(Location.of(path.toString())).stream()
+        Location location = Location.of(path.toString());
+        if (!isDirectory(location)) {
+            return new FileStatus[0];
+        }
+        return trinoFileSystem.listDirectories(location).stream()
                 .map(l -> new PaimonDirectoryFileStatus(new Path(l.toString()))).toArray(FileStatus[]::new);
     }
 
@@ -202,14 +209,33 @@ public class PaimonFileIO
     {
         Location sourceLocation = Location.of(source.toString());
         Location targetLocation = Location.of(target.toString());
-        if (isDirectory(sourceLocation)) {
-            if (objectStore) {
-                throw new IOException("S3 does not support directory renames");
-            }
+        boolean sourceIsDirectory = isDirectory(sourceLocation);
+        if (!sourceIsDirectory && !existFile(sourceLocation)) {
+            return false;
+        }
+
+        if (sourceIsDirectory && objectStore) {
+            throw new IOException("S3 does not support directory renames");
+        }
+
+        if (isDirectory(targetLocation)) {
+            targetLocation = targetLocation.appendPath(source.getName());
+            target = new Path(targetLocation.toString());
+        }
+        if (isDirectory(targetLocation) || existFile(targetLocation)) {
+            return false;
+        }
+
+        if (sourceIsDirectory) {
             trinoFileSystem.renameDirectory(sourceLocation, targetLocation);
         }
         else if (objectStore) {
-            copyFile(source, target, false);
+            try {
+                copyFile(source, target, false);
+            }
+            catch (FileAlreadyExistsException e) {
+                return false;
+            }
             trinoFileSystem.deleteFile(sourceLocation);
         }
         else {
@@ -224,7 +250,12 @@ public class PaimonFileIO
         if (trinoFileSystem.directoryExists(location).orElse(false)) {
             return true;
         }
-        return objectStore && directoryMarkerExists(location);
+        if (!objectStore || existFile(location)) {
+            return false;
+        }
+        return directoryMarkerExists(location)
+                || !trinoFileSystem.listDirectories(location).isEmpty()
+                || hasDirectChildFile(location);
     }
 
     private boolean directoryMarkerExists(Location location)
@@ -236,6 +267,15 @@ public class PaimonFileIO
     private boolean hasChildForNonRecursiveDelete(Location location)
             throws IOException
     {
+        if (hasDirectChildFile(location)) {
+            return true;
+        }
+        return !trinoFileSystem.listDirectories(location).isEmpty();
+    }
+
+    private boolean hasDirectChildFile(Location location)
+            throws IOException
+    {
         FileIterator fileIterator = trinoFileSystem.listFiles(location);
         while (fileIterator.hasNext()) {
             Location child = fileIterator.next().location();
@@ -243,7 +283,7 @@ public class PaimonFileIO
                 return true;
             }
         }
-        return !trinoFileSystem.listDirectories(location).isEmpty();
+        return false;
     }
 
     private static boolean isDirectChild(Location parent, Location child)

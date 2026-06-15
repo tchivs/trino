@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -24,25 +25,56 @@ import org.apache.paimon.table.source.Split;
 import java.util.Collections;
 import java.util.List;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Objects.requireNonNull;
+
 public record PaimonSplit(String splitSerialized, Double weight) implements ConnectorSplit
 {
-    private static final double STANDARD_WEIGHT = 1.0;
+    public PaimonSplit(@JsonProperty(value = "splitSerialized", required = true) String splitSerialized,
+            @JsonProperty(value = "weight", required = true) Double weight)
+    {
+        this.splitSerialized = requireNonNull(splitSerialized, "splitSerialized is null");
+        checkArgument(!this.splitSerialized.isBlank(), "splitSerialized is blank");
+        this.weight = requireNonNull(weight, "weight is null");
+        checkArgument(Double.isFinite(weight) && weight > 0 && weight <= 1, "weight must be in the range (0, 1]");
+    }
 
     @JsonCreator
-    public PaimonSplit(@JsonProperty("splitSerialized") String splitSerialized, @JsonProperty("weight") Double weight)
+    public static PaimonSplit fromJson(@JsonProperty(value = "splitSerialized", required = true) String splitSerialized,
+            @JsonProperty(value = "weight", required = true) Double weight)
     {
-        this.splitSerialized = splitSerialized;
-        this.weight = weight == null ? STANDARD_WEIGHT : weight;
+        PaimonSplit split = new PaimonSplit(splitSerialized, weight);
+        decodeSerializedSplit(split.splitSerialized());
+        return split;
+    }
+
+    @JsonAnySetter
+    public void rejectUnknownJsonField(String name, Object value)
+    {
+        PaimonHandleJsonUtils.rejectUnknownHandleJsonField("PaimonSplit", name, value);
     }
 
     public static PaimonSplit fromSplit(Split split, Double weight)
     {
-        return new PaimonSplit(EncodingUtils.encodeObjectToString(split), weight);
+        return new PaimonSplit(EncodingUtils.encodeObjectToString(requireNonNull(split, "split is null")), weight);
     }
 
     public Split decodeSplit()
     {
-        return EncodingUtils.decodeStringToObject(splitSerialized);
+        return decodeSerializedSplit(splitSerialized);
+    }
+
+    private static Split decodeSerializedSplit(String splitSerialized)
+    {
+        Object decoded;
+        try {
+            decoded = EncodingUtils.decodeStringToObject(splitSerialized);
+        }
+        catch (RuntimeException e) {
+            throw new IllegalArgumentException("splitSerialized must contain a serialized Paimon Split");
+        }
+        checkArgument(decoded instanceof Split, "splitSerialized must contain a serialized Paimon Split");
+        return (Split) decoded;
     }
 
     @Override

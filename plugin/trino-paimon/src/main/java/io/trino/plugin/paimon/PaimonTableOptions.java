@@ -20,9 +20,9 @@ import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
 import java.util.List;
 import java.util.Map;
 
-import static io.trino.spi.session.PropertyMetadata.enumProperty;
 import static io.trino.spi.session.PropertyMetadata.stringProperty;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static java.util.Objects.requireNonNull;
 
 public class PaimonTableOptions
 {
@@ -35,14 +35,7 @@ public class PaimonTableOptions
     {
         ImmutableList.Builder<PropertyMetadata<?>> builder = ImmutableList.builder();
         List<PaimonTableOptionUtils.OptionInfo> optionInfos = PaimonTableOptionUtils.getOptionInfos();
-        optionInfos.forEach(item -> {
-            if (item.isEnum) {
-                builder.add(enumProperty(item.trinoOptionKey, "option", item.clazz, null, false));
-            }
-            else {
-                builder.add(stringProperty(item.trinoOptionKey, "option", null, false));
-            }
-        });
+        optionInfos.forEach(item -> builder.add(stringProperty(item.trinoOptionKey, "option", null, false)));
 
         builder.add(
                 new PropertyMetadata<>(PRIMARY_KEY_IDENTIFIER, "Primary keys for the table.", new ArrayType(VARCHAR),
@@ -55,18 +48,41 @@ public class PaimonTableOptions
         tableProperties = builder.build();
     }
 
-    @SuppressWarnings("unchecked")
     public static List<String> getPrimaryKeys(Map<String, Object> tableProperties)
     {
-        List<String> primaryKeys = (List<String>) tableProperties.get(PRIMARY_KEY_IDENTIFIER);
-        return primaryKeys == null ? ImmutableList.of() : ImmutableList.copyOf(primaryKeys);
+        requireNonNull(tableProperties, "tableProperties is null");
+        return copyPropertyList(tableProperties.get(PRIMARY_KEY_IDENTIFIER), PRIMARY_KEY_IDENTIFIER);
     }
 
-    @SuppressWarnings("unchecked")
     public static List<String> getPartitionedKeys(Map<String, Object> tableProperties)
     {
-        List<String> partitionedKeys = (List<String>) tableProperties.get(PARTITIONED_BY_PROPERTY);
-        return partitionedKeys == null ? ImmutableList.of() : ImmutableList.copyOf(partitionedKeys);
+        requireNonNull(tableProperties, "tableProperties is null");
+        return copyPropertyList(tableProperties.get(PARTITIONED_BY_PROPERTY), PARTITIONED_BY_PROPERTY);
+    }
+
+    private static List<String> copyPropertyList(Object rawValue, String propertyName)
+    {
+        if (rawValue == null) {
+            return ImmutableList.of();
+        }
+        if (!(rawValue instanceof List<?> values)) {
+            throw new IllegalArgumentException("%s must be a list of strings".formatted(propertyName));
+        }
+
+        ImmutableList.Builder<String> result = ImmutableList.builder();
+        for (Object value : values) {
+            if (value == null) {
+                throw new IllegalArgumentException("%s contains null value".formatted(propertyName));
+            }
+            if (!(value instanceof String fieldName)) {
+                throw new IllegalArgumentException("%s contains non-string value".formatted(propertyName));
+            }
+            if (fieldName.isBlank()) {
+                throw new IllegalArgumentException("%s contains blank value".formatted(propertyName));
+            }
+            result.add(fieldName);
+        }
+        return result.build();
     }
 
     public List<PropertyMetadata<?>> getTableProperties()

@@ -17,10 +17,13 @@ import io.trino.spi.type.BigintType;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
+import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeOperators;
+import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.types.ArrayType;
@@ -48,12 +51,16 @@ import org.apache.paimon.types.TimestampType;
 import org.apache.paimon.types.TinyIntType;
 import org.apache.paimon.types.VarBinaryType;
 import org.apache.paimon.types.VarCharType;
+import org.apache.paimon.types.VariantType;
+import org.apache.paimon.types.VectorType;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+
+import static java.util.Objects.requireNonNull;
 
 public class PaimonTypeUtils
 {
@@ -63,19 +70,30 @@ public class PaimonTypeUtils
 
     public static Type fromPaimonType(DataType type)
     {
-        return type.accept(PaimonToTrinoTypeVistor.INSTANCE);
+        return requireNonNull(type, "type is null").accept(new PaimonToTrinoTypeVistor(Optional.empty()));
+    }
+
+    public static Type fromPaimonType(DataType type, TypeManager typeManager)
+    {
+        return requireNonNull(type, "type is null")
+                .accept(new PaimonToTrinoTypeVistor(Optional.of(requireNonNull(typeManager, "typeManager is null"))));
     }
 
     public static DataType toPaimonType(Type trinoType)
     {
-        return new TrinoToPaimonTypeVistor().visit(trinoType);
+        return new TrinoToPaimonTypeVistor().visit(requireNonNull(trinoType, "trinoType is null"));
     }
 
     private static class PaimonToTrinoTypeVistor
             extends
             DataTypeDefaultVisitor<Type>
     {
-        private static final PaimonToTrinoTypeVistor INSTANCE = new PaimonToTrinoTypeVistor();
+        private final Optional<TypeManager> typeManager;
+
+        private PaimonToTrinoTypeVistor(Optional<TypeManager> typeManager)
+        {
+            this.typeManager = requireNonNull(typeManager, "typeManager is null");
+        }
 
         @Override
         public Type visit(CharType charType)
@@ -115,6 +133,14 @@ public class PaimonTypeUtils
         public Type visit(BlobType blobType)
         {
             return VarbinaryType.VARBINARY;
+        }
+
+        @Override
+        public Type visit(VariantType variantType)
+        {
+            return typeManager
+                    .map(manager -> manager.getType(new TypeSignature(StandardTypes.JSON)))
+                    .orElseThrow(() -> new UnsupportedOperationException("Paimon VARIANT requires TypeManager for Trino JSON type"));
         }
 
         @Override
@@ -215,6 +241,12 @@ public class PaimonTypeUtils
         }
 
         @Override
+        public Type visit(VectorType vectorType)
+        {
+            return new io.trino.spi.type.ArrayType(vectorType.getElementType().accept(this));
+        }
+
+        @Override
         public Type visit(MultisetType multisetType)
         {
             return new MapType(multisetType.getElementType(), new IntType()).accept(this);
@@ -249,6 +281,9 @@ public class PaimonTypeUtils
 
         public DataType visit(Type trinoType)
         {
+            if (trinoType.getBaseName().equals(StandardTypes.JSON)) {
+                return DataTypes.VARIANT();
+            }
             if (trinoType instanceof io.trino.spi.type.CharType) {
                 return DataTypes.CHAR(Math.min(io.trino.spi.type.CharType.MAX_LENGTH,
                         ((io.trino.spi.type.CharType) trinoType).getLength()));
@@ -256,10 +291,10 @@ public class PaimonTypeUtils
             else if (trinoType instanceof VarcharType) {
                 Optional<Integer> length = ((VarcharType) trinoType).getLength();
                 if (length.isPresent()) {
-                    return DataTypes
-                            .VARCHAR(Math.min(VarcharType.MAX_LENGTH, ((VarcharType) trinoType).getBoundedLength()));
+                    return DataTypes.VARCHAR(Math.min(VarCharType.MAX_LENGTH,
+                            ((VarcharType) trinoType).getBoundedLength()));
                 }
-                return DataTypes.VARCHAR(VarcharType.MAX_LENGTH);
+                return DataTypes.STRING();
             }
             else if (trinoType instanceof io.trino.spi.type.BooleanType) {
                 return DataTypes.BOOLEAN();

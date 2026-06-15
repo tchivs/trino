@@ -19,6 +19,8 @@ import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.type.TypeManager;
 import org.apache.paimon.options.Options;
 
+import static java.util.Objects.requireNonNull;
+
 public class PaimonMetadataFactory
 {
     private final PaimonCatalog catalog;
@@ -28,8 +30,10 @@ public class PaimonMetadataFactory
     @Inject
     public PaimonMetadataFactory(Options options, TrinoFileSystemFactory fileSystemFactory, TypeManager typeManager)
     {
-        this.catalog = new PaimonCatalog(options, fileSystemFactory);
-        this.typeManager = typeManager;
+        this.catalog = new PaimonCatalog(
+                requireNonNull(options, "options is null"),
+                requireNonNull(fileSystemFactory, "fileSystemFactory is null"));
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 
     public PaimonMetadata create()

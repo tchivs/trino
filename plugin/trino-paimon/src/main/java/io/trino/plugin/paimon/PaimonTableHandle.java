@@ -13,9 +13,11 @@
  */
 package io.trino.plugin.paimon;
 
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import io.trino.plugin.paimon.catalog.PaimonCatalog;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
@@ -26,21 +28,35 @@ import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FullTextSearchTable;
+import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.VectorSearchTable;
+import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.RowType;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.stream.Collectors;
 
+import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static java.util.Objects.requireNonNull;
+import static org.apache.paimon.shade.guava30.com.google.common.base.Preconditions.checkArgument;
 
 public class PaimonTableHandle
         implements
@@ -49,6 +65,23 @@ public class PaimonTableHandle
         ConnectorOutputTableHandle,
         ConnectorTableFunctionHandle
 {
+    private static final Set<String> EXPLICIT_STARTUP_OPTION_KEYS = Set.of(
+            CoreOptions.SCAN_VERSION.key(),
+            CoreOptions.SCAN_SNAPSHOT_ID.key(),
+            CoreOptions.SCAN_TAG_NAME.key(),
+            CoreOptions.SCAN_TIMESTAMP.key(),
+            CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
+            CoreOptions.SCAN_WATERMARK.key(),
+            CoreOptions.INCREMENTAL_BETWEEN.key(),
+            CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key());
+    private static final Set<String> HISTORICAL_READ_OPTION_KEYS = Set.of(
+            CoreOptions.SCAN_VERSION.key(),
+            CoreOptions.SCAN_SNAPSHOT_ID.key(),
+            CoreOptions.SCAN_TAG_NAME.key(),
+            CoreOptions.SCAN_TIMESTAMP.key(),
+            CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
+            CoreOptions.SCAN_WATERMARK.key());
+
     private final String schemaName;
     private final String tableName;
     private final TupleDomain<PaimonColumnHandle> filter;
@@ -57,7 +90,7 @@ public class PaimonTableHandle
     private final OptionalLong limit;
     private final Map<String, String> dynamicOptions;
 
-    private transient Table table;
+    private transient Map<Catalog, Table> tablesByCatalog;
 
     public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions)
     {
@@ -66,28 +99,70 @@ public class PaimonTableHandle
     }
 
     @JsonCreator
-    public PaimonTableHandle(@JsonProperty("schemaName") String schemaName, @JsonProperty("tableName") String tableName,
-            @JsonProperty("dynamicOptions") Map<String, String> dynamicOptions,
-            @JsonProperty("filter") TupleDomain<PaimonColumnHandle> filter,
-            @JsonProperty("projectedColumns") Optional<List<PaimonColumnHandle>> projectedColumns,
-            @JsonProperty("writeColumns") Optional<List<PaimonColumnHandle>> writeColumns,
-            @JsonProperty("limit") OptionalLong limit)
+    public PaimonTableHandle(@JsonProperty(value = "schemaName", required = true) String schemaName,
+            @JsonProperty(value = "tableName", required = true) String tableName,
+            @JsonProperty(value = "dynamicOptions", required = true) Map<String, String> dynamicOptions,
+            @JsonProperty(value = "filter", required = true) TupleDomain<PaimonColumnHandle> filter,
+            @JsonProperty(value = "projectedColumns", required = true) Optional<List<PaimonColumnHandle>> projectedColumns,
+            @JsonProperty(value = "writeColumns", required = true) Optional<List<PaimonColumnHandle>> writeColumns,
+            @JsonProperty(value = "limit", required = true) OptionalLong limit)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
+        checkArgument(!this.schemaName.isBlank(), "schemaName is blank");
         this.tableName = requireNonNull(tableName, "tableName is null");
-        this.dynamicOptions = dynamicOptions == null ? Map.of() : Map.copyOf(dynamicOptions);
-        this.filter = filter == null ? TupleDomain.all() : filter;
-        this.projectedColumns = projectedColumns == null ? Optional.empty() : projectedColumns.map(List::copyOf);
-        this.writeColumns = writeColumns == null ? Optional.empty() : writeColumns.map(List::copyOf);
-        this.limit = limit == null ? OptionalLong.empty() : limit;
+        checkArgument(!this.tableName.isBlank(), "tableName is blank");
+        this.dynamicOptions = copyDynamicOptions(dynamicOptions);
+        this.filter = requireNonNull(filter, "filter is null");
+        this.projectedColumns = copyColumnHandles(projectedColumns, "projectedColumns");
+        this.writeColumns = copyColumnHandles(writeColumns, "writeColumns");
+        this.limit = requireNonNull(limit, "limit is null");
+        checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
     }
 
-    public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions,
-            TupleDomain<PaimonColumnHandle> filter, Optional<List<ColumnHandle>> projectedColumns,
-            OptionalLong limit)
+    private static Map<String, String> copyDynamicOptions(Map<String, String> dynamicOptions)
     {
-        this(schemaName, tableName, dynamicOptions, filter, toPaimonColumnHandles(projectedColumns), Optional.empty(),
-                limit);
+        requireNonNull(dynamicOptions, "dynamicOptions is null").forEach((key, value) -> {
+            requireNonNull(key, "dynamicOptions contains null key");
+            checkArgument(!key.isBlank(), "dynamicOptions contains blank key");
+            requireNonNull(value, "dynamicOptions contains null value for key '%s'".formatted(key));
+            checkArgument(!value.isBlank(), "dynamicOptions contains blank value for key '%s'".formatted(key));
+        });
+        return Map.copyOf(dynamicOptions);
+    }
+
+    private static Optional<List<PaimonColumnHandle>> copyColumnHandles(
+            Optional<List<PaimonColumnHandle>> columns,
+            String fieldName)
+    {
+        return requireNonNull(columns, fieldName + " is null")
+                .map(columnHandles -> {
+                    List<PaimonColumnHandle> copiedColumns = copyColumnHandlesList(columnHandles, fieldName);
+                    if (fieldName.equals("writeColumns")) {
+                        checkArgument(!copiedColumns.isEmpty(), "writeColumns is empty");
+                    }
+                    return copiedColumns;
+                });
+    }
+
+    private static List<PaimonColumnHandle> copyColumnHandlesList(List<?> columns, String fieldName)
+    {
+        requireNonNull(columns, fieldName + " is null");
+        return columns.stream()
+                .map(column -> {
+                    requireNonNull(column, fieldName + " contains null column");
+                    if (!(column instanceof PaimonColumnHandle paimonColumnHandle)) {
+                        throw new IllegalStateException("%s requires PaimonColumnHandle, got: %s"
+                                .formatted(fieldName, column.getClass().getName()));
+                    }
+                    return paimonColumnHandle;
+                })
+                .toList();
+    }
+
+    @JsonAnySetter
+    public void rejectUnknownJsonField(String name, Object value)
+    {
+        PaimonHandleJsonUtils.rejectUnknownHandleJsonField("PaimonTableHandle", name, value);
     }
 
     @JsonProperty
@@ -115,80 +190,266 @@ public class PaimonTableHandle
     }
 
     @JsonProperty
+    @JsonInclude(JsonInclude.Include.ALWAYS)
     public Optional<List<PaimonColumnHandle>> getProjectedColumns()
     {
         return projectedColumns;
     }
 
     @JsonProperty
+    @JsonInclude(JsonInclude.Include.ALWAYS)
     public Optional<List<PaimonColumnHandle>> getWriteColumns()
     {
         return writeColumns;
     }
 
+    @JsonProperty
+    @JsonInclude(JsonInclude.Include.ALWAYS)
     public OptionalLong getLimit()
     {
         return limit;
     }
 
-    public Table tableWithDynamicOptions(PaimonCatalog catalog, ConnectorSession session)
+    public Table tableWithDynamicOptions(Catalog catalog, ConnectorSession session)
     {
-        Table paimonTable = table(catalog);
+        requireNonNull(catalog, "catalog is null");
+        requireNonNull(session, "session is null");
+        Table paimonTable = rawTable(catalog);
+        Map<String, String> dynamicOptions = readDynamicOptions(session);
+        return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
+    }
+
+    public boolean usesHistoricalReadSchema(ConnectorSession session)
+    {
+        requireNonNull(session, "session is null");
+        Map<String, String> dynamicOptions = readDynamicOptions(session);
+        return HISTORICAL_READ_OPTION_KEYS.stream().anyMatch(dynamicOptions::containsKey);
+    }
+
+    boolean hasIncrementalReadWindow()
+    {
+        return dynamicOptions.containsKey(CoreOptions.INCREMENTAL_BETWEEN.key())
+                || dynamicOptions.containsKey(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key());
+    }
+
+    public Table tableWithWriteDynamicOptions(Catalog catalog)
+    {
+        requireNonNull(catalog, "catalog is null");
+        Table paimonTable = rawTable(catalog);
+        if (!(paimonTable instanceof FileStoreTable fileStoreTable)) {
+            return requireSupportedTable(paimonTable);
+        }
+
+        Map<String, String> dynamicOptions = new HashMap<>(this.dynamicOptions);
+        EXPLICIT_STARTUP_OPTION_KEYS.forEach(dynamicOptions::remove);
+        return requireSupportedTable(!dynamicOptions.isEmpty()
+                ? fileStoreTable.copyWithoutTimeTravel(dynamicOptions)
+                : fileStoreTable);
+    }
+
+    private static boolean hasExplicitStartupSelection(Map<String, String> dynamicOptions)
+    {
+        requireNonNull(dynamicOptions, "dynamicOptions is null");
+        return EXPLICIT_STARTUP_OPTION_KEYS.stream().anyMatch(dynamicOptions::containsKey);
+    }
+
+    private Map<String, String> readDynamicOptions(ConnectorSession session)
+    {
+        requireNonNull(session, "session is null");
 
         // see TrinoConnector.getSessionProperties
         Map<String, String> dynamicOptions = new HashMap<>(this.dynamicOptions);
-        Long scanTimestampMills = PaimonSessionProperties.getScanTimestampMillis(session);
-        if (scanTimestampMills != null) {
-            dynamicOptions.put(CoreOptions.SCAN_TIMESTAMP_MILLIS.key(), scanTimestampMills.toString());
+        if (!hasExplicitStartupSelection(dynamicOptions)) {
+            Long scanTimestampMills = PaimonSessionProperties.getScanTimestampMillis(session);
+            Long scanSnapshotId = PaimonSessionProperties.getScanSnapshotId(session);
+            validateSessionScanSelection(scanTimestampMills, scanSnapshotId);
+            if (scanTimestampMills != null) {
+                dynamicOptions.put(CoreOptions.SCAN_TIMESTAMP_MILLIS.key(), scanTimestampMills.toString());
+            }
+            if (scanSnapshotId != null) {
+                dynamicOptions.put(CoreOptions.SCAN_SNAPSHOT_ID.key(), scanSnapshotId.toString());
+            }
         }
-        Long scanSnapshotId = PaimonSessionProperties.getScanSnapshotId(session);
-        if (scanSnapshotId != null) {
-            dynamicOptions.put(CoreOptions.SCAN_SNAPSHOT_ID.key(), scanSnapshotId.toString());
-        }
-
-        return !dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable;
+        return dynamicOptions;
     }
 
-    public Table table(PaimonCatalog catalog)
+    private static void validateSessionScanSelection(Long scanTimestampMills, Long scanSnapshotId)
     {
-        if (table != null) {
-            return table;
+        if (scanTimestampMills != null && scanSnapshotId != null) {
+            throw new TrinoException(INVALID_SESSION_PROPERTY,
+                    "Only one of %s or %s session properties may be set"
+                            .formatted(PaimonSessionProperties.SCAN_TIMESTAMP, PaimonSessionProperties.SCAN_SNAPSHOT));
+        }
+    }
+
+    public Table table(Catalog catalog)
+    {
+        requireNonNull(catalog, "catalog is null");
+        Table paimonTable = rawTable(catalog);
+        return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
+    }
+
+    private Table rawTable(Catalog catalog)
+    {
+        requireNonNull(catalog, "catalog is null");
+        if (tablesByCatalog != null) {
+            Table table = tablesByCatalog.get(catalog);
+            if (table != null) {
+                return requireSupportedTable(table);
+            }
         }
         try {
-            table = catalog.getTable(Identifier.create(schemaName, tableName)).copy(dynamicOptions);
+            Table table = catalog.getTable(Identifier.create(schemaName, tableName));
+            cacheTable(catalog, table);
+            return requireSupportedTable(table);
         }
         catch (Catalog.TableNotExistException e) {
-            throw new RuntimeException(e);
+            throw new TrinoException(TABLE_NOT_FOUND, "Paimon table '%s.%s' does not exist".formatted(schemaName,
+                    tableName), e);
+        }
+    }
+
+    private void cacheTable(Catalog catalog, Table table)
+    {
+        requireNonNull(catalog, "catalog is null");
+        requireNonNull(table, "table is null");
+        if (tablesByCatalog == null) {
+            tablesByCatalog = new IdentityHashMap<>();
+        }
+        tablesByCatalog.put(catalog, table);
+    }
+
+    private static Table requireSupportedTable(Table table)
+    {
+        requireNonNull(table, "table is null");
+        if (table instanceof VectorSearchTable) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon vector search tables are not supported by the Trino connector");
+        }
+        if (table instanceof FullTextSearchTable) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon full-text search tables are not supported by the Trino connector");
         }
         return table;
     }
 
-    public ConnectorTableMetadata tableMetadata(PaimonCatalog catalog)
+    public ConnectorTableMetadata tableMetadata(Catalog catalog, TypeManager typeManager, ConnectorSession session)
     {
+        requireNonNull(catalog, "catalog is null");
+        requireNonNull(typeManager, "typeManager is null");
+        Table table = metadataTable(catalog, session);
         return new ConnectorTableMetadata(SchemaTableName.schemaTableName(schemaName, tableName),
-                columnMetadatas(catalog), Collections.emptyMap(), Optional.empty());
+                columnMetadatas(table, typeManager), Collections.emptyMap(), normalizeComment(table.comment()));
     }
 
-    public List<ColumnMetadata> columnMetadatas(PaimonCatalog catalog)
+    public List<ColumnMetadata> columnMetadatas(Catalog catalog, TypeManager typeManager, ConnectorSession session)
     {
-        return table(catalog).rowType().getFields().stream()
-                .map(column -> ColumnMetadata.builder().setName(column.name())
-                        .setType(PaimonTypeUtils.fromPaimonType(column.type())).setNullable(column.type().isNullable())
-                        .setComment(Optional.ofNullable(column.description())).build())
+        requireNonNull(catalog, "catalog is null");
+        requireNonNull(typeManager, "typeManager is null");
+        return columnMetadatas(metadataTable(catalog, session), typeManager);
+    }
+
+    private static List<ColumnMetadata> columnMetadatas(Table table, TypeManager typeManager)
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(typeManager, "typeManager is null");
+        return effectiveReadRowType(table).getFields().stream()
+                .map(column -> columnMetadata(table, column, typeManager))
                 .collect(Collectors.toList());
     }
 
-    public PaimonColumnHandle columnHandle(PaimonCatalog catalog, String field)
+    private static Optional<String> normalizeComment(Optional<String> comment)
     {
-        Table paimonTable = table(catalog);
-        List<String> lowerCaseFieldNames = FieldNameUtils.fieldNames(paimonTable.rowType());
-        List<String> originFieldNames = paimonTable.rowType().getFieldNames();
+        return requireNonNull(comment, "comment is null").flatMap(PaimonTableHandle::normalizeComment);
+    }
+
+    private static Optional<String> normalizeComment(String comment)
+    {
+        return Optional.ofNullable(comment).filter(value -> !value.isEmpty());
+    }
+
+    public PaimonColumnHandle columnHandle(Catalog catalog, TypeManager typeManager, ConnectorSession session,
+            String field)
+    {
+        requireNonNull(catalog, "catalog is null");
+        requireNonNull(typeManager, "typeManager is null");
+        requireNonNull(field, "field is null");
+        Table paimonTable = metadataTable(catalog, session);
+        RowType readRowType = effectiveReadRowType(paimonTable);
+        List<String> lowerCaseFieldNames = FieldNameUtils.fieldNames(readRowType);
+        List<String> originFieldNames = readRowType.getFieldNames();
         // Fix case-sensitivity: lowerCaseFieldNames contains lowercase names, so convert field to lowercase for lookup
         int index = lowerCaseFieldNames.indexOf(FieldNameUtils.toLowerCase(field));
         if (index == -1) {
-            throw new RuntimeException(String.format("Cannot find field %s in schema %s", field, lowerCaseFieldNames));
+            throw new TrinoException(COLUMN_NOT_FOUND,
+                    String.format("Column '%s' does not exist in Paimon table '%s.%s'", field, schemaName, tableName));
         }
-        return PaimonColumnHandle.of(originFieldNames.get(index), paimonTable.rowType().getTypeAt(index));
+        return PaimonColumnHandle.of(originFieldNames.get(index), readRowType.getTypeAt(index), typeManager);
+    }
+
+    private Table metadataTable(Catalog catalog, ConnectorSession session)
+    {
+        Table table = tableWithDynamicOptions(catalog, session);
+        return schemaAwareReadTable(table, !usesHistoricalReadSchema(session));
+    }
+
+    static Table schemaAwareReadTable(Table table, boolean refreshToLatestSchema)
+    {
+        requireNonNull(table, "table is null");
+        if (refreshToLatestSchema && table instanceof FileStoreTable fileStoreTable) {
+            return fileStoreTable.copyWithLatestSchema();
+        }
+        return table;
+    }
+
+    static RowType effectiveReadRowType(Table table)
+    {
+        requireNonNull(table, "table is null");
+        RowType rowType = table.rowType();
+        if (!(table instanceof FileStoreTable fileStoreTable) || !fileStoreTable.coreOptions().rowTrackingEnabled()) {
+            return rowType;
+        }
+        if (rowType.containsField(SpecialFields.ROW_ID.name()) || rowType.containsField(SpecialFields.SEQUENCE_NUMBER.name())) {
+            return rowType;
+        }
+        return SpecialFields.rowTypeWithRowTracking(rowType, true, true);
+    }
+
+    static ColumnMetadata columnMetadata(Table table, String fieldName, TypeManager typeManager)
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(fieldName, "fieldName is null");
+        requireNonNull(typeManager, "typeManager is null");
+        RowType readRowType = effectiveReadRowType(table);
+        List<String> lowerCaseFieldNames = FieldNameUtils.fieldNames(readRowType);
+        int index = lowerCaseFieldNames.indexOf(FieldNameUtils.toLowerCase(fieldName));
+        if (index == -1) {
+            throw new TrinoException(COLUMN_NOT_FOUND,
+                    "Column '%s' does not exist in Paimon table '%s'".formatted(fieldName, table.name()));
+        }
+        return columnMetadata(table, readRowType.getFields().get(index), typeManager);
+    }
+
+    private static ColumnMetadata columnMetadata(Table table, DataField column, TypeManager typeManager)
+    {
+        requireNonNull(column, "column is null");
+        requireNonNull(typeManager, "typeManager is null");
+        return ColumnMetadata.builder()
+                .setName(column.name())
+                .setType(PaimonTypeUtils.fromPaimonType(column.type(), typeManager))
+                .setNullable(column.type().isNullable())
+                .setComment(normalizeComment(column.description()))
+                .setHidden(isHiddenColumn(table, column.name()))
+                .build();
+    }
+
+    private static boolean isHiddenColumn(Table table, String columnName)
+    {
+        if (!PaimonColumnHandle.isHiddenColumnName(columnName)) {
+            return false;
+        }
+        return !FieldNameUtils.fieldNames(requireNonNull(table, "table is null").rowType())
+                .contains(FieldNameUtils.toLowerCase(columnName));
     }
 
     public PaimonTableHandle copy(TupleDomain<PaimonColumnHandle> filter)
@@ -205,19 +466,29 @@ public class PaimonTableHandle
 
     public PaimonTableHandle withWriteColumns(List<ColumnHandle> writeColumns)
     {
+        requireNonNull(writeColumns, "writeColumns is null");
+        checkArgument(!writeColumns.isEmpty(), "writeColumns is empty");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns,
                 Optional.of(toPaimonColumnHandles(writeColumns)), limit);
     }
 
     private static Optional<List<PaimonColumnHandle>> toPaimonColumnHandles(Optional<List<ColumnHandle>> columns)
     {
-        return columns.map(PaimonTableHandle::toPaimonColumnHandles);
+        return requireNonNull(columns, "columns is null").map(PaimonTableHandle::toPaimonColumnHandles);
     }
 
     private static List<PaimonColumnHandle> toPaimonColumnHandles(List<? extends ColumnHandle> columns)
     {
+        requireNonNull(columns, "columns is null");
         return columns.stream()
-                .map(PaimonColumnHandle.class::cast)
+                .map(column -> requireNonNull(column, "column is null"))
+                .map(column -> {
+                    if (!(column instanceof PaimonColumnHandle paimonColumnHandle)) {
+                        throw new IllegalStateException("Paimon table handle requires PaimonColumnHandle, got: "
+                                + column.getClass().getName());
+                    }
+                    return paimonColumnHandle;
+                })
                 .toList();
     }
 
