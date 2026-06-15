@@ -15,6 +15,7 @@ package io.trino.plugin.paimon;
 
 import io.airlift.json.JsonCodec;
 import io.trino.spi.SplitWeight;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.Constraint;
@@ -43,6 +44,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -375,6 +377,49 @@ public class TrinoSplitTest
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(batch.getSplits()).isEmpty();
         assertThat(batch.isNoMoreSplits()).isTrue();
+    }
+
+    @Test
+    public void testSplitPlanningMapsUnsupportedReadFeaturesToNotSupported()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, unsupportedPlanningTable());
+        PaimonSplitManager splitManager = splitManager(catalog);
+
+        assertThatThrownBy(() -> splitManager.getSplits(
+                null,
+                SESSION,
+                new PaimonTableHandle("schema", "table", Map.of()),
+                DynamicFilter.EMPTY,
+                Constraint.alwaysTrue()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon table read uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage("unsupported scan mode");
+                });
+    }
+
+    @Test
+    public void testTableChangesSplitPlanningMapsUnsupportedReadFeaturesToNotSupported()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, unsupportedPlanningTable());
+        PaimonSplitManager splitManager = splitManager(catalog);
+        PaimonTableHandle tableChangesHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(org.apache.paimon.CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThatThrownBy(() -> splitManager.getSplits(null, SESSION, tableChangesHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon system.table_changes uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage("unsupported scan mode");
+                });
     }
 
     @Test
@@ -744,6 +789,37 @@ public class TrinoSplitTest
                 (proxy, method, args) -> switch (method.getName()) {
                     case "plan" -> (TableScan.Plan) () -> List.of();
                     case "toString" -> "testing-table-scan";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Table unsupportedPlanningTable()
+    {
+        return (Table) Proxy.newProxyInstance(
+                TrinoSplitTest.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
+                    case "newReadBuilder" -> unsupportedPlanningReadBuilder();
+                    case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+                    case "toString" -> "unsupported-planning-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder unsupportedPlanningReadBuilder()
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                TrinoSplitTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "dropStats", "withFilter", "withLimit" -> proxy;
+                    case "newScan" -> {
+                        throw new UnsupportedOperationException("unsupported scan mode");
+                    }
+                    case "readType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+                    case "tableName" -> "unsupported-planning-table";
+                    case "toString" -> "unsupported-planning-read-builder";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

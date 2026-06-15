@@ -17,6 +17,7 @@ import com.google.inject.Inject;
 import io.airlift.units.Duration;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitSource;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
@@ -39,6 +40,7 @@ import java.util.OptionalLong;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -139,10 +141,16 @@ public class PaimonSplitManager
         Table table = PaimonTableHandle.schemaAwareReadTable(
                 tableHandle.tableWithDynamicOptions(catalog, session),
                 !tableHandle.usesHistoricalReadSchema(session));
-        ReadBuilder readBuilder = table.newReadBuilder();
-        pushPredicate(readBuilder, table, predicate);
-        pushLimit(readBuilder, tableHandle);
-        List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
+        List<Split> splits;
+        try {
+            ReadBuilder readBuilder = table.newReadBuilder();
+            pushPredicate(readBuilder, table, predicate);
+            pushLimit(readBuilder, tableHandle);
+            splits = readBuilder.dropStats().newScan().plan().splits();
+        }
+        catch (UnsupportedOperationException e) {
+            throw unsupportedReadOperation(tableHandle, e);
+        }
 
         long maxRowCount = splits.stream().mapToLong(PaimonSplitManager::splitWeightRowCount).max().orElse(0L);
         double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
@@ -152,6 +160,17 @@ public class PaimonSplitManager
                 .collect(Collectors.toList()), tableHandle.getLimit());
 
         return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
+    }
+
+    private static TrinoException unsupportedReadOperation(PaimonTableHandle tableHandle, UnsupportedOperationException cause)
+    {
+        requireNonNull(tableHandle, "tableHandle is null");
+        requireNonNull(cause, "cause is null");
+
+        String message = tableHandle.hasIncrementalReadWindow()
+                ? "Paimon system.table_changes uses features which are not supported by the Trino connector"
+                : "Paimon table read uses features which are not supported by the Trino connector";
+        return new TrinoException(NOT_SUPPORTED, message, cause);
     }
 
     static void pushLimit(ReadBuilder readBuilder, PaimonTableHandle tableHandle)
