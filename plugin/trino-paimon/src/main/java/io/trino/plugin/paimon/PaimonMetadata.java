@@ -125,8 +125,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("insert layout", tableHandle);
         Catalog sessionCatalog = catalog.forSession(session);
-        Table table = paimonTableHandle.table(sessionCatalog);
-        FileStoreTable storeTable = latestFileStoreTable(table, "insert layout");
+        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "insert layout");
         BucketMode bucketMode = storeTable.bucketMode();
         switch (bucketMode) {
             case HASH_FIXED :
@@ -259,8 +258,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         List<CommitMessage> commitMessages = deserializeCommitMessages(fragmentsList);
         Catalog sessionCatalog = catalog.forSession(session);
-        FileStoreTable fileStoreTable = latestFileStoreTable(tableHandle.tableWithWriteDynamicOptions(sessionCatalog),
-                "commit writes");
+        FileStoreTable fileStoreTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, "commit writes");
 
         try {
             if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR) {
@@ -352,8 +350,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("merge row id", tableHandle);
         Catalog sessionCatalog = catalog.forSession(session);
-        Table table = paimonTableHandle.table(sessionCatalog);
-        FileStoreTable storeTable = requireFileStoreTable(table, "merge row id").copyWithLatestSchema();
+        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge row id");
         BucketMode bucketMode = storeTable.bucketMode();
         if (bucketMode != BucketMode.HASH_FIXED) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
@@ -380,8 +377,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("update layout", tableHandle);
         Catalog sessionCatalog = catalog.forSession(session);
-        Table table = paimonTableHandle.table(sessionCatalog);
-        FileStoreTable storeTable = requireFileStoreTable(table, "update layout").copyWithLatestSchema();
+        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "update layout");
         BucketMode bucketMode = storeTable.bucketMode();
         if (bucketMode != BucketMode.HASH_FIXED) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
@@ -407,6 +403,26 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return requireFileStoreTable(table, operation).copyWithLatestSchema();
     }
 
+    private static FileStoreTable latestWriteFileStoreTable(
+            PaimonTableHandle tableHandle,
+            Catalog sessionCatalog,
+            String operation)
+    {
+        requireNonNull(tableHandle, "tableHandle is null");
+        requireNonNull(sessionCatalog, "sessionCatalog is null");
+        try {
+            return latestFileStoreTable(tableHandle.tableWithWriteDynamicOptions(sessionCatalog), operation);
+        }
+        catch (TrinoException e) {
+            if (e.getErrorCode().equals(TABLE_NOT_FOUND.toErrorCode())) {
+                throw new TrinoException(TABLE_NOT_FOUND,
+                        format("Table '%s' does not exist", schemaTableName(tableHandle)),
+                        e.getCause() != null ? e.getCause() : e);
+            }
+            throw e;
+        }
+    }
+
     @Override
     public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle,
             RetryMode retryMode)
@@ -416,8 +432,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         validateNoQueryRetries(retryMode);
         PaimonTableHandle paimonTableHandle = getTableHandle("begin merge", tableHandle);
         Catalog sessionCatalog = catalog.forSession(session);
-        Table table = paimonTableHandle.table(sessionCatalog);
-        FileStoreTable storeTable = latestFileStoreTable(table, "merge");
+        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge");
         BucketMode bucketMode = storeTable.bucketMode();
         if (bucketMode != BucketMode.HASH_FIXED) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
@@ -1299,8 +1314,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            Table table = sessionCatalog.getTable(identifier);
-            FileStoreTable fileStoreTable = latestFileStoreTable(table, "truncate table");
+            FileStoreTable fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog,
+                    "truncate table");
 
             // Use BatchTableCommit to truncate the table
             try (BatchTableCommit commit = fileStoreTable.newBatchWriteBuilder().newCommit()) {
@@ -1309,10 +1324,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         catch (TrinoException e) {
             throw e;
-        }
-        catch (Catalog.TableNotExistException e) {
-            throw new TrinoException(TABLE_NOT_FOUND,
-                    format("Table '%s' does not exist", schemaTableName(paimonTableHandle)), e);
         }
         catch (Exception e) {
             throw paimonMetadataException(

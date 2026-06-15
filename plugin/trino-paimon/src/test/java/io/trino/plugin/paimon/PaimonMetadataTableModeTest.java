@@ -789,6 +789,35 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testInsertLayoutIgnoresSessionScanSnapshotAndHandleStartupSelections()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions = new AtomicReference<>();
+        FileStoreTable table = writePlanningFileStoreTable(copiedWithLatestSchema, copyWithoutTimeTravelOptions);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(
+                        "custom.option", "value",
+                        CoreOptions.SCAN_VERSION.key(), "tag-1",
+                        CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2",
+                        CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "delta",
+                        CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(), "true"));
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(SCAN_SNAPSHOT, 9L))
+                .build();
+
+        assertThat(metadata.getInsertLayout(session, tableHandle)).isPresent();
+
+        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
     public void testLayoutSerializationFailuresUsePaimonMetadataError()
     {
         IOException failure = new IOException("schema serialization failed");
@@ -863,6 +892,36 @@ public class PaimonMetadataTableModeTest
         assertThat(writeHandle.getWriteColumns()).hasValueSatisfying(writeColumns ->
                 assertThat(writeColumns).extracting(PaimonColumnHandle::getColumnName)
                         .containsExactly("id", "name"));
+    }
+
+    @Test
+    public void testMergeMetadataPlanningIgnoresSessionScanSnapshotAndHandleStartupSelections()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions = new AtomicReference<>();
+        FileStoreTable table = writePlanningFileStoreTable(copiedWithLatestSchema, copyWithoutTimeTravelOptions);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(
+                        "custom.option", "value",
+                        CoreOptions.SCAN_VERSION.key(), "tag-1",
+                        CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04"));
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(SCAN_SNAPSHOT, 9L))
+                .build();
+
+        assertThat(metadata.getMergeRowIdColumnHandle(session, tableHandle)).isInstanceOf(PaimonColumnHandle.class);
+        assertThat(metadata.getUpdateLayout(session, tableHandle)).isPresent();
+        assertThat(metadata.beginMerge(session, tableHandle, RetryMode.NO_RETRIES))
+                .isInstanceOf(PaimonMergeTableHandle.class);
+
+        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(catalog.initialized).isTrue();
     }
 
     @Test
@@ -3694,6 +3753,79 @@ public class PaimonMetadataTableModeTest
     private static FileStoreTable commitFileStoreTable(AtomicBoolean copiedWithLatestSchema, AtomicBoolean committed)
     {
         return commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null);
+    }
+
+    private static FileStoreTable writePlanningFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions)
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "pt", DataTypes.STRING()));
+        AtomicReference<FileStoreTable> latestTableRef = new AtomicReference<>();
+        FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "bucketMode" -> BucketMode.HASH_FIXED;
+                    case "name" -> "latest-write-planning-file-store-table";
+                    case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of("pt");
+                    case "primaryKeys" -> List.of("id");
+                    case "comment" -> Optional.empty();
+                    case "coreOptions" -> new CoreOptions(new Options(Map.of()));
+                    case "schema" -> TableSchema.create(1, new Schema(
+                            rowType.getFields(),
+                            List.of("pt"),
+                            List.of("id"),
+                            Map.of(
+                                    CoreOptions.BUCKET.key(), "7",
+                                    CoreOptions.BUCKET_KEY.key(), "id"),
+                            ""));
+                    case "copyWithLatestSchema" -> {
+                        copiedWithLatestSchema.set(true);
+                        yield proxy;
+                    }
+                    case "copy" -> proxy;
+                    case "copyWithoutTimeTravel" -> {
+                        copyWithoutTimeTravelOptions.set(Map.copyOf((Map<String, String>) args[0]));
+                        yield proxy;
+                    }
+                    case "toString" -> "latest-write-planning-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        latestTableRef.set(latestTable);
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithLatestSchema" -> {
+                        copiedWithLatestSchema.set(true);
+                        yield latestTableRef.get();
+                    }
+                    case "copy" -> proxy;
+                    case "copyWithoutTimeTravel" -> {
+                        copyWithoutTimeTravelOptions.set(Map.copyOf((Map<String, String>) args[0]));
+                        yield latestTableRef.get();
+                    }
+                    case "bucketMode" -> BucketMode.HASH_FIXED;
+                    case "name" -> "stale-write-planning-file-store-table";
+                    case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of("pt");
+                    case "primaryKeys" -> List.of("id");
+                    case "comment" -> Optional.empty();
+                    case "coreOptions" -> new CoreOptions(new Options(Map.of()));
+                    case "schema" -> TableSchema.create(1, new Schema(
+                            rowType.getFields(),
+                            List.of("pt"),
+                            List.of("id"),
+                            Map.of(
+                                    CoreOptions.BUCKET.key(), "7",
+                                    CoreOptions.BUCKET_KEY.key(), "id"),
+                            ""));
+                    case "toString" -> "stale-write-planning-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
     }
 
     private static FileStoreTable commitFileStoreTable(
