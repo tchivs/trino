@@ -1188,6 +1188,27 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testApplyFilterShortCircuitsTupleDomainNoneHandleBeforeCatalogInitialization()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.none(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(
+                id, Domain.singleValue(INTEGER, 1L))));
+
+        assertThat(metadata.applyFilter(SESSION, tableHandle, constraint)).isEmpty();
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
     public void testApplyProjectionValidatesInputsBeforeCatalogInitialization()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());

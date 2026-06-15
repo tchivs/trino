@@ -43,6 +43,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -255,6 +256,40 @@ public class TrinoSplitTest
         assertThatThrownBy(() -> PaimonSplitManager.pushLimit(unusedReadBuilder(), null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("tableHandle is null");
+    }
+
+    @Test
+    public void testPushLimitAppliesOnlySafePaimonIntLimits()
+    {
+        TestingReadBuilder readBuilder = new TestingReadBuilder();
+
+        PaimonSplitManager.pushLimit(readBuilder, new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(Integer.MAX_VALUE)));
+
+        assertThat(readBuilder.limit()).hasValue(Integer.MAX_VALUE);
+    }
+
+    @Test
+    public void testPushLimitSkipsOverflowingTrinoLimits()
+    {
+        TestingReadBuilder readBuilder = new TestingReadBuilder();
+
+        PaimonSplitManager.pushLimit(readBuilder, new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of((long) Integer.MAX_VALUE + 1)));
+
+        assertThat(readBuilder.limit()).isEmpty();
     }
 
     @Test
@@ -637,6 +672,7 @@ public class TrinoSplitTest
     {
         private List<org.apache.paimon.utils.Range> rowRanges = List.of();
         private boolean filterApplied;
+        private OptionalInt limit = OptionalInt.empty();
 
         @Override
         public String tableName()
@@ -696,6 +732,7 @@ public class TrinoSplitTest
         @Override
         public ReadBuilder withLimit(int limit)
         {
+            this.limit = OptionalInt.of(limit);
             return this;
         }
 
@@ -756,6 +793,11 @@ public class TrinoSplitTest
         private boolean filterApplied()
         {
             return filterApplied;
+        }
+
+        private OptionalInt limit()
+        {
+            return limit;
         }
     }
 

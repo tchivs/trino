@@ -1276,10 +1276,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonTableHandle paimonTableHandle = getTableHandle("filter pushdown", handle);
         requireNonNull(constraint, "constraint is null");
         validateFilterColumns(constraint);
+        if (paimonTableHandle.getFilter().isNone()) {
+            return Optional.empty();
+        }
         if (constraint.getSummary().isNone()) {
-            if (paimonTableHandle.getFilter().isNone()) {
-                return Optional.empty();
-            }
             return Optional.of(new ConstraintApplicationResult<>(paimonTableHandle.copy(TupleDomain.none()),
                     TupleDomain.all(), TRUE, false));
         }
