@@ -112,6 +112,7 @@ import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.fileindex.FileIndexCommon.toMapKey;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -1205,6 +1206,45 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPaimonPageSourceWrappedReaderIoUsesCannotOpenSplit()
+    {
+        IOException failure = new IOException("reader batch failed");
+        AtomicBoolean readerClosed = new AtomicBoolean();
+        PaimonPageSource pageSource = new PaimonPageSource(
+                new FailingRecordReader(new RuntimeException(failure), null, readerClosed),
+                List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::getNextPage)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThat(readerClosed).isTrue();
+    }
+
+    @Test
+    void testPaimonPageSourceUnsupportedReaderFailureUsesNotSupported()
+    {
+        UnsupportedOperationException failure = new UnsupportedOperationException("vector wrapper unsupported");
+        AtomicBoolean readerClosed = new AtomicBoolean();
+        PaimonPageSource pageSource = new PaimonPageSource(
+                new FailingRecordReader(failure, null, readerClosed),
+                List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::getNextPage)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage(
+                            "Paimon page read uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThat(readerClosed).isTrue();
+    }
+
+    @Test
     void testPageSourceArrayConversionRequiresArrayOrVectorLogicalType()
     {
         io.trino.spi.type.ArrayType arrayType = new io.trino.spi.type.ArrayType(INTEGER);
@@ -1429,6 +1469,44 @@ public class PaimonPageSourceTest
         assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 0)).isEqualTo(1L);
         assertThat(pageSource.isBlocked()).isSameAs(ConnectorPageSource.NOT_BLOCKED);
         assertThat(second.closed()).isFalse();
+    }
+
+    @Test
+    void testDirectPageSourceWrappedIoUsesCannotOpenSplit()
+    {
+        IOException failure = new IOException("direct page read failed");
+        AtomicBoolean sourceClosed = new AtomicBoolean();
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(
+                new FailingPageSource(new RuntimeException(failure), sourceClosed))), OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::getNextPage)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThat(sourceClosed).isTrue();
+    }
+
+    @Test
+    void testDirectPageSourceAdvanceCloseFailureUsesCannotOpenSplit()
+    {
+        IOException failure = new IOException("closing exhausted source failed");
+        AtomicBoolean firstClosed = new AtomicBoolean();
+        AtomicBoolean secondClosed = new AtomicBoolean();
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(
+                new CloseFailingFinishedPageSource(firstClosed, failure),
+                new FailingPageSource(new RuntimeException("should be closed during suppression"), secondClosed))),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::getNextPage)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThat(firstClosed).isTrue();
+        assertThat(secondClosed).isTrue();
     }
 
     @Test
@@ -1802,6 +1880,47 @@ public class PaimonPageSourceTest
         public void close() {}
     }
 
+    private static class FailingRecordReader
+            implements RecordReader<InternalRow>
+    {
+        private final RuntimeException readFailure;
+        private final IOException closeFailure;
+        private final AtomicBoolean closed;
+
+        private FailingRecordReader(RuntimeException readFailure, IOException closeFailure, AtomicBoolean closed)
+        {
+            this.readFailure = requireNonNull(readFailure, "readFailure is null");
+            this.closeFailure = closeFailure;
+            this.closed = requireNonNull(closed, "closed is null");
+        }
+
+        @Override
+        public RecordIterator<InternalRow> readBatch()
+        {
+            return new RecordIterator<>()
+            {
+                @Override
+                public InternalRow next()
+                {
+                    throw readFailure;
+                }
+
+                @Override
+                public void releaseBatch() {}
+            };
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            closed.set(true);
+            if (closeFailure != null) {
+                throw closeFailure;
+            }
+        }
+    }
+
     private static class TestingPageSource
             implements ConnectorPageSource
     {
@@ -2052,6 +2171,106 @@ public class PaimonPageSourceTest
         private boolean completedPositionsReadBeforePage()
         {
             return completedPositionsReadBeforePage;
+        }
+    }
+
+    private static class FailingPageSource
+            implements ConnectorPageSource
+    {
+        private final RuntimeException failure;
+        private final AtomicBoolean closed;
+
+        private FailingPageSource(RuntimeException failure, AtomicBoolean closed)
+        {
+            this.failure = requireNonNull(failure, "failure is null");
+            this.closed = requireNonNull(closed, "closed is null");
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return 0;
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return 0;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return false;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            throw failure;
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public void close()
+        {
+            closed.set(true);
+        }
+    }
+
+    private static class CloseFailingFinishedPageSource
+            implements ConnectorPageSource
+    {
+        private final AtomicBoolean closed;
+        private final IOException closeFailure;
+
+        private CloseFailingFinishedPageSource(AtomicBoolean closed, IOException closeFailure)
+        {
+            this.closed = requireNonNull(closed, "closed is null");
+            this.closeFailure = requireNonNull(closeFailure, "closeFailure is null");
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return 0;
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return 0;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return true;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            return null;
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            closed.set(true);
+            throw closeFailure;
         }
     }
 }

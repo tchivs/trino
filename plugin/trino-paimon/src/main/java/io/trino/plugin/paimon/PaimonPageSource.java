@@ -58,7 +58,6 @@ import org.apache.paimon.utils.InternalRowUtils;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
@@ -67,6 +66,7 @@ import java.util.OptionalLong;
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static io.trino.plugin.base.util.JsonTypeUtil.jsonParse;
 import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimeMillisToTrinoPicos;
 import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampToTrino;
@@ -176,13 +176,21 @@ public class PaimonPageSource
             try {
                 return nextPage();
             }
+            catch (TrinoException e) {
+                closeAllSuppress(e, this);
+                throw e;
+            }
             catch (IOException e) {
-                throw new UncheckedIOException(e);
+                closeAllSuppress(e, this);
+                throw PaimonPageSourceProvider.wrapPaimonReadException(e);
             }
             catch (UnsupportedOperationException e) {
-                throw PaimonPageSourceProvider.unsupportedReadException(
-                        "Paimon page read uses features which are not supported by the Trino connector",
-                        e);
+                closeAllSuppress(e, this);
+                throw PaimonPageSourceProvider.wrapPaimonReadException(e);
+            }
+            catch (RuntimeException e) {
+                closeAllSuppress(e, this);
+                throw PaimonPageSourceProvider.wrapPaimonReadException(e);
             }
         }, PaimonPageSource.class.getClassLoader());
     }

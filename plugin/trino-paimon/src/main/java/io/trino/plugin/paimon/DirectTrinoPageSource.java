@@ -23,6 +23,7 @@ import java.util.LinkedList;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 
+import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -74,33 +75,39 @@ public class DirectTrinoPageSource
     @Override
     public Page getNextPage()
     {
-        if (closed || current == null || limitReached()) {
-            close();
+        try {
+            if (closed || current == null || limitReached()) {
+                close();
+                return null;
+            }
+
+            while (current != null) {
+                Page dataPage = current.getNextPage();
+                if (dataPage == null) {
+                    if (!current.isFinished()) {
+                        return null;
+                    }
+                    advance();
+                    continue;
+                }
+
+                if (limit.isPresent() && completedPositions + dataPage.getPositionCount() > limit.getAsLong()) {
+                    int remainingPositions = toIntExact(limit.getAsLong() - completedPositions);
+                    Page limitedPage = dataPage.getRegion(0, remainingPositions).getLoadedPage();
+                    completedPositions += limitedPage.getPositionCount();
+                    close();
+                    return limitedPage;
+                }
+
+                completedPositions += dataPage.getPositionCount();
+                return dataPage;
+            }
             return null;
         }
-
-        while (current != null) {
-            Page dataPage = current.getNextPage();
-            if (dataPage == null) {
-                if (!current.isFinished()) {
-                    return null;
-                }
-                advance();
-                continue;
-            }
-
-            if (limit.isPresent() && completedPositions + dataPage.getPositionCount() > limit.getAsLong()) {
-                int remainingPositions = toIntExact(limit.getAsLong() - completedPositions);
-                Page limitedPage = dataPage.getRegion(0, remainingPositions).getLoadedPage();
-                completedPositions += limitedPage.getPositionCount();
-                close();
-                return limitedPage;
-            }
-
-            completedPositions += dataPage.getPositionCount();
-            return dataPage;
+        catch (Exception e) {
+            closeAllSuppress(e, this);
+            throw PaimonPageSourceProvider.wrapPaimonReadException(e);
         }
-        return null;
     }
 
     private boolean limitReached()
@@ -120,7 +127,6 @@ public class DirectTrinoPageSource
         }
         catch (IOException e) {
             current = null;
-            close();
             throw new UncheckedIOException("error happens while advance and close old page source.", e);
         }
         current = pageSourceQueue.poll();
