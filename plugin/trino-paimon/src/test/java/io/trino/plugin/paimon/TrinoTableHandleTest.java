@@ -54,6 +54,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_SNAPSHOT;
+import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_TAG;
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_TIMESTAMP;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
@@ -114,6 +115,27 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testTableWithDynamicOptionsMergesSessionTagOption()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
+        Table table = capturingTable(copiedOptions);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(SCAN_TAG, "tag-2"))
+                .build();
+
+        assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, session)).isSameAs(table);
+        assertThat(copiedOptions.get())
+                .containsExactlyEntriesOf(Map.of(CoreOptions.SCAN_TAG_NAME.key(), "tag-2"));
+    }
+
+    @Test
     public void testTableWithDynamicOptionsPrefersExplicitTimeTravelSelectionOverSessionProperties()
             throws Exception
     {
@@ -129,7 +151,8 @@ public class TrinoTableHandleTest
                 .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
                 .setPropertyValues(Map.of(
                         SCAN_TIMESTAMP, 1234L,
-                        SCAN_SNAPSHOT, 9L))
+                        SCAN_SNAPSHOT, 9L,
+                        SCAN_TAG, "tag-2"))
                 .build();
 
         assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, session)).isSameAs(table);
@@ -181,8 +204,32 @@ public class TrinoTableHandleTest
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(INVALID_SESSION_PROPERTY.toErrorCode());
                     assertThat(exception).hasMessage(
-                            "Only one of %s or %s session properties may be set",
-                            SCAN_TIMESTAMP, SCAN_SNAPSHOT);
+                            "Only one of %s, %s or %s session properties may be set",
+                            SCAN_TIMESTAMP, SCAN_SNAPSHOT, SCAN_TAG);
+                });
+    }
+
+    @Test
+    public void testTableWithDynamicOptionsRejectsConflictingSessionTagAndSnapshotPropertiesForOrdinaryScans()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, capturingTable(new AtomicReference<>()));
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        SCAN_SNAPSHOT, 9L,
+                        SCAN_TAG, "tag-2"))
+                .build();
+
+        assertThatThrownBy(() -> handle.tableWithDynamicOptions(TESTING_CATALOG, session))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_SESSION_PROPERTY.toErrorCode());
+                    assertThat(exception).hasMessage(
+                            "Only one of %s, %s or %s session properties may be set",
+                            SCAN_TIMESTAMP, SCAN_SNAPSHOT, SCAN_TAG);
                 });
     }
 

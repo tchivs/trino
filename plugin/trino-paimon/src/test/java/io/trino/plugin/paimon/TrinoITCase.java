@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import io.trino.Session;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
@@ -107,6 +108,7 @@ public class TrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.row_tracking_values");
             sql("DROP TABLE IF EXISTS paimon.default.branch_values");
             sql("DROP TABLE IF EXISTS paimon.default.branch_schema_values");
+            sql("DROP TABLE IF EXISTS paimon.default.branch_fallback_values");
             // Drop test schemas that may have been created
             sql("DROP SCHEMA IF EXISTS paimon.test CASCADE");
             sql("DROP SCHEMA IF EXISTS paimon.tpch CASCADE");
@@ -630,6 +632,19 @@ public class TrinoITCase
     }
 
     @Test
+    public void testBranchesSystemTableColumnsAndFilter()
+            throws Exception
+    {
+        sql("CREATE TABLE paimon.default.branch_values (id integer, name varchar) WITH (bucket = '-1')");
+        createBranch("default", "branch_values", "feature_branch");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.\"branch_values$branches\""))
+                .isEqualTo("[[branch_name, varchar, , ], [create_time, timestamp(3), , ]]");
+        assertThat(sql("SELECT branch_name FROM paimon.default.\"branch_values$branches\" WHERE branch_name = 'feature_branch'"))
+                .isEqualTo("[[feature_branch]]");
+    }
+
+    @Test
     public void testBranchQualifiedTableSchemaEvolutionUsesBranchSchema()
             throws Exception
     {
@@ -650,6 +665,34 @@ public class TrinoITCase
                 .isEqualTo("[[1, main]]");
         assertThat(sql("SELECT * FROM paimon.default.\"branch_schema_values$branch_schema_branch\" ORDER BY id"))
                 .isEqualTo("[[1, main, null], [2, branch, note]]");
+    }
+
+    @Test
+    public void testBatchReadFallbackBranch()
+            throws Exception
+    {
+        sql("CREATE TABLE paimon.default.branch_fallback_values (dt varchar, name varchar, amount bigint) "
+                + "WITH (partitioned_by = ARRAY['dt'], bucket = '-1')");
+        createBranch("default", "branch_fallback_values", "streaming_branch");
+
+        sql("INSERT INTO paimon.default.\"branch_fallback_values$branch_streaming_branch\" VALUES "
+                + "('20240725', 'apple', 4), "
+                + "('20240725', 'peach', 10), "
+                + "('20240726', 'cherry', 3), "
+                + "('20240726', 'pear', 6)");
+        sql("INSERT INTO paimon.default.branch_fallback_values VALUES "
+                + "('20240725', 'apple', 5), "
+                + "('20240725', 'banana', 7)");
+        sql("ALTER TABLE paimon.default.branch_fallback_values SET PROPERTIES scan_fallback_branch = 'streaming_branch'");
+
+        assertThat(sql("SELECT * FROM paimon.default.branch_fallback_values ORDER BY dt, name"))
+                .isEqualTo("[[20240725, apple, 5], [20240725, banana, 7], "
+                        + "[20240726, cherry, 3], [20240726, pear, 6]]");
+
+        sql("ALTER TABLE paimon.default.branch_fallback_values SET PROPERTIES scan_fallback_branch = DEFAULT");
+
+        assertThat(sql("SELECT * FROM paimon.default.branch_fallback_values ORDER BY dt, name"))
+                .isEqualTo("[[20240725, apple, 5], [20240725, banana, 7]]");
     }
 
     @Test
@@ -1208,6 +1251,40 @@ public class TrinoITCase
                 .isEqualTo("[[1, hello, null], [2, paimon, null], [3, trino, 0401], [4, spark, 0402]]");
         assertThat(sql("SELECT * FROM paimon.default.time_travel_schema_evolution FOR VERSION AS OF 1"))
                 .isEqualTo("[[1, hello], [2, paimon]]");
+    }
+
+    @Test
+    public void testSessionSnapshotTimeTravel()
+    {
+        Session snapshotSession = Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.SCAN_SNAPSHOT, "1")
+                .build();
+
+        assertThat(computeActual(snapshotSession, "SELECT * FROM paimon.default.t2").getMaterializedRows().toString())
+                .isEqualTo("[[1, 2, 1, 1], [3, 4, 2, 2]]");
+    }
+
+    @Test
+    public void testSessionTimestampTimeTravel()
+    {
+        Session timestampSession = Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.SCAN_TIMESTAMP,
+                        Long.toString(t2FirstCommitTimestamp))
+                .build();
+
+        assertThat(computeActual(timestampSession, "SELECT * FROM paimon.default.t2").getMaterializedRows().toString())
+                .isEqualTo("[[1, 2, 1, 1], [3, 4, 2, 2]]");
+    }
+
+    @Test
+    public void testSessionTagTimeTravel()
+    {
+        Session tagSession = Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.SCAN_TAG, "tag-2")
+                .build();
+
+        assertThat(computeActual(tagSession, "SELECT * FROM paimon.default.t2").getMaterializedRows().toString())
+                .isEqualTo("[[1, 2, 1, 1], [3, 4, 2, 2], [5, 6, 3, 3], [7, 8, 4, 4]]");
     }
 
     @Test

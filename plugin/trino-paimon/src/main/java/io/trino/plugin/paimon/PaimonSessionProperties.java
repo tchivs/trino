@@ -26,15 +26,18 @@ import static io.trino.plugin.base.session.PropertyMetadataUtil.durationProperty
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static io.trino.spi.session.PropertyMetadata.doubleProperty;
 import static io.trino.spi.session.PropertyMetadata.longProperty;
+import static io.trino.spi.session.PropertyMetadata.stringProperty;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.String.format;
 import static org.apache.paimon.CoreOptions.SCAN_SNAPSHOT_ID;
+import static org.apache.paimon.CoreOptions.SCAN_TAG_NAME;
 import static org.apache.paimon.CoreOptions.SCAN_TIMESTAMP_MILLIS;
 
 public class PaimonSessionProperties
 {
     public static final String SCAN_TIMESTAMP = "scan_timestamp_millis";
     public static final String SCAN_SNAPSHOT = "scan_snapshot_id";
+    public static final String SCAN_TAG = "scan_tag_name";
     public static final String MINIMUM_SPLIT_WEIGHT = "minimum_split_weight";
     public static final String INSERT_EXISTING_PARTITIONS_BEHAVIOR = "insert_existing_partitions_behavior";
     public static final String DYNAMIC_FILTERING_WAIT_TIMEOUT = "dynamic_filtering_wait_timeout";
@@ -46,6 +49,17 @@ public class PaimonSessionProperties
         sessionProperties = ImmutableList.<PropertyMetadata<?>>builder()
                 .add(longProperty(SCAN_TIMESTAMP, SCAN_TIMESTAMP_MILLIS.description().toString(), null, true))
                 .add(longProperty(SCAN_SNAPSHOT, SCAN_SNAPSHOT_ID.description().toString(), null, true))
+                .add(stringProperty(
+                        SCAN_TAG,
+                        SCAN_TAG_NAME.description().toString(),
+                        null,
+                        value -> {
+                            if (value != null && value.isBlank()) {
+                                throw new TrinoException(INVALID_SESSION_PROPERTY,
+                                        format("%s must not be blank", SCAN_TAG));
+                            }
+                        },
+                        true))
                 .add(doubleProperty(
                         MINIMUM_SPLIT_WEIGHT,
                         "Minimum split weight",
@@ -76,6 +90,11 @@ public class PaimonSessionProperties
     public static Long getScanSnapshotId(ConnectorSession session)
     {
         return session.getProperty(SCAN_SNAPSHOT, Long.class);
+    }
+
+    public static String getScanTagName(ConnectorSession session)
+    {
+        return session.getProperty(SCAN_TAG, String.class);
     }
 
     public static Double getMinimumSplitWeight(ConnectorSession session)

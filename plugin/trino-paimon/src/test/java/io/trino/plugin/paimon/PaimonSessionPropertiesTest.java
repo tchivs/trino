@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static io.trino.plugin.paimon.PaimonSessionProperties.MINIMUM_SPLIT_WEIGHT;
+import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_TAG;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,6 +45,24 @@ public class PaimonSessionPropertiesTest
         assertInvalidMinimumSplitWeight(0.0);
         assertInvalidMinimumSplitWeight(-0.1);
         assertInvalidMinimumSplitWeight(1.1);
+    }
+
+    @Test
+    public void testScanTagDefaultsAndValidValues()
+    {
+        assertThat(PaimonSessionProperties.getScanTagName(session(Map.of()))).isNull();
+        assertThat(PaimonSessionProperties.getScanTagName(session(Map.of(SCAN_TAG, "tag-1"))))
+                .isEqualTo("tag-1");
+    }
+
+    @Test
+    public void testScanTagRejectsBlankValue()
+    {
+        assertThatThrownBy(() -> PaimonSessionProperties.getScanTagName(session(Map.of(SCAN_TAG, " "))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_SESSION_PROPERTY.toErrorCode());
+                    assertThat(exception).hasMessage("%s must not be blank", SCAN_TAG);
+                });
     }
 
     private static void assertInvalidMinimumSplitWeight(double value)

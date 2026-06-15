@@ -29,6 +29,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.ConnectorTableProperties;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.PointerType;
@@ -534,7 +535,7 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
-        io.trino.spi.connector.ConnectorTableProperties properties = metadata.getTableProperties(SESSION, tableHandle);
+        ConnectorTableProperties properties = metadata.getTableProperties(SESSION, tableHandle);
 
         assertThat(properties).isNotNull();
     }

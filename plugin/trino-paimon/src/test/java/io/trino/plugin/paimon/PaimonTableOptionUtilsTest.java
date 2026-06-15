@@ -87,6 +87,8 @@ public class PaimonTableOptionUtilsTest
                 .isEqualTo(CoreOptions.VARIANT_SHREDDING_MAX_SCHEMA_WIDTH.key());
         assertThat(PaimonTableOptionUtils.toPaimonOptionKey("vector_file_format"))
                 .isEqualTo(CoreOptions.VECTOR_FILE_FORMAT.key());
+        assertThat(PaimonTableOptionUtils.toPaimonOptionKey("scan_fallback_branch"))
+                .isEqualTo(CoreOptions.SCAN_FALLBACK_BRANCH.key());
         assertThat(PaimonTableOptionUtils.toPaimonOptionKey("custom.option"))
                 .isEqualTo("custom.option");
     }
@@ -105,6 +107,13 @@ public class PaimonTableOptionUtilsTest
                 });
         assertThat(tableOptions.getTableProperties())
                 .filteredOn(property -> property.getName().equals("vector_field"))
+                .singleElement()
+                .satisfies(property -> {
+                    assertThat(property.getSqlType()).isEqualTo(VARCHAR);
+                    assertThat(property.getJavaType()).isEqualTo(String.class);
+                });
+        assertThat(tableOptions.getTableProperties())
+                .filteredOn(property -> property.getName().equals("scan_fallback_branch"))
                 .singleElement()
                 .satisfies(property -> {
                     assertThat(property.getSqlType()).isEqualTo(VARCHAR);

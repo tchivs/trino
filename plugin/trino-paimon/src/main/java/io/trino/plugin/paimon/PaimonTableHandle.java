@@ -262,23 +262,40 @@ public class PaimonTableHandle
         if (!hasExplicitStartupSelection(dynamicOptions)) {
             Long scanTimestampMills = PaimonSessionProperties.getScanTimestampMillis(session);
             Long scanSnapshotId = PaimonSessionProperties.getScanSnapshotId(session);
-            validateSessionScanSelection(scanTimestampMills, scanSnapshotId);
+            String scanTagName = PaimonSessionProperties.getScanTagName(session);
+            validateSessionScanSelection(scanTimestampMills, scanSnapshotId, scanTagName);
             if (scanTimestampMills != null) {
                 dynamicOptions.put(CoreOptions.SCAN_TIMESTAMP_MILLIS.key(), scanTimestampMills.toString());
             }
             if (scanSnapshotId != null) {
                 dynamicOptions.put(CoreOptions.SCAN_SNAPSHOT_ID.key(), scanSnapshotId.toString());
             }
+            if (scanTagName != null) {
+                dynamicOptions.put(CoreOptions.SCAN_TAG_NAME.key(), scanTagName);
+            }
         }
         return dynamicOptions;
     }
 
-    private static void validateSessionScanSelection(Long scanTimestampMills, Long scanSnapshotId)
+    private static void validateSessionScanSelection(Long scanTimestampMills, Long scanSnapshotId, String scanTagName)
     {
-        if (scanTimestampMills != null && scanSnapshotId != null) {
+        int selections = 0;
+        if (scanTimestampMills != null) {
+            selections++;
+        }
+        if (scanSnapshotId != null) {
+            selections++;
+        }
+        if (scanTagName != null) {
+            selections++;
+        }
+        if (selections > 1) {
             throw new TrinoException(INVALID_SESSION_PROPERTY,
-                    "Only one of %s or %s session properties may be set"
-                            .formatted(PaimonSessionProperties.SCAN_TIMESTAMP, PaimonSessionProperties.SCAN_SNAPSHOT));
+                    "Only one of %s, %s or %s session properties may be set"
+                            .formatted(
+                                    PaimonSessionProperties.SCAN_TIMESTAMP,
+                                    PaimonSessionProperties.SCAN_SNAPSHOT,
+                                    PaimonSessionProperties.SCAN_TAG));
         }
     }
 
