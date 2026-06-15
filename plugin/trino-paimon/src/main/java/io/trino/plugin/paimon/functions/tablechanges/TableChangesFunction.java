@@ -21,6 +21,7 @@ import io.trino.plugin.paimon.PaimonMetadata;
 import io.trino.plugin.paimon.PaimonMetadataFactory;
 import io.trino.plugin.paimon.PaimonTableHandle;
 import io.trino.plugin.paimon.PaimonTableOptionUtils;
+import io.trino.plugin.paimon.PaimonTableSupport;
 import io.trino.plugin.paimon.PaimonTypeUtils;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.TrinoException;
@@ -41,7 +42,6 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
-import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 
 import java.util.ArrayList;
@@ -176,15 +176,6 @@ public class TableChangesFunction
         }
     }
 
-    private static Table latestAnalysisTable(Table table)
-    {
-        requireNonNull(table, "table is null");
-        if (table instanceof FileStoreTable fileStoreTable) {
-            return fileStoreTable.copyWithLatestSchema();
-        }
-        return table;
-    }
-
     @Override
     public TableFunctionAnalysis analyze(ConnectorSession session, ConnectorTransactionHandle transaction,
             Map<String, Argument> arguments, ConnectorAccessControl accessControl)
@@ -214,7 +205,10 @@ public class TableChangesFunction
         try {
             PaimonCatalog catalog = trinoMetadata.catalog();
             Catalog sessionCatalog = catalog.forSession(session);
-            Table paimonTable = latestAnalysisTable(sessionCatalog.getTable(Identifier.create(schema, table)));
+            Table paimonTable = PaimonTableSupport.requireFileStoreTable(
+                    sessionCatalog.getTable(Identifier.create(schema, table)),
+                    "system.table_changes")
+                    .copyWithLatestSchema();
             Map<String, String> options = new HashMap<>();
             if (incrementalBetweenValue.isPresent()) {
                 options.put(CoreOptions.INCREMENTAL_BETWEEN.key(), incrementalBetweenValue.orElseThrow().toStringUtf8());

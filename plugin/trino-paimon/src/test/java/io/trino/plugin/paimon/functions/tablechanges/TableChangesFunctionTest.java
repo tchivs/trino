@@ -32,8 +32,13 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextSearch;
+import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FullTextSearchTable;
+import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
@@ -46,6 +51,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -366,6 +372,50 @@ public class TableChangesFunctionTest
                 });
     }
 
+    @Test
+    public void testAnalyzeRejectsNonFileStoreTable()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(nonFileStoreTable(DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
+
+        assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(INCREMENTAL_BETWEEN, "1,2")), new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessageContaining("Paimon system.table_changes requires FileStoreTable, but got:");
+                });
+    }
+
+    @Test
+    public void testAnalyzeRejectsVectorSearchTable()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(VectorSearchTable.create(
+                        innerTable(),
+                        new VectorSearch(new float[] {1.0f}, 1, "embedding")))));
+
+        assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(INCREMENTAL_BETWEEN, "1,2")), new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon vector search tables are not supported by the Trino connector");
+                });
+    }
+
+    @Test
+    public void testAnalyzeRejectsFullTextSearchTable()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(FullTextSearchTable.create(
+                        innerTable(),
+                        new FullTextSearch("paimon", 1, "content")))));
+
+        assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(INCREMENTAL_BETWEEN, "1,2")), new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon full-text search tables are not supported by the Trino connector");
+                });
+    }
+
     private static Map<String, Argument> arguments(Map<String, String> overrides)
     {
         Map<String, Argument> arguments = new HashMap<>();
@@ -392,7 +442,21 @@ public class TableChangesFunctionTest
         return rootCause;
     }
 
-    private static Table table(RowType rowType, Map<String, String> options)
+    private static FileStoreTable table(RowType rowType, Map<String, String> options)
+    {
+        return (FileStoreTable) Proxy.newProxyInstance(
+                TableChangesFunctionTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy", "copyWithLatestSchema" -> proxy;
+                    case "options" -> options;
+                    case "rowType" -> rowType;
+                    case "toString" -> "testing-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Table nonFileStoreTable(RowType rowType, Map<String, String> options)
     {
         return (Table) Proxy.newProxyInstance(
                 TableChangesFunctionTest.class.getClassLoader(),
@@ -401,6 +465,17 @@ public class TableChangesFunctionTest
                     case "options" -> options;
                     case "rowType" -> rowType;
                     case "toString" -> "testing-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static InnerTable innerTable()
+    {
+        return (InnerTable) Proxy.newProxyInstance(
+                TableChangesFunctionTest.class.getClassLoader(),
+                new Class<?>[] {InnerTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "toString" -> "testing-inner-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

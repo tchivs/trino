@@ -33,10 +33,8 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.table.FileStoreTable;
-import org.apache.paimon.table.FullTextSearchTable;
 import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.Table;
-import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 
@@ -53,7 +51,6 @@ import java.util.stream.Collectors;
 
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.shade.guava30.com.google.common.base.Preconditions.checkArgument;
@@ -338,16 +335,7 @@ public class PaimonTableHandle
 
     private static Table requireSupportedTable(Table table)
     {
-        requireNonNull(table, "table is null");
-        if (table instanceof VectorSearchTable) {
-            throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon vector search tables are not supported by the Trino connector");
-        }
-        if (table instanceof FullTextSearchTable) {
-            throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon full-text search tables are not supported by the Trino connector");
-        }
-        return table;
+        return PaimonTableSupport.requireSupportedTable(table);
     }
 
     public ConnectorTableMetadata tableMetadata(Catalog catalog, TypeManager typeManager, ConnectorSession session)
