@@ -52,12 +52,17 @@ import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataIncrement;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextSearch;
+import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FullTextSearchTable;
+import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessageImpl;
@@ -233,6 +238,58 @@ public class PaimonMetadataTableModeTest
         assertUnsupportedFileStoreTable(() -> metadata.getInsertLayout(SESSION, tableHandle),
                 "Paimon insert layout requires FileStoreTable");
         assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testMetadataFileStoreBoundariesRejectSearchWrapperTables()
+            throws Exception
+    {
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        Slice fragment = commitFragment();
+
+        PaimonMetadata vectorSearchMetadata = new PaimonMetadata(new TestingPaimonCatalog(VectorSearchTable.create(
+                innerTable(),
+                new VectorSearch(new float[] {1.0f}, 1, "embedding"))), TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> vectorSearchMetadata.getInsertLayout(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon vector search tables are not supported by the Trino connector");
+        assertTrinoError(() -> vectorSearchMetadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon vector search tables are not supported by the Trino connector");
+        assertTrinoError(() -> vectorSearchMetadata.getUpdateLayout(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon vector search tables are not supported by the Trino connector");
+        assertTrinoError(() -> vectorSearchMetadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon vector search tables are not supported by the Trino connector");
+        assertTrinoError(() -> vectorSearchMetadata.truncateTable(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon vector search tables are not supported by the Trino connector");
+        assertTrinoError(() -> vectorSearchMetadata.finishInsert(SESSION, tableHandle, List.of(fragment), List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon vector search tables are not supported by the Trino connector");
+
+        PaimonMetadata fullTextSearchMetadata = new PaimonMetadata(new TestingPaimonCatalog(FullTextSearchTable.create(
+                innerTable(),
+                new FullTextSearch("paimon", 1, "content"))), TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> fullTextSearchMetadata.getInsertLayout(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon full-text search tables are not supported by the Trino connector");
+        assertTrinoError(() -> fullTextSearchMetadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon full-text search tables are not supported by the Trino connector");
+        assertTrinoError(() -> fullTextSearchMetadata.getUpdateLayout(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon full-text search tables are not supported by the Trino connector");
+        assertTrinoError(() -> fullTextSearchMetadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon full-text search tables are not supported by the Trino connector");
+        assertTrinoError(() -> fullTextSearchMetadata.truncateTable(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon full-text search tables are not supported by the Trino connector");
+        assertTrinoError(() -> fullTextSearchMetadata.finishInsert(SESSION, tableHandle, List.of(fragment), List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon full-text search tables are not supported by the Trino connector");
     }
 
     @Test
@@ -3615,6 +3672,17 @@ public class PaimonMetadataTableModeTest
                 (proxy, method, args) -> switch (method.getName()) {
                     case "copy" -> proxy;
                     case "toString" -> "testing-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static InnerTable innerTable()
+    {
+        return (InnerTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {InnerTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "toString" -> "testing-inner-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

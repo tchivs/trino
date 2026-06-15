@@ -547,12 +547,7 @@ public class PaimonPageSourceProvider
 
     static FileStoreTable requireFileStoreTableForDirectRead(Table table)
     {
-        requireNonNull(table, "table is null");
-        if (!(table instanceof FileStoreTable fileStoreTable)) {
-            throw new TrinoException(NOT_SUPPORTED,
-                    "Direct raw-file reads require FileStoreTable, but got: " + table.getClass().getName());
-        }
-        return fileStoreTable;
+        return PaimonTableSupport.requireFileStoreTable(table, "direct raw-file reads");
     }
 
     static void validateAlignedMetadataFiles(String name, Optional<? extends List<?>> files, int rawFileCount)

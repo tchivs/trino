@@ -80,12 +80,7 @@ public class PaimonPageSinkProvider
 
     private static FileStoreTable requireFileStoreTable(Table table, String operation)
     {
-        requireNonNull(table, "table is null");
-        if (!(table instanceof FileStoreTable fileStoreTable)) {
-            throw new TrinoException(NOT_SUPPORTED,
-                    "Unsupported Paimon table implementation for " + operation + ": " + table.getClass().getName());
-        }
-        return fileStoreTable;
+        return PaimonTableSupport.requireFileStoreTable(table, operation);
     }
 
     static FileStoreTable latestFileStoreTable(Table table, String operation)

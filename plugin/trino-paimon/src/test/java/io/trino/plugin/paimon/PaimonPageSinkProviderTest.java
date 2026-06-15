@@ -25,9 +25,14 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextSearch;
+import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FullTextSearchTable;
+import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
@@ -93,13 +98,33 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> PaimonPageSinkProvider.validateWriteBucketMode(table()))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("Unsupported Paimon table implementation for writes");
+                    assertThat(exception).hasMessageContaining("Paimon writes requires FileStoreTable, but got:");
                 });
 
         assertThatThrownBy(() -> PaimonPageSinkProvider.validateMergeBucketMode(table()))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("Unsupported Paimon table implementation for merge writes");
+                    assertThat(exception).hasMessageContaining("Paimon merge writes requires FileStoreTable, but got:");
+                });
+    }
+
+    @Test
+    public void testSearchWrapperTablesFailFast()
+    {
+        assertThatThrownBy(() -> PaimonPageSinkProvider.validateWriteBucketMode(VectorSearchTable.create(
+                innerTable(),
+                new VectorSearch(new float[] {1.0f}, 1, "embedding"))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon vector search tables are not supported by the Trino connector");
+                });
+
+        assertThatThrownBy(() -> PaimonPageSinkProvider.validateMergeBucketMode(FullTextSearchTable.create(
+                innerTable(),
+                new FullTextSearch("paimon", 1, "content"))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon full-text search tables are not supported by the Trino connector");
                 });
     }
 
@@ -727,6 +752,17 @@ public class PaimonPageSinkProviderTest
                 new Class<?>[] {Table.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "toString" -> "testing-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static InnerTable innerTable()
+    {
+        return (InnerTable) Proxy.newProxyInstance(
+                PaimonPageSinkProviderTest.class.getClassLoader(),
+                new Class<?>[] {InnerTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "toString" -> "testing-inner-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

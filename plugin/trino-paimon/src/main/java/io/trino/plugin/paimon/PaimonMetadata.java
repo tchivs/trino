@@ -351,12 +351,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     private static FileStoreTable requireFileStoreTable(Table table, String operation)
     {
-        requireNonNull(table, "table is null");
-        if (!(table instanceof FileStoreTable fileStoreTable)) {
-            throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon " + operation + " requires FileStoreTable, but got: " + table.getClass().getName());
-        }
-        return fileStoreTable;
+        return PaimonTableSupport.requireFileStoreTable(table, operation);
     }
 
     private static FileStoreTable latestFileStoreTable(Table table, String operation)

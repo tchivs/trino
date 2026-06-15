@@ -63,10 +63,15 @@ import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.GenericVariant;
 import org.apache.paimon.deletionvectors.DeletionVector;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.LeafPredicate;
+import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FullTextSearchTable;
+import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.table.source.DeletionFile;
 import org.apache.paimon.table.source.RawFile;
 import org.apache.paimon.types.DataField;
@@ -1333,7 +1338,27 @@ public class PaimonPageSourceTest
         assertThatThrownBy(() -> PaimonPageSourceProvider.requireFileStoreTableForDirectRead(table()))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("Direct raw-file reads require FileStoreTable");
+                    assertThat(exception).hasMessageContaining("Paimon direct raw-file reads requires FileStoreTable, but got:");
+                });
+    }
+
+    @Test
+    void testDirectRawFileReadsRejectSearchWrapperTables()
+    {
+        assertThatThrownBy(() -> PaimonPageSourceProvider.requireFileStoreTableForDirectRead(VectorSearchTable.create(
+                innerTable(),
+                new VectorSearch(new float[] {1.0f}, 1, "embedding"))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon vector search tables are not supported by the Trino connector");
+                });
+
+        assertThatThrownBy(() -> PaimonPageSourceProvider.requireFileStoreTableForDirectRead(FullTextSearchTable.create(
+                innerTable(),
+                new FullTextSearch("paimon", 1, "content"))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon full-text search tables are not supported by the Trino connector");
                 });
     }
 
@@ -1881,6 +1906,17 @@ public class PaimonPageSourceTest
                 new Class<?>[] {Table.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "toString" -> "testing-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static InnerTable innerTable()
+    {
+        return (InnerTable) Proxy.newProxyInstance(
+                PaimonPageSourceTest.class.getClassLoader(),
+                new Class<?>[] {InnerTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "toString" -> "testing-inner-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
