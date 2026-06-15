@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static io.trino.plugin.paimon.PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR;
 import static io.trino.plugin.paimon.PaimonSessionProperties.MINIMUM_SPLIT_WEIGHT;
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_TAG;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
@@ -63,6 +64,19 @@ public class PaimonSessionPropertiesTest
                     assertThat(exception.getErrorCode()).isEqualTo(INVALID_SESSION_PROPERTY.toErrorCode());
                     assertThat(exception).hasMessage("%s must not be blank", SCAN_TAG);
                 });
+    }
+
+    @Test
+    public void testInsertExistingPartitionsBehaviorDefaultsAndCaseInsensitiveValues()
+    {
+        assertThat(PaimonSessionProperties.getInsertExistingPartitionsBehavior(session(Map.of())))
+                .isEqualTo(PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND);
+        assertThat(PaimonSessionProperties.getInsertExistingPartitionsBehavior(session(Map.of(
+                INSERT_EXISTING_PARTITIONS_BEHAVIOR, "error"))))
+                .isEqualTo(PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR);
+        assertThat(PaimonSessionProperties.getInsertExistingPartitionsBehavior(session(Map.of(
+                INSERT_EXISTING_PARTITIONS_BEHAVIOR, "OvErWrItE"))))
+                .isEqualTo(PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE);
     }
 
     private static void assertInvalidMinimumSplitWeight(double value)

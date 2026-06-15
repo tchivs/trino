@@ -708,6 +708,74 @@ public class TrinoITCase
     }
 
     @Test
+    public void testInsertExistingPartitionsBehaviorErrorForPartitionedTable()
+    {
+        sql("CREATE TABLE paimon.default.insert_error_partitioned ("
+                + "dt varchar, "
+                + "id integer, "
+                + "name varchar) "
+                + "WITH (partitioned_by = ARRAY['dt'], bucket = '-1')");
+        sql("INSERT INTO paimon.default.insert_error_partitioned VALUES ('20240725', 1, 'main')");
+
+        Session errorSession = Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR, "error")
+                .build();
+
+        assertQueryFails(errorSession,
+                "INSERT INTO paimon.default.insert_error_partitioned VALUES ('20240725', 2, 'conflict')",
+                ".*Cannot insert into an existing partition of Paimon table: default.insert_error_partitioned.*");
+        assertUpdate(errorSession,
+                "INSERT INTO paimon.default.insert_error_partitioned VALUES ('20240726', 3, 'fresh')",
+                1);
+
+        assertThat(sql("SELECT * FROM paimon.default.insert_error_partitioned ORDER BY dt, id"))
+                .isEqualTo("[[20240725, 1, main], [20240726, 3, fresh]]");
+        sql("DROP TABLE paimon.default.insert_error_partitioned");
+    }
+
+    @Test
+    public void testInsertExistingPartitionsBehaviorErrorForUnpartitionedTable()
+    {
+        sql("CREATE TABLE paimon.default.insert_error_unpartitioned (id integer, name varchar) WITH (bucket = '-1')");
+        sql("INSERT INTO paimon.default.insert_error_unpartitioned VALUES (1, 'main')");
+
+        Session errorSession = Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR, "ERROR")
+                .build();
+
+        assertQueryFails(errorSession,
+                "INSERT INTO paimon.default.insert_error_unpartitioned VALUES (2, 'conflict')",
+                ".*Cannot insert into an existing non-partitioned Paimon table: default.insert_error_unpartitioned.*");
+
+        assertThat(sql("SELECT * FROM paimon.default.insert_error_unpartitioned"))
+                .isEqualTo("[[1, main]]");
+        sql("DROP TABLE paimon.default.insert_error_unpartitioned");
+    }
+
+    @Test
+    public void testInsertExistingPartitionsBehaviorOverwriteRejectsUnsafePartitionOverwrite()
+    {
+        sql("CREATE TABLE paimon.default.insert_overwrite_guard ("
+                + "dt varchar, "
+                + "id integer, "
+                + "name varchar) "
+                + "WITH (partitioned_by = ARRAY['dt'], bucket = '-1', dynamic_partition_overwrite = 'false')");
+        sql("INSERT INTO paimon.default.insert_overwrite_guard VALUES ('20240725', 1, 'main')");
+
+        Session overwriteSession = Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR, "overwrite")
+                .build();
+
+        assertQueryFails(overwriteSession,
+                "INSERT INTO paimon.default.insert_overwrite_guard VALUES ('20240725', 2, 'unsafe')",
+                ".*Paimon insert overwrite requires dynamic-partition-overwrite=true for partitioned tables.*");
+
+        assertThat(sql("SELECT * FROM paimon.default.insert_overwrite_guard"))
+                .isEqualTo("[[20240725, 1, main]]");
+        sql("DROP TABLE paimon.default.insert_overwrite_guard");
+    }
+
+    @Test
     public void testCreateTable()
     {
         sql("CREATE TABLE orders (" + "  order_key bigint," + "  order_status varchar," + "  total_price double,"
