@@ -46,12 +46,14 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.LongStream;
 
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.DynamicFilter.NOT_BLOCKED;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.paimon.options.Options.fromMap;
@@ -554,6 +556,43 @@ public class DynamicFilteringTrinoSplitSourceTest
     }
 
     @Test
+    public void testCloseWhileAwaitingDynamicFilterReturnsFinishedBatch()
+            throws Exception
+    {
+        RecordingCatalog catalog = new RecordingCatalog(true);
+        AtomicReference<CompletableFuture<?>> blocked = new AtomicReference<>(new CompletableFuture<>());
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Collections.emptyMap(),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.empty()),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                blockingDynamicFilter(TupleDomain.none(), blocked),
+                new Duration(1, SECONDS));
+
+        CompletableFuture<ConnectorSplitSource.ConnectorSplitBatch> batchFuture = splitSource.getNextBatch(100);
+        assertThat(batchFuture).isNotDone();
+
+        splitSource.close();
+        blocked.get().complete(null);
+
+        ConnectorSplitSource.ConnectorSplitBatch batch = batchFuture.get();
+
+        assertThat(splitSource.isFinished()).isTrue();
+        assertThat(catalog.initialized()).isFalse();
+        assertThat(catalog.tableLoaded()).isFalse();
+        assertThat(batch.getSplits()).isEmpty();
+        assertThat(batch.isNoMoreSplits()).isTrue();
+    }
+
+    @Test
     public void testCombinePredicatesRejectsNullInputs()
     {
         assertThatThrownBy(() -> DynamicFilteringTrinoSplitSource.combinePredicates(null, TupleDomain.all(), 3))
@@ -632,6 +671,14 @@ public class DynamicFilteringTrinoSplitSourceTest
 
     private static DynamicFilter blockingDynamicFilter(TupleDomain<ColumnHandle> predicate)
     {
+        return blockingDynamicFilter(predicate, new AtomicReference<>(new CompletableFuture<>()));
+    }
+
+    private static DynamicFilter blockingDynamicFilter(
+            TupleDomain<ColumnHandle> predicate,
+            AtomicReference<CompletableFuture<?>> blockedFuture)
+    {
+        requireNonNull(blockedFuture, "blockedFuture is null");
         return new DynamicFilter()
         {
             @Override
@@ -645,7 +692,7 @@ public class DynamicFilteringTrinoSplitSourceTest
             @Override
             public CompletableFuture<?> isBlocked()
             {
-                return new CompletableFuture<>();
+                return blockedFuture.get();
             }
 
             @Override

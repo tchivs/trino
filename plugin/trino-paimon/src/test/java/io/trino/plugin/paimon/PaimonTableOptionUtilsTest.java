@@ -126,6 +126,12 @@ public class PaimonTableOptionUtilsTest
                     assertThat(property.getSqlType()).isEqualTo(VARCHAR);
                     assertThat(property.getJavaType()).isEqualTo(String.class);
                 });
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("scan_snapshot_id"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("scan_version"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("incremental_between"));
     }
 
     @Test
@@ -234,7 +240,10 @@ public class PaimonTableOptionUtilsTest
                         CoreOptions.BUCKET.key(), "7",
                         CoreOptions.BUCKET_KEY.key(), "id",
                         CoreOptions.VECTOR_FILE_FORMAT.key(), "lance",
-                        CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(), "file:/tmp/blob-external"),
+                        CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(), "file:/tmp/blob-external",
+                        CoreOptions.SCAN_SNAPSHOT_ID.key(), "7",
+                        CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2",
+                        CoreOptions.SCAN_FALLBACK_BRANCH.key(), "branch_a"),
                 List.of("id"),
                 List.of("pt"));
 
@@ -244,7 +253,9 @@ public class PaimonTableOptionUtilsTest
                 .containsEntry("bucket", "7")
                 .containsEntry("bucket_key", "id")
                 .containsEntry("vector_file_format", "lance")
-                .containsEntry("blob_external_storage_path", "file:/tmp/blob-external");
+                .containsEntry("blob_external_storage_path", "file:/tmp/blob-external")
+                .containsEntry("scan_fallback_branch", "branch_a")
+                .doesNotContainKeys("scan_snapshot_id", "incremental_between");
     }
 
     @Test

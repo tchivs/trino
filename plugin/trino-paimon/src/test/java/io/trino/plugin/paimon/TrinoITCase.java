@@ -616,6 +616,19 @@ public class TrinoITCase
     }
 
     @Test
+    public void testRuntimeReadSelectorsAreNotTableProperties()
+    {
+        sql("CREATE TABLE paimon.default.runtime_selector_properties (id integer)");
+
+        assertQueryFails(
+                "ALTER TABLE paimon.default.runtime_selector_properties SET PROPERTIES scan_snapshot_id = '7'",
+                ".*Catalog 'paimon' table property 'scan_snapshot_id' does not exist.*");
+        assertQueryFails(
+                "ALTER TABLE paimon.default.runtime_selector_properties SET PROPERTIES incremental_between = '1,2'",
+                ".*Catalog 'paimon' table property 'incremental_between' does not exist.*");
+    }
+
+    @Test
     public void testCreateSchema()
     {
         sql("CREATE SCHEMA paimon.test");

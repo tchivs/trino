@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -37,6 +38,30 @@ public class PaimonTableOptionUtils
 {
     private static final Pattern CAMEL_CASE_BOUNDARY = Pattern.compile("([a-z0-9])([A-Z])");
     private static final Pattern OPTION_KEY_SEPARATOR = Pattern.compile("[.\\-]");
+    private static final Set<String> EXCLUDED_TABLE_PROPERTY_OPTION_KEYS = Set.of(
+            CoreOptions.SCAN_MODE.key(),
+            CoreOptions.SCAN_TIMESTAMP.key(),
+            CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
+            CoreOptions.SCAN_WATERMARK.key(),
+            CoreOptions.SCAN_FILE_CREATION_TIME_MILLIS.key(),
+            CoreOptions.SCAN_CREATION_TIME_MILLIS.key(),
+            CoreOptions.SCAN_SNAPSHOT_ID.key(),
+            CoreOptions.SCAN_TAG_NAME.key(),
+            CoreOptions.SCAN_VERSION.key(),
+            CoreOptions.SCAN_BOUNDED_WATERMARK.key(),
+            CoreOptions.SCAN_MANIFEST_PARALLELISM.key(),
+            CoreOptions.SCAN_MAX_SPLITS_PER_TASK.key(),
+            CoreOptions.SCAN_IGNORE_CORRUPT_FILE.key(),
+            CoreOptions.SCAN_IGNORE_LOST_FILE.key(),
+            CoreOptions.SCAN_PLAN_AUTO_TAG_FOR_READ_TIME_RETAINED.key(),
+            CoreOptions.INCREMENTAL_BETWEEN.key(),
+            CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(),
+            CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
+            CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(),
+            CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(),
+            CoreOptions.STREAMING_READ_SNAPSHOT_DELAY.key(),
+            CoreOptions.STREAMING_READ_OVERWRITE.key(),
+            CoreOptions.STREAMING_READ_APPEND_OVERWRITE.key());
     private static final List<OptionInfo> OPTION_INFOS = buildOptionInfos();
     private static final Map<String, OptionInfo> OPTION_INFO_BY_TRINO_KEY = indexOptionInfosByTrinoKey(OPTION_INFOS);
 
@@ -136,7 +161,7 @@ public class PaimonTableOptionUtils
         List<OptionInfo> optionInfos = new ArrayList<>();
         List<OptionWithMetaInfo> optionWithMetaInfos = extractConfigOptions(CoreOptions.class);
         for (OptionWithMetaInfo optionWithMetaInfo : optionWithMetaInfos) {
-            if (shouldSkip(optionWithMetaInfo.field.getName())) {
+            if (shouldSkip(optionWithMetaInfo.option, optionWithMetaInfo.field.getName())) {
                 continue;
             }
 
@@ -204,8 +229,9 @@ public class PaimonTableOptionUtils
         return className;
     }
 
-    private static boolean shouldSkip(String fieldName)
+    private static boolean shouldSkip(ConfigOption<?> option, String fieldName)
     {
+        requireNonNull(option, "option is null");
         switch (fieldName) {
             case "PRIMARY_KEY" :
             case "PARTITION" :
@@ -214,7 +240,7 @@ public class PaimonTableOptionUtils
             case "STREAMING_COMPACT" :
                 return true;
             default :
-                return false;
+                return EXCLUDED_TABLE_PROPERTY_OPTION_KEYS.contains(option.key());
         }
     }
 

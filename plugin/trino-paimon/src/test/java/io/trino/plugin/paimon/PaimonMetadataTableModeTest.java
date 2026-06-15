@@ -2746,6 +2746,22 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetTablePropertiesRejectsRuntimeReadSelectors()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of(
+                "incremental_between", Optional.of("1,2"),
+                "scan_snapshot_id", Optional.of("7"),
+                "scan_version", Optional.of("tag-1"))),
+                NOT_SUPPORTED.toErrorCode(),
+                "The following properties cannot be updated: incremental_between, scan_snapshot_id, scan_version");
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testSetTablePropertiesRejectsNullPropertyEntriesBeforeCatalogAlter()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();

@@ -86,8 +86,8 @@ public class DynamicFilteringTrinoSplitSource
             // Wait for dynamic filters if not yet started planning
             if (!splitsPlanningStarted && PaimonSplitManager.canApplyDynamicFilter(tableHandle) && dynamicFilter.isAwaitable() && timeLeft > 0) {
                 LOG.debug("Waiting for dynamic filters, time left: %sms", timeLeft);
-                return dynamicFilter.isBlocked().thenApply(ignored -> EMPTY_BATCH).completeOnTimeout(EMPTY_BATCH,
-                        timeLeft, MILLISECONDS);
+                return closeAware(dynamicFilter.isBlocked().thenApply(ignored -> EMPTY_BATCH)
+                        .completeOnTimeout(EMPTY_BATCH, timeLeft, MILLISECONDS));
             }
 
             // Start split planning if not yet started
@@ -173,6 +173,19 @@ public class DynamicFilteringTrinoSplitSource
         catch (RuntimeException e) {
             throw PaimonSplitManager.splitPlanningException(tableHandle, e);
         }
+    }
+
+    private CompletableFuture<ConnectorSplitBatch> closeAware(CompletableFuture<ConnectorSplitBatch> future)
+    {
+        requireNonNull(future, "future is null");
+        return future.thenApply(batch -> {
+            synchronized (this) {
+                if (closed) {
+                    return FINISHED_BATCH;
+                }
+            }
+            return batch;
+        });
     }
 
     static TupleDomain<PaimonColumnHandle> combinePredicates(TupleDomain<PaimonColumnHandle> staticPredicate,
