@@ -587,7 +587,32 @@ public class TrinoITCase
     {
         assertThat(sql("SHOW CREATE TABLE paimon.default.t3"))
                 .isEqualTo("[[CREATE TABLE paimon.default.t3 (\n" + "   pt varchar,\n" + "   a integer,\n"
-                        + "   b bigint,\n" + "   c bigint,\n" + "   d integer\n" + ")]]");
+                        + "   b bigint,\n" + "   c bigint,\n" + "   d integer\n"
+                        + ")\n"
+                        + "WITH (\n"
+                        + "   partitioned_by = ARRAY['pt']\n"
+                        + ")]]");
+    }
+
+    @Test
+    public void testShowCreateTableReflectsPaimonTableOptions()
+            throws Exception
+    {
+        sql("CREATE TABLE paimon.default.show_create_option_values ("
+                + "id integer, "
+                + "picture varbinary) "
+                + "WITH ("
+                + "bucket = '4', "
+                + "bucket_key = 'id', "
+                + "blob_external_storage_path = 'file:/tmp/blob-external')");
+        createBranch("default", "show_create_option_values", "branch_a");
+        sql("ALTER TABLE paimon.default.show_create_option_values SET PROPERTIES scan_fallback_branch = 'branch_a'");
+
+        assertThat(sql("SHOW CREATE TABLE paimon.default.show_create_option_values"))
+                .contains("bucket = '4'")
+                .contains("bucket_key = 'id'")
+                .contains("blob_external_storage_path = 'file:/tmp/blob-external'")
+                .contains("scan_fallback_branch = 'branch_a'");
     }
 
     @Test

@@ -466,6 +466,38 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testTableMetadataReflectsSchemaOptionsWithoutLeakingReadDynamicOptions()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user",
+                Map.of(CoreOptions.SCAN_VERSION.key(), "tag-1"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        AtomicReference<Boolean> copiedWithLatestSchema = new AtomicReference<>(false);
+        setCachedTable(handle, TESTING_CATALOG, fileStoreTableWithOptions(
+                copiedWithLatestSchema,
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.INT()),
+                        DataTypes.FIELD(1, "pt", DataTypes.STRING())),
+                Map.of(
+                        CoreOptions.BUCKET.key(), "7",
+                        CoreOptions.BUCKET_KEY.key(), "id",
+                        CoreOptions.VECTOR_FILE_FORMAT.key(), "lance"),
+                List.of("id"),
+                List.of("pt")));
+
+        ConnectorTableMetadata metadata = handle.tableMetadata(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION);
+
+        assertThat(copiedWithLatestSchema.get()).isFalse();
+        assertThat(metadata.getProperties())
+                .containsEntry(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("id"))
+                .containsEntry(PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("pt"))
+                .containsEntry("bucket", "7")
+                .containsEntry("bucket_key", "id")
+                .containsEntry("vector_file_format", "lance")
+                .doesNotContainKey("scan_version");
+    }
+
+    @Test
     public void testColumnHandleRefreshesLatestFileStoreSchema()
             throws Exception
     {
@@ -1125,13 +1157,20 @@ public class TrinoTableHandleTest
             RowType staleRowType,
             RowType latestRowType)
     {
+        Map<String, String> options = Map.of();
         FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
                 Table.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "coreOptions" -> new org.apache.paimon.CoreOptions(new org.apache.paimon.options.Options());
                     case "rowType" -> latestRowType;
+                    case "primaryKeys" -> List.of();
+                    case "partitionKeys" -> List.of();
+                    case "options" -> options;
+                    case "schema" -> org.apache.paimon.schema.TableSchema.create(1,
+                            new org.apache.paimon.schema.Schema(latestRowType.getFields(), List.of(), List.of(), options, ""));
                     case "comment" -> Optional.empty();
+                    case "copy" -> proxy;
                     case "toString" -> "latest-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
@@ -1145,8 +1184,58 @@ public class TrinoTableHandleTest
                     }
                     case "coreOptions" -> new org.apache.paimon.CoreOptions(new org.apache.paimon.options.Options());
                     case "rowType" -> staleRowType;
+                    case "primaryKeys" -> List.of();
+                    case "partitionKeys" -> List.of();
+                    case "options" -> options;
+                    case "schema" -> org.apache.paimon.schema.TableSchema.create(1,
+                            new org.apache.paimon.schema.Schema(staleRowType.getFields(), List.of(), List.of(), options, ""));
                     case "comment" -> Optional.empty();
+                    case "copy" -> proxy;
                     case "toString" -> "stale-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static FileStoreTable fileStoreTableWithOptions(
+            AtomicReference<Boolean> copiedWithLatestSchema,
+            RowType rowType,
+            Map<String, String> options,
+            List<String> primaryKeys,
+            List<String> partitionKeys)
+    {
+        FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
+                Table.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(new org.apache.paimon.options.Options(options));
+                    case "rowType" -> rowType;
+                    case "primaryKeys" -> primaryKeys;
+                    case "partitionKeys" -> partitionKeys;
+                    case "schema" -> org.apache.paimon.schema.TableSchema.create(1,
+                            new org.apache.paimon.schema.Schema(rowType.getFields(), partitionKeys, primaryKeys, options, ""));
+                    case "comment" -> Optional.empty();
+                    case "copy" -> proxy;
+                    case "copyWithLatestSchema" -> proxy;
+                    case "toString" -> "latest-file-store-table-with-options";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        return (FileStoreTable) Proxy.newProxyInstance(
+                Table.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithLatestSchema" -> {
+                        copiedWithLatestSchema.set(true);
+                        yield latestTable;
+                    }
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(new org.apache.paimon.options.Options(options));
+                    case "rowType" -> rowType;
+                    case "primaryKeys" -> primaryKeys;
+                    case "partitionKeys" -> partitionKeys;
+                    case "schema" -> org.apache.paimon.schema.TableSchema.create(1,
+                            new org.apache.paimon.schema.Schema(rowType.getFields(), partitionKeys, primaryKeys, options, ""));
+                    case "comment" -> Optional.empty();
+                    case "copy" -> proxy;
+                    case "toString" -> "stale-file-store-table-with-options";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
@@ -1158,7 +1247,11 @@ public class TrinoTableHandleTest
                 new Class<?>[] {Table.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "rowType" -> rowType;
+                    case "primaryKeys" -> List.of();
+                    case "partitionKeys" -> List.of();
+                    case "options" -> Map.of();
                     case "comment" -> Optional.ofNullable(comment);
+                    case "copy" -> proxy;
                     case "toString" -> "tableWithColumns";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });

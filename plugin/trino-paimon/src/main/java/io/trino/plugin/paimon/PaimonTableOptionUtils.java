@@ -16,6 +16,8 @@ package io.trino.plugin.paimon;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.options.ConfigOption;
 import org.apache.paimon.schema.Schema;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.Table;
 import org.apache.paimon.utils.StringUtils;
 
 import java.lang.reflect.Field;
@@ -92,6 +94,41 @@ public class PaimonTableOptionUtils
     public static List<OptionInfo> getOptionInfos()
     {
         return OPTION_INFOS;
+    }
+
+    public static Map<String, Object> tableProperties(Table table)
+    {
+        requireNonNull(table, "table is null");
+        Map<String, String> options = table instanceof FileStoreTable fileStoreTable
+                ? fileStoreTable.schema().options()
+                : table.options();
+        return tableProperties(options, table.primaryKeys(), table.partitionKeys());
+    }
+
+    static Map<String, Object> tableProperties(
+            Map<String, String> options,
+            List<String> primaryKeys,
+            List<String> partitionKeys)
+    {
+        requireNonNull(options, "options is null");
+        requireNonNull(primaryKeys, "primaryKeys is null");
+        requireNonNull(partitionKeys, "partitionKeys is null");
+
+        Map<String, Object> properties = new LinkedHashMap<>();
+        if (!primaryKeys.isEmpty()) {
+            properties.put(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.copyOf(primaryKeys));
+        }
+        if (!partitionKeys.isEmpty()) {
+            properties.put(PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.copyOf(partitionKeys));
+        }
+
+        for (OptionInfo optionInfo : OPTION_INFOS) {
+            String optionValue = options.get(optionInfo.paimonOptionKey);
+            if (optionValue != null) {
+                properties.put(optionInfo.trinoOptionKey, optionValue);
+            }
+        }
+        return Map.copyOf(properties);
     }
 
     private static List<OptionInfo> buildOptionInfos()
@@ -172,6 +209,7 @@ public class PaimonTableOptionUtils
         switch (fieldName) {
             case "PRIMARY_KEY" :
             case "PARTITION" :
+            case "PATH" :
             case "FILE_COMPRESSION_PER_LEVEL" :
             case "STREAMING_COMPACT" :
                 return true;

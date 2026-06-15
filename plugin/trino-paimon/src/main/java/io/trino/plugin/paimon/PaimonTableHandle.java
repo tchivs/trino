@@ -40,7 +40,6 @@ import org.apache.paimon.table.Table;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -435,7 +434,8 @@ public class PaimonTableHandle
         requireNonNull(typeManager, "typeManager is null");
         Table table = metadataTable(catalog, session);
         return new ConnectorTableMetadata(SchemaTableName.schemaTableName(schemaName, tableName),
-                columnMetadatas(table, typeManager), Collections.emptyMap(), normalizeComment(table.comment()));
+                columnMetadatas(table, typeManager), PaimonTableOptionUtils.tableProperties(table),
+                normalizeComment(table.comment()));
     }
 
     public List<ColumnMetadata> columnMetadatas(Catalog catalog, TypeManager typeManager, ConnectorSession session)

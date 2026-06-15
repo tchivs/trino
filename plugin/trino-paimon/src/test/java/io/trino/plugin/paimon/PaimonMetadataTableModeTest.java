@@ -610,7 +610,14 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testGetTableMetadata()
     {
-        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED,
+                new AtomicBoolean(),
+                DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())),
+                DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())),
+                List.of(),
+                List.of("id"),
+                "id"));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
@@ -618,6 +625,10 @@ public class PaimonMetadataTableModeTest
 
         assertThat(tableMetadata.getTable()).isEqualTo(new SchemaTableName("schema", "table"));
         assertThat(tableMetadata.getColumns()).extracting(ColumnMetadata::getName).containsExactly("id");
+        assertThat(tableMetadata.getProperties())
+                .containsEntry(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("id"))
+                .containsEntry("bucket", "7")
+                .containsEntry("bucket_key", "id");
         assertThat(catalog.initialized).isTrue();
     }
 

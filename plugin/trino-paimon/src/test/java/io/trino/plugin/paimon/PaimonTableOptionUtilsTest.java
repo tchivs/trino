@@ -119,6 +119,13 @@ public class PaimonTableOptionUtilsTest
                     assertThat(property.getSqlType()).isEqualTo(VARCHAR);
                     assertThat(property.getJavaType()).isEqualTo(String.class);
                 });
+        assertThat(tableOptions.getTableProperties())
+                .filteredOn(property -> property.getName().equals("blob_external_storage_path"))
+                .singleElement()
+                .satisfies(property -> {
+                    assertThat(property.getSqlType()).isEqualTo(VARCHAR);
+                    assertThat(property.getJavaType()).isEqualTo(String.class);
+                });
     }
 
     @Test
@@ -217,6 +224,41 @@ public class PaimonTableOptionUtilsTest
                 .distinct()
                 .count())
                 .isEqualTo(optionInfos.size());
+    }
+
+    @Test
+    public void testTablePropertiesReflectSchemaOptionsAndLayoutProperties()
+    {
+        Map<String, Object> properties = PaimonTableOptionUtils.tableProperties(
+                Map.of(
+                        CoreOptions.BUCKET.key(), "7",
+                        CoreOptions.BUCKET_KEY.key(), "id",
+                        CoreOptions.VECTOR_FILE_FORMAT.key(), "lance",
+                        CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(), "file:/tmp/blob-external"),
+                List.of("id"),
+                List.of("pt"));
+
+        assertThat(properties)
+                .containsEntry(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("id"))
+                .containsEntry(PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("pt"))
+                .containsEntry("bucket", "7")
+                .containsEntry("bucket_key", "id")
+                .containsEntry("vector_file_format", "lance")
+                .containsEntry("blob_external_storage_path", "file:/tmp/blob-external");
+    }
+
+    @Test
+    public void testTablePropertiesRejectNullInputs()
+    {
+        assertThatThrownBy(() -> PaimonTableOptionUtils.tableProperties(null, List.of(), List.of()))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("options is null");
+        assertThatThrownBy(() -> PaimonTableOptionUtils.tableProperties(Map.of(), null, List.of()))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("primaryKeys is null");
+        assertThatThrownBy(() -> PaimonTableOptionUtils.tableProperties(Map.of(), List.of(), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("partitionKeys is null");
     }
 
     @Test
