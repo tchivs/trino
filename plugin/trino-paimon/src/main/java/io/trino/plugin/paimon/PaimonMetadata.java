@@ -572,6 +572,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
         if (startVersion.isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "Read paimon table with start version is not supported");
         }
+        if (endVersion.isPresent() && !PaimonTableHandle.supportsHistoricalRead(
+                Identifier.create(tableName.getSchemaName(), tableName.getTableName()))) {
+            throw new TrinoException(NOT_SUPPORTED, PaimonTableHandle.UNSUPPORTED_HISTORICAL_READ_MESSAGE);
+        }
 
         Map<String, String> dynamicOptions = new HashMap<>();
         if (endVersion.isPresent()) {

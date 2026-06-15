@@ -232,6 +232,37 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testVersionedQueriesAreRejectedForSystemTables()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new CapturingDdlCatalog(), TESTING_TYPE_MANAGER);
+
+        assertTrinoError(
+                () -> metadata.getTableHandle(
+                        SESSION,
+                        new SchemaTableName(SYSTEM_DATABASE_NAME, "catalog_options"),
+                        Optional.empty(),
+                        Optional.of(new ConnectorTableVersion(PointerType.TARGET_ID, INTEGER, 1L))),
+                NOT_SUPPORTED.toErrorCode(),
+                PaimonTableHandle.UNSUPPORTED_HISTORICAL_READ_MESSAGE);
+        assertTrinoError(
+                () -> metadata.getTableHandle(
+                        SESSION,
+                        new SchemaTableName("schema", "table$tags"),
+                        Optional.empty(),
+                        Optional.of(new ConnectorTableVersion(PointerType.TARGET_ID, INTEGER, 1L))),
+                NOT_SUPPORTED.toErrorCode(),
+                PaimonTableHandle.UNSUPPORTED_HISTORICAL_READ_MESSAGE);
+        assertTrinoError(
+                () -> metadata.getTableHandle(
+                        SESSION,
+                        new SchemaTableName("schema", "table$branch_feature$tags"),
+                        Optional.empty(),
+                        Optional.of(new ConnectorTableVersion(PointerType.TARGET_ID, INTEGER, 1L))),
+                NOT_SUPPORTED.toErrorCode(),
+                PaimonTableHandle.UNSUPPORTED_HISTORICAL_READ_MESSAGE);
+    }
+
+    @Test
     public void testInsertLayoutRequiresFileStoreTable()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());

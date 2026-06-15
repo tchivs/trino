@@ -51,8 +51,10 @@ import java.util.stream.Collectors;
 
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static java.util.Objects.requireNonNull;
+import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
 import static org.apache.paimon.shade.guava30.com.google.common.base.Preconditions.checkArgument;
 
 public class PaimonTableHandle
@@ -62,6 +64,7 @@ public class PaimonTableHandle
         ConnectorOutputTableHandle,
         ConnectorTableFunctionHandle
 {
+    static final String UNSUPPORTED_HISTORICAL_READ_MESSAGE = "Paimon system tables do not support historical reads";
     private static final Set<String> EXPLICIT_STARTUP_OPTION_KEYS = Set.of(
             CoreOptions.SCAN_VERSION.key(),
             CoreOptions.SCAN_SNAPSHOT_ID.key(),
@@ -213,6 +216,7 @@ public class PaimonTableHandle
         requireNonNull(session, "session is null");
         Table paimonTable = rawTable(catalog);
         Map<String, String> dynamicOptions = readDynamicOptions(session);
+        validateHistoricalReadSupported(dynamicOptions);
         return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
     }
 
@@ -248,6 +252,12 @@ public class PaimonTableHandle
     {
         requireNonNull(dynamicOptions, "dynamicOptions is null");
         return EXPLICIT_STARTUP_OPTION_KEYS.stream().anyMatch(dynamicOptions::containsKey);
+    }
+
+    private static boolean hasHistoricalReadSelection(Map<String, String> dynamicOptions)
+    {
+        requireNonNull(dynamicOptions, "dynamicOptions is null");
+        return HISTORICAL_READ_OPTION_KEYS.stream().anyMatch(dynamicOptions::containsKey);
     }
 
     private Map<String, String> readDynamicOptions(ConnectorSession session)
@@ -299,8 +309,15 @@ public class PaimonTableHandle
     public Table table(Catalog catalog)
     {
         requireNonNull(catalog, "catalog is null");
+        validateHistoricalReadSupported(dynamicOptions);
         Table paimonTable = rawTable(catalog);
         return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
+    }
+
+    static boolean supportsHistoricalRead(Identifier identifier)
+    {
+        requireNonNull(identifier, "identifier is null");
+        return !SYSTEM_DATABASE_NAME.equals(identifier.getDatabaseName()) && !identifier.isSystemTable();
     }
 
     private Table rawTable(Catalog catalog)
@@ -320,6 +337,14 @@ public class PaimonTableHandle
         catch (Catalog.TableNotExistException e) {
             throw new TrinoException(TABLE_NOT_FOUND, "Paimon table '%s.%s' does not exist".formatted(schemaName,
                     tableName), e);
+        }
+    }
+
+    private void validateHistoricalReadSupported(Map<String, String> dynamicOptions)
+    {
+        requireNonNull(dynamicOptions, "dynamicOptions is null");
+        if (hasHistoricalReadSelection(dynamicOptions) && !supportsHistoricalRead(Identifier.create(schemaName, tableName))) {
+            throw new TrinoException(NOT_SUPPORTED, UNSUPPORTED_HISTORICAL_READ_MESSAGE);
         }
     }
 

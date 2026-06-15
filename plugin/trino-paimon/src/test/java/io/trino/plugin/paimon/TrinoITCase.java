@@ -633,6 +633,22 @@ public class TrinoITCase
     }
 
     @Test
+    public void testBranchQualifiedTableSupportsHistoricalRead()
+            throws Exception
+    {
+        sql("CREATE TABLE paimon.default.branch_values (id integer, name varchar) WITH (bucket = '-1')");
+        sql("INSERT INTO paimon.default.branch_values VALUES (1, 'main-only')");
+        createTag("default", "branch_values", "seed_tag");
+        createBranch("default", "branch_values", "feature_branch", "seed_tag");
+        sql("INSERT INTO paimon.default.\"branch_values$branch_feature_branch\" VALUES (2, 'branch-only')");
+
+        assertThat(sql("SELECT * FROM paimon.default.\"branch_values$branch_feature_branch\" FOR VERSION AS OF 'seed_tag' ORDER BY id"))
+                .isEqualTo("[[1, main-only]]");
+        assertThat(sql("SELECT * FROM paimon.default.\"branch_values$branch_feature_branch\" ORDER BY id"))
+                .isEqualTo("[[1, main-only], [2, branch-only]]");
+    }
+
+    @Test
     public void testBranchesSystemTableColumnsAndFilter()
             throws Exception
     {
@@ -654,6 +670,17 @@ public class TrinoITCase
                         + "[time_retained, varchar, , ]]");
         assertThat(sql("SELECT tag_name, snapshot_id FROM paimon.default.\"t2$tags\" WHERE tag_name = 'tag-2'"))
                 .isEqualTo("[[tag-2, 2]]");
+    }
+
+    @Test
+    public void testVersionedQueriesRejectSystemTables()
+    {
+        assertThatExceptionOfType(QueryFailedException.class)
+                .isThrownBy(() -> sql("SELECT * FROM paimon.default.\"t2$tags\" FOR VERSION AS OF 1"))
+                .withMessageContaining(PaimonTableHandle.UNSUPPORTED_HISTORICAL_READ_MESSAGE);
+        assertThatExceptionOfType(QueryFailedException.class)
+                .isThrownBy(() -> sql("SELECT * FROM paimon.sys.catalog_options FOR VERSION AS OF 1"))
+                .withMessageContaining(PaimonTableHandle.UNSUPPORTED_HISTORICAL_READ_MESSAGE);
     }
 
     @Test
