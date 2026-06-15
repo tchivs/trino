@@ -520,6 +520,24 @@ public class TrinoSplitTest
                 .hasMessage("limit must be non-negative");
     }
 
+    @Test
+    public void testSplitSourceCloseMarksFinishedAndClearsQueuedSplits()
+            throws Exception
+    {
+        PaimonSplit first = new PaimonSplit("serialized-1", 0.1);
+        PaimonSplit second = new PaimonSplit("serialized-2", 0.1);
+        PaimonSplitSource splitSource = new PaimonSplitSource(List.of(first, second), OptionalLong.empty());
+
+        splitSource.close();
+
+        ConnectorSplitSource.ConnectorSplitBatch batch = splitSource.getNextBatch(10).get();
+
+        assertThat(splitSource.isFinished()).isTrue();
+        assertThat(batch.getSplits()).isEmpty();
+        assertThat(batch.isNoMoreSplits()).isTrue();
+        assertThat(queuedSplitCount(splitSource)).isEqualTo(0);
+    }
+
     private record TestingSplit(long rowCount, Long mergedRowCountValue) implements Split
     {
         private TestingSplit(long rowCount)

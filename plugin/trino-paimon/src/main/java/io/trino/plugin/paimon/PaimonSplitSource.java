@@ -32,7 +32,9 @@ public class PaimonSplitSource
 {
     private final Queue<PaimonSplit> splits;
     private final OptionalLong limit;
+
     private long count;
+    private boolean closed;
 
     public PaimonSplitSource(List<PaimonSplit> splits, OptionalLong limit)
     {
@@ -44,6 +46,10 @@ public class PaimonSplitSource
 
     protected CompletableFuture<ConnectorSplitBatch> innerGetNextBatch(int maxSize)
     {
+        if (closed) {
+            return CompletableFuture.completedFuture(new ConnectorSplitBatch(List.of(), true));
+        }
+
         List<ConnectorSplit> batch = new ArrayList<>();
         for (int i = 0; i < maxSize; i++) {
             if (limitReached()) {
@@ -69,12 +75,17 @@ public class PaimonSplitSource
     @Override
     public void close()
     {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        splits.clear();
     }
 
     @Override
     public boolean isFinished()
     {
-        return splits.isEmpty() || limitReached();
+        return closed || splits.isEmpty() || limitReached();
     }
 
     private boolean limitReached()

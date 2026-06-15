@@ -14,10 +14,12 @@
 package io.trino.plugin.paimon.functions.tablechanges;
 
 import io.trino.plugin.paimon.PaimonColumnHandle;
+import io.trino.plugin.paimon.PaimonErrorCode;
 import io.trino.plugin.paimon.PaimonPageSourceProvider;
 import io.trino.plugin.paimon.PaimonSplit;
 import io.trino.plugin.paimon.PaimonTableHandle;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
@@ -25,10 +27,13 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.function.table.TableFunctionProcessorState;
 import io.trino.spi.function.table.TableFunctionSplitProcessor;
 
+import java.io.IOException;
 import java.util.List;
 
+import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static io.trino.spi.function.table.TableFunctionProcessorState.Blocked.blocked;
 import static io.trino.spi.function.table.TableFunctionProcessorState.Finished.FINISHED;
+import static io.trino.spi.function.table.TableFunctionProcessorState.Processed.produced;
 import static java.util.Objects.requireNonNull;
 
 public class TableChangesFunctionProcessor
@@ -64,16 +69,35 @@ public class TableChangesFunctionProcessor
     @Override
     public TableFunctionProcessorState process()
     {
-        if (pageSource.isFinished()) {
-            return FINISHED;
-        }
-        Page dataPage = pageSource.getNextPage();
-        if (dataPage == null) {
+        try {
             if (pageSource.isFinished()) {
+                closeIfNecessary();
                 return FINISHED;
             }
-            return blocked(pageSource.isBlocked().thenRun(() -> {}));
+            Page dataPage = pageSource.getNextPage();
+            if (dataPage == null) {
+                if (pageSource.isFinished()) {
+                    closeIfNecessary();
+                    return FINISHED;
+                }
+                return blocked(pageSource.isBlocked().thenRun(() -> {}));
+            }
+            return produced(dataPage);
         }
-        return TableFunctionProcessorState.Processed.produced(dataPage);
+        catch (RuntimeException e) {
+            closeAllSuppress(e, pageSource);
+            throw e;
+        }
+    }
+
+    private void closeIfNecessary()
+    {
+        try {
+            pageSource.close();
+        }
+        catch (IOException e) {
+            throw new TrinoException(PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT,
+                    "Failed to close Paimon table_changes page source", e);
+        }
     }
 }

@@ -24,6 +24,7 @@ import io.trino.plugin.paimon.functions.PaimonFunctionProvider;
 import io.trino.spi.HostAddress;
 import io.trino.spi.Page;
 import io.trino.spi.SplitWeight;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
@@ -45,7 +46,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -205,13 +208,84 @@ public class TableChangesFunctionProcessorTest
     @Test
     public void testProcessorReturnsFinishedWhenPageSourceFinishesAfterNullPage()
     {
+        FinishingAfterNullPageSource pageSource = new FinishingAfterNullPageSource();
         TableChangesFunctionProcessor processor = new TableChangesFunctionProcessor(
                 SESSION,
                 handleWithProjectedColumns(),
                 new PaimonSplit("split", 1.0),
-                pageSourceProvider(new FinishingAfterNullPageSource()));
+                pageSourceProvider(pageSource));
 
         assertThat(processor.process()).isEqualTo(TableFunctionProcessorState.Finished.FINISHED);
+        assertThat(pageSource.closed()).isTrue();
+    }
+
+    @Test
+    public void testProcessorClosesAlreadyFinishedPageSource()
+    {
+        CloseTrackingPageSource pageSource = new CloseTrackingPageSource(true);
+        TableChangesFunctionProcessor processor = new TableChangesFunctionProcessor(
+                SESSION,
+                handleWithProjectedColumns(),
+                new PaimonSplit("split", 1.0),
+                pageSourceProvider(pageSource));
+
+        assertThat(processor.process()).isEqualTo(TableFunctionProcessorState.Finished.FINISHED);
+        assertThat(pageSource.closed()).isTrue();
+    }
+
+    @Test
+    public void testProcessorMapsTerminalCloseFailureToConnectorReadError()
+    {
+        TableChangesFunctionProcessor processor = new TableChangesFunctionProcessor(
+                SESSION,
+                handleWithProjectedColumns(),
+                new PaimonSplit("split", 1.0),
+                pageSourceProvider(new CloseFailurePageSource(true, true)));
+
+        assertThatThrownBy(processor::process)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to close Paimon table_changes page source");
+                    assertThat(exception.getCause()).isInstanceOf(IOException.class)
+                            .hasMessage("close failure");
+                });
+    }
+
+    @Test
+    public void testProcessorClosesPageSourceWhenReadFails()
+    {
+        CloseFailurePageSource pageSource = new CloseFailurePageSource(false, true, false);
+        TableChangesFunctionProcessor processor = new TableChangesFunctionProcessor(
+                SESSION,
+                handleWithProjectedColumns(),
+                new PaimonSplit("split", 1.0),
+                pageSourceProvider(pageSource));
+
+        assertThatThrownBy(processor::process)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("read failure");
+        assertThat(pageSource.closed()).isTrue();
+    }
+
+    @Test
+    public void testProcessorSuppressesCloseFailureOntoReadFailure()
+    {
+        CloseFailurePageSource pageSource = new CloseFailurePageSource(false, true, true);
+        TableChangesFunctionProcessor processor = new TableChangesFunctionProcessor(
+                SESSION,
+                handleWithProjectedColumns(),
+                new PaimonSplit("split", 1.0),
+                pageSourceProvider(pageSource));
+
+        assertThatThrownBy(processor::process)
+                .isInstanceOfSatisfying(IllegalStateException.class, exception -> {
+                    assertThat(exception).hasMessage("read failure");
+                    assertThat(exception.getSuppressed())
+                            .singleElement()
+                            .isInstanceOfSatisfying(IOException.class, suppressed ->
+                                    assertThat(suppressed).hasMessage("close failure"));
+                });
+        assertThat(pageSource.closed()).isTrue();
     }
 
     private static PaimonPageSourceProvider pageSourceProvider()
@@ -356,6 +430,7 @@ public class TableChangesFunctionProcessorTest
             implements ConnectorPageSource
     {
         private boolean finished;
+        private boolean closed;
 
         @Override
         public long getCompletedBytes()
@@ -392,6 +467,134 @@ public class TableChangesFunctionProcessorTest
         public void close()
                 throws IOException
         {
+            closed = true;
+        }
+
+        private boolean closed()
+        {
+            return closed;
+        }
+    }
+
+    private static final class CloseTrackingPageSource
+            implements ConnectorPageSource
+    {
+        private final boolean finished;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private CloseTrackingPageSource(boolean finished)
+        {
+            this.finished = finished;
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return 0;
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return 0;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return finished;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            return null;
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public void close()
+        {
+            closed.set(true);
+        }
+
+        private boolean closed()
+        {
+            return closed.get();
+        }
+    }
+
+    private static final class CloseFailurePageSource
+            implements ConnectorPageSource
+    {
+        private final boolean finished;
+        private final boolean failOnRead;
+        private final boolean failOnClose;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private CloseFailurePageSource(boolean finished, boolean failOnClose)
+        {
+            this(finished, false, failOnClose);
+        }
+
+        private CloseFailurePageSource(boolean finished, boolean failOnRead, boolean failOnClose)
+        {
+            this.finished = finished;
+            this.failOnRead = failOnRead;
+            this.failOnClose = failOnClose;
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return 0;
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return 0;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return finished;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            if (failOnRead) {
+                throw new IllegalStateException("read failure");
+            }
+            return null;
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            closed.set(true);
+            if (failOnClose) {
+                throw new IOException("close failure");
+            }
+        }
+
+        private boolean closed()
+        {
+            return closed.get();
         }
     }
 }
