@@ -1379,6 +1379,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return Optional.empty();
         }
 
+        if (table.getFilter().isNone()) {
+            return Optional.of(new LimitApplicationResult<>(table.copy(OptionalLong.of(limit)), false, false));
+        }
+
         if (!table.getFilter().isAll()) {
             Catalog sessionCatalog = catalog.forSession(session);
             Table paimonTable = PaimonTableHandle.schemaAwareReadTable(

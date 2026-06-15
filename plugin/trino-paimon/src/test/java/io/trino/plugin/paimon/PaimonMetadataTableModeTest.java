@@ -1107,6 +1107,31 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testApplyLimitShortCircuitsTupleDomainNoneBeforeCatalogInitialization()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.none(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThat(metadata.applyLimit(SESSION, tableHandle, 10))
+                .isPresent()
+                .get()
+                .extracting(result -> (PaimonTableHandle) result.getHandle())
+                .satisfies(handle -> {
+                    assertThat(handle.getFilter()).isEqualTo(TupleDomain.none());
+                    assertThat(handle.getLimit()).hasValue(10);
+                });
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
     public void testApplyFilterValidatesInputsBeforeCatalogInitialization()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
