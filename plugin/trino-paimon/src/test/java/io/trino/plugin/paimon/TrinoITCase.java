@@ -645,6 +645,17 @@ public class TrinoITCase
     }
 
     @Test
+    public void testTagsSystemTableColumnsAndFilter()
+    {
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.\"t2$tags\""))
+                .isEqualTo("[[tag_name, varchar, , ], [snapshot_id, bigint, , ], [schema_id, bigint, , ], "
+                        + "[commit_time, timestamp(3), , ], [record_count, bigint, , ], [create_time, timestamp(3), , ], "
+                        + "[time_retained, varchar, , ]]");
+        assertThat(sql("SELECT tag_name, snapshot_id FROM paimon.default.\"t2$tags\" WHERE tag_name = 'tag-2'"))
+                .isEqualTo("[[tag-2, 2]]");
+    }
+
+    @Test
     public void testBranchQualifiedTableSchemaEvolutionUsesBranchSchema()
             throws Exception
     {
