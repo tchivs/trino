@@ -32,8 +32,8 @@ import java.util.List;
 import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Verify.verify;
 import static java.util.Objects.requireNonNull;
-import static org.apache.paimon.shade.guava30.com.google.common.base.Verify.verify;
 
 public class FixedBucketTableShuffleFunction
         implements

@@ -42,7 +42,9 @@ import org.apache.paimon.types.VarCharType;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -234,6 +236,33 @@ public class PaimonTypeTest
                 IntegerType.INTEGER,
                 VarcharType.createUnboundedVarcharType())));
         assertThat(anonymousRowType.asSQLString()).isEqualTo("ROW<`f0` INT, `f1` STRING>");
+    }
+
+    @Test
+    public void testNestedRowFieldIdsAreGloballyUnique()
+    {
+        Type rowType = RowType.from(List.of(
+                RowType.field("id", IntegerType.INTEGER),
+                RowType.field("payload", RowType.from(List.of(
+                        RowType.field("name", VarcharType.createUnboundedVarcharType()),
+                        RowType.field("attributes", RowType.from(List.of(
+                                RowType.field("score", DoubleType.DOUBLE),
+                                RowType.field("tags", new ArrayType(VarcharType.createUnboundedVarcharType()))))))))));
+
+        org.apache.paimon.types.RowType paimonRowType = (org.apache.paimon.types.RowType) PaimonTypeUtils.toPaimonType(rowType);
+
+        assertThat(paimonRowType.getFields()).extracting(DataField::id)
+                .containsExactly(0, 1);
+        org.apache.paimon.types.RowType payloadType = (org.apache.paimon.types.RowType) paimonRowType.getFields().get(1).type();
+        assertThat(payloadType.getFields()).extracting(DataField::id)
+                .containsExactly(2, 3);
+        org.apache.paimon.types.RowType attributesType = (org.apache.paimon.types.RowType) payloadType.getFields().get(1).type();
+        assertThat(attributesType.getFields()).extracting(DataField::id)
+                .containsExactly(4, 5);
+
+        Set<Integer> fieldIds = new HashSet<>();
+        paimonRowType.collectFieldIds(fieldIds);
+        assertThat(fieldIds).containsExactlyInAnyOrder(0, 1, 2, 3, 4, 5);
     }
 
     @Test

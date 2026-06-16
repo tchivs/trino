@@ -34,6 +34,8 @@ import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TinyintType;
+import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeSignature;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Timestamp;
@@ -74,10 +76,12 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.LongTimestampWithTimeZone.fromEpochMillisAndFraction;
+import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TimeType.TIME_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.apache.paimon.fileindex.FileIndexCommon.toMapKey;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -89,6 +93,7 @@ public class TrinoFilterConverterTest
     private static final ConnectorSession TESTING_SESSION = TestingConnectorSession.builder()
             .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
             .build();
+    private static final Type JSON_TYPE = TESTING_TYPE_MANAGER.getType(new TypeSignature(JSON));
 
     @Test
     public void testAll()
@@ -399,6 +404,28 @@ public class TrinoFilterConverterTest
                 Domain.singleValue(INTEGER, 2L)));
 
         assertThat(converter.convertForFileIndex(domain)).isEmpty();
+    }
+
+    @Test
+    public void testVariantNullPredicateIsConvertedButValuePredicateRemainsInTrino()
+    {
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "payload", DataTypes.VARIANT())));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PredicateBuilder builder = new PredicateBuilder(rowType);
+        PaimonColumnHandle payload = PaimonColumnHandle.of("payload", DataTypes.VARIANT(), TESTING_TYPE_MANAGER);
+
+        TupleDomain<PaimonColumnHandle> isNull = TupleDomain.withColumnDomains(ImmutableMap.of(
+                payload, Domain.onlyNull(JSON_TYPE)));
+        assertThat(converter.convert(isNull).orElseThrow()).isEqualTo(builder.isNull(0));
+
+        TupleDomain<PaimonColumnHandle> jsonValue = TupleDomain.withColumnDomains(ImmutableMap.of(
+                payload, Domain.singleValue(JSON_TYPE, Slices.utf8Slice("{\"a\":1}"))));
+        LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
+        LinkedHashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
+
+        assertThat(converter.convert(jsonValue, acceptedDomains, unsupportedDomains)).isEmpty();
+        assertThat(acceptedDomains).isEmpty();
+        assertThat(unsupportedDomains).containsEntry(payload, jsonValue.getDomains().orElseThrow().get(payload));
     }
 
     @Test

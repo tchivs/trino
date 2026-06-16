@@ -34,9 +34,9 @@ import org.apache.paimon.utils.JsonSerdeUtil;
 import java.util.List;
 import java.util.Objects;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.type.StandardTypes.JSON;
 import static java.util.Objects.requireNonNull;
-import static org.apache.paimon.shade.guava30.com.google.common.base.Preconditions.checkArgument;
 
 public final class PaimonColumnHandle
         implements

@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon.functions.tablechanges;
 
+import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
@@ -41,7 +42,6 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
 import org.apache.paimon.table.Table;
 
 import java.util.ArrayList;

@@ -50,13 +50,13 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
-import static org.apache.paimon.shade.guava30.com.google.common.base.Preconditions.checkArgument;
 
 public class PaimonTableHandle
         implements
