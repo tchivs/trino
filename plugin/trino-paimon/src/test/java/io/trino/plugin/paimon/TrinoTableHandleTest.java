@@ -45,6 +45,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -261,10 +262,19 @@ public class TrinoTableHandleTest
     public void testTableWithWriteDynamicOptionsDropsStartupSelections()
             throws Exception
     {
+        assertWriteDynamicOptionsDropsReadOptions(Map.of(CoreOptions.SCAN_VERSION.key(), "tag-1"));
+        assertWriteDynamicOptionsDropsReadOptions(Map.of(CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"));
+        assertWriteDynamicOptionsDropsReadOptions(Map.of(CoreOptions.SCAN_FILE_CREATION_TIME_MILLIS.key(), "1000"));
+        assertWriteDynamicOptionsDropsReadOptions(Map.of(CoreOptions.SCAN_CREATION_TIME_MILLIS.key(), "2000"));
+    }
+
+    @Test
+    public void testTableWithWriteDynamicOptionsDropsIncrementalAutoTagSelection()
+            throws Exception
+    {
         Map<String, String> handleOptions = Map.of(
                 "custom.option", "value",
-                CoreOptions.SCAN_VERSION.key(), "tag-1",
-                CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2");
+                CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04");
         PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
                 Optional.empty(), Optional.empty(), OptionalLong.empty());
 
@@ -276,13 +286,11 @@ public class TrinoTableHandleTest
         assertThat(copiedOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
     }
 
-    @Test
-    public void testTableWithWriteDynamicOptionsDropsIncrementalAutoTagSelection()
+    private static void assertWriteDynamicOptionsDropsReadOptions(Map<String, String> readOptions)
             throws Exception
     {
-        Map<String, String> handleOptions = Map.of(
-                "custom.option", "value",
-                CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04");
+        Map<String, String> handleOptions = new HashMap<>(readOptions);
+        handleOptions.put("custom.option", "value");
         PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
                 Optional.empty(), Optional.empty(), OptionalLong.empty());
 
@@ -914,68 +922,72 @@ public class TrinoTableHandleTest
 
     @Test
     public void testTableHandleRejectsConflictingStartupSelections()
-            throws Exception
     {
-        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Map.of(
                 CoreOptions.SCAN_SNAPSHOT_ID.key(), "1",
                 CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04"),
-                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
-        setCachedTable(handle, TESTING_CATALOG, capturingTable(new AtomicReference<>()));
-
-        assertThatThrownBy(() -> handle.tableWithDynamicOptions(TESTING_CATALOG, SESSION))
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("dynamicOptions may contain only one startup selection, got keys: [incremental-to-auto-tag, scan.snapshot-id]");
     }
 
     @Test
-    public void testTableHandleRejectsIncrementalScanModeWithoutIncrementalWindow()
-            throws Exception
+    public void testTableHandleRejectsPaimon15CreationTimeStartupSelectionConflicts()
     {
-        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(
-                CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "delta"),
-                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
-        setCachedTable(handle, TESTING_CATALOG, capturingTable(new AtomicReference<>()));
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Map.of(
+                CoreOptions.SCAN_CREATION_TIME_MILLIS.key(), "1000",
+                CoreOptions.SCAN_FILE_CREATION_TIME_MILLIS.key(), "2000"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("dynamicOptions may contain only one startup selection, got keys: [scan.creation-time-millis, scan.file-creation-time-millis]");
+    }
 
-        assertThatThrownBy(() -> handle.tableWithDynamicOptions(TESTING_CATALOG, SESSION))
+    @Test
+    public void testJsonRejectsConflictingStartupSelections()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = replaceJsonField(codec.toJson(handle), "dynamicOptions",
+                "{\"scan.snapshot-id\":\"1\",\"incremental-to-auto-tag\":\"2024-12-04\"}");
+
+        assertThatThrownBy(() -> codec.fromJson(json))
+                .hasRootCauseMessage("dynamicOptions may contain only one startup selection, got keys: [incremental-to-auto-tag, scan.snapshot-id]");
+    }
+
+    @Test
+    public void testTableHandleRejectsIncrementalScanModeWithoutIncrementalWindow()
+    {
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Map.of(
+                CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "delta"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("dynamicOptions key 'incremental-between-scan-mode' requires 'incremental-between' or 'incremental-between-timestamp'");
     }
 
     @Test
     public void testTableHandleRejectsIncrementalTagToSnapshotWithoutIncrementalBetween()
-            throws Exception
     {
-        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Map.of(
                 CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(), "true"),
-                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
-        setCachedTable(handle, TESTING_CATALOG, capturingTable(new AtomicReference<>()));
-
-        assertThatThrownBy(() -> handle.tableWithDynamicOptions(TESTING_CATALOG, SESSION))
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("dynamicOptions key 'incremental-between-tag-to-snapshot' requires 'incremental-between'");
     }
 
     @Test
     public void testTableHandleRejectsInvalidIncrementalAuxiliaryOptionValues()
-            throws Exception
     {
-        PaimonTableHandle invalidScanModeHandle = new PaimonTableHandle("test", "user", Map.of(
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Map.of(
                 CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2",
                 CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "invalid"),
-                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
-        setCachedTable(invalidScanModeHandle, TESTING_CATALOG, capturingTable(new AtomicReference<>()));
-
-        assertThatThrownBy(() -> invalidScanModeHandle.tableWithDynamicOptions(TESTING_CATALOG, SESSION))
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("dynamicOptions contains invalid value for key 'incremental-between-scan-mode'");
 
-        PaimonTableHandle invalidTagToSnapshotHandle = new PaimonTableHandle("test", "user", Map.of(
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Map.of(
                 CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2",
                 CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(), "not-a-boolean"),
-                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
-        setCachedTable(invalidTagToSnapshotHandle, TESTING_CATALOG, capturingTable(new AtomicReference<>()));
-
-        assertThatThrownBy(() -> invalidTagToSnapshotHandle.tableWithDynamicOptions(TESTING_CATALOG, SESSION))
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("dynamicOptions contains invalid value for key 'incremental-between-tag-to-snapshot'");
     }

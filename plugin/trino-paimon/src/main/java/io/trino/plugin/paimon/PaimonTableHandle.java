@@ -77,6 +77,8 @@ public class PaimonTableHandle
             CoreOptions.SCAN_TIMESTAMP.key(),
             CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
             CoreOptions.SCAN_WATERMARK.key(),
+            CoreOptions.SCAN_FILE_CREATION_TIME_MILLIS.key(),
+            CoreOptions.SCAN_CREATION_TIME_MILLIS.key(),
             CoreOptions.INCREMENTAL_BETWEEN.key(),
             CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
             CoreOptions.INCREMENTAL_TO_AUTO_TAG.key());
@@ -86,7 +88,9 @@ public class PaimonTableHandle
             CoreOptions.SCAN_TAG_NAME.key(),
             CoreOptions.SCAN_TIMESTAMP.key(),
             CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
-            CoreOptions.SCAN_WATERMARK.key());
+            CoreOptions.SCAN_WATERMARK.key(),
+            CoreOptions.SCAN_FILE_CREATION_TIME_MILLIS.key(),
+            CoreOptions.SCAN_CREATION_TIME_MILLIS.key());
 
     private final String schemaName;
     private final String tableName;
@@ -118,6 +122,7 @@ public class PaimonTableHandle
         this.tableName = requireNonNull(tableName, "tableName is null");
         checkArgument(!this.tableName.isBlank(), "tableName is blank");
         this.dynamicOptions = copyDynamicOptions(dynamicOptions);
+        validateDynamicOptionsSemantics(this.dynamicOptions);
         this.filter = requireNonNull(filter, "filter is null");
         this.projectedColumns = copyColumnHandles(projectedColumns, "projectedColumns");
         this.writeColumns = copyColumnHandles(writeColumns, "writeColumns");

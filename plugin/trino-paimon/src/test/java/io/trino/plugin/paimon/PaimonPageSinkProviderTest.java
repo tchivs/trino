@@ -215,7 +215,6 @@ public class PaimonPageSinkProviderTest
                 "table",
                 Map.of(
                         "custom.option", "value",
-                        CoreOptions.SCAN_VERSION.key(), "tag-1",
                         CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2",
                         CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "delta",
                         CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(), "true"))
