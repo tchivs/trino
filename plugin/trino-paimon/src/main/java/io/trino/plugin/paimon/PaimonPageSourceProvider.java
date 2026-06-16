@@ -717,7 +717,7 @@ public class PaimonPageSourceProvider
             hasOrcRawFiles = hasOrcRawFiles || "orc".equalsIgnoreCase(format);
         }
         for (PaimonColumnHandle paimonColumn : getColumnHandles(columns)) {
-            if (SpecialFields.isSystemField(paimonColumn.getColumnName())
+            if (isUnsupportedDirectReadColumn(paimonColumn)
                     || containsUnsupportedDirectReadType(paimonColumn.logicalType(), hasOrcRawFiles)) {
                 return false;
             }
@@ -729,6 +729,20 @@ public class PaimonPageSourceProvider
             }
         }
         return true;
+    }
+
+    private static boolean isUnsupportedDirectReadColumn(PaimonColumnHandle column)
+    {
+        requireNonNull(column, "column is null");
+        String columnName = column.getColumnName();
+        if (PaimonColumnHandle.isHiddenColumnName(columnName)) {
+            return true;
+        }
+        if (columnName.regionMatches(true, 0, SpecialFields.KEY_FIELD_PREFIX, 0, SpecialFields.KEY_FIELD_PREFIX.length())) {
+            return true;
+        }
+        return SpecialFields.SYSTEM_FIELD_NAMES.stream()
+                .anyMatch(systemField -> systemField.equalsIgnoreCase(columnName));
     }
 
     private static boolean containsUnsupportedDirectReadType(DataType type, boolean hasOrcRawFiles)

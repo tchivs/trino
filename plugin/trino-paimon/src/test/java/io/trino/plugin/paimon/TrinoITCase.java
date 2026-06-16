@@ -597,9 +597,43 @@ public class TrinoITCase
     }
 
     @Test
+    public void testRowTrackingHiddenColumnsOnOrcBaseTable()
+    {
+        assertRowTrackingHiddenColumnsOnFormattedBaseTable("row_tracking_values_orc", "ORC");
+    }
+
+    @Test
+    public void testRowTrackingHiddenColumnsOnParquetBaseTable()
+    {
+        assertRowTrackingHiddenColumnsOnFormattedBaseTable("row_tracking_values_parquet", "PARQUET");
+    }
+
+    @Test
     public void testFilter()
     {
         assertThat(sql("SELECT a, aCa FROM paimon.default.t2 WHERE a < 4")).isEqualTo("[[1, 1], [3, 2]]");
+    }
+
+    private void assertRowTrackingHiddenColumnsOnFormattedBaseTable(String tableName, String fileFormat)
+    {
+        sql("CREATE TABLE paimon.default." + tableName + " ("
+                + "id integer, "
+                + "name varchar) "
+                + "WITH (row_tracking_enabled = 'true', file_format = '" + fileFormat + "')");
+        sql("INSERT INTO paimon.default." + tableName + " VALUES (11, 'alpha'), (22, 'beta')");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default." + tableName))
+                .isEqualTo("[[id, integer, , ], [name, varchar, , ]]");
+        assertThat(sql("SELECT id, name, _row_id, _sequence_number "
+                + "FROM paimon.default." + tableName + " "
+                + "ORDER BY id"))
+                .isEqualTo("[[11, alpha, 0, 1], [22, beta, 1, 1]]");
+        assertThat(sql("SELECT id, _row_id "
+                + "FROM paimon.default." + tableName + " "
+                + "WHERE _row_id = BIGINT '0'"))
+                .isEqualTo("[[11, 0]]");
+        assertThat(sql("SELECT * FROM paimon.default." + tableName + " ORDER BY id"))
+                .isEqualTo("[[11, alpha], [22, beta]]");
     }
 
     @Test

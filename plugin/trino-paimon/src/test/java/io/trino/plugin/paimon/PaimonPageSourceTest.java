@@ -387,6 +387,22 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectRawFileFastPathRejectsHiddenAndSystemColumnsCaseInsensitively()
+    {
+        List<RawFile> rawFiles = List.of(rawFile("orc"));
+
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(rawFiles, List.of(
+                PaimonColumnHandle.of("_row_id", org.apache.paimon.table.SpecialFields.ROW_ID.type())))).isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(rawFiles, List.of(
+                PaimonColumnHandle.of("_sequence_number",
+                        org.apache.paimon.table.SpecialFields.SEQUENCE_NUMBER.type())))).isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(rawFiles, List.of(
+                PaimonColumnHandle.of("_ROW_ID", org.apache.paimon.table.SpecialFields.ROW_ID.type())))).isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(rawFiles, List.of(
+                PaimonColumnHandle.of("_key_id", DataTypes.BIGINT())))).isFalse();
+    }
+
+    @Test
     void testDirectRawFileSelectionRejectsMalformedInputs()
     {
         List<RawFile> rawFiles = List.of(rawFile("orc"));
