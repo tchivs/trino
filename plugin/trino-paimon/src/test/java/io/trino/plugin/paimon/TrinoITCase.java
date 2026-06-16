@@ -41,6 +41,9 @@ import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.BigIntType;
 import org.apache.paimon.types.CharType;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeChecks;
+import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.MapType;
@@ -90,6 +93,10 @@ public class TrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.t5");
             sql("DROP TABLE IF EXISTS paimon.default.t6");
             sql("DROP TABLE IF EXISTS paimon.default.json_values");
+            sql("DROP TABLE IF EXISTS paimon.default.json_nested_values");
+            sql("DROP TABLE IF EXISTS paimon.default.json_variant_evolution_values");
+            sql("DROP TABLE IF EXISTS paimon.default.direct_projection_schema_evolution");
+            sql("DROP TABLE IF EXISTS paimon.default.direct_projection_schema_evolution_orc");
             sql("DROP TABLE IF EXISTS paimon.default.csv_values");
             sql("DROP TABLE IF EXISTS paimon.default.vector_directive_values");
             sql("DROP TABLE IF EXISTS paimon.default.vector_directive_add_column");
@@ -1266,6 +1273,83 @@ public class TrinoITCase
     }
 
     @Test
+    public void testJsonVariantNestedTypesUsePaimonVariantSchema()
+            throws Exception
+    {
+        sql("CREATE TABLE paimon.default.json_nested_values ("
+                + "id integer, "
+                + "payload json, "
+                + "metadata map(varchar, json), "
+                + "details row(label varchar, data json), "
+                + "nested array(json)) "
+                + "WITH (file_format = 'PARQUET')");
+        sql("INSERT INTO paimon.default.json_nested_values VALUES "
+                + "("
+                + "1, "
+                + "JSON '{\"name\":\"alice\",\"active\":true}', "
+                + "MAP(ARRAY['home', 'work'], ARRAY[JSON '{\"city\":\"shenzhen\"}', JSON '{\"city\":\"hangzhou\"}']), "
+                + "CAST(ROW('primary', JSON '{\"level\":3}') AS ROW(label varchar, data json)), "
+                + "ARRAY[JSON '{\"kind\":\"home\"}', JSON '42'])");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.json_nested_values")).isEqualTo(
+                "[[id, integer, , ], [payload, json, , ], [metadata, map(varchar, json), , ], [details, row(label varchar, data json), , ], [nested, array(json), , ]]");
+        assertThat(sql("SELECT "
+                + "json_extract_scalar(payload, '$.name'), "
+                + "json_extract_scalar(metadata['home'], '$.city'), "
+                + "details.label, "
+                + "json_extract_scalar(details.data, '$.level'), "
+                + "json_format(nested[2]) "
+                + "FROM paimon.default.json_nested_values"))
+                .isEqualTo("[[alice, shenzhen, primary, 3, 42]]");
+
+        List<DataField> fields = loadTable("default", "json_nested_values").schema().fields();
+        assertThat(fieldType(fields, "payload").getTypeRoot()).isEqualTo(DataTypeRoot.VARIANT);
+
+        DataType metadataType = fieldType(fields, "metadata");
+        assertThat(metadataType.getTypeRoot()).isEqualTo(DataTypeRoot.MAP);
+        assertThat(DataTypeChecks.getNestedTypes(metadataType).get(1).getTypeRoot()).isEqualTo(DataTypeRoot.VARIANT);
+
+        DataType detailsType = fieldType(fields, "details");
+        assertThat(detailsType.getTypeRoot()).isEqualTo(DataTypeRoot.ROW);
+        assertThat(DataTypeChecks.getNestedTypes(detailsType).get(1).getTypeRoot()).isEqualTo(DataTypeRoot.VARIANT);
+
+        DataType nestedType = fieldType(fields, "nested");
+        assertThat(nestedType.getTypeRoot()).isEqualTo(DataTypeRoot.ARRAY);
+        assertThat(DataTypeChecks.getNestedTypes(nestedType).get(0).getTypeRoot()).isEqualTo(DataTypeRoot.VARIANT);
+    }
+
+    @Test
+    public void testJsonVariantSchemaEvolutionOnAddedColumn()
+            throws Exception
+    {
+        sql("CREATE TABLE paimon.default.json_variant_evolution_values ("
+                + "id integer, "
+                + "name varchar) "
+                + "WITH (file_format = 'PARQUET')");
+        sql("INSERT INTO paimon.default.json_variant_evolution_values VALUES "
+                + "(1, 'alpha'), "
+                + "(2, 'beta')");
+
+        sql("ALTER TABLE paimon.default.json_variant_evolution_values ADD COLUMN attrs json");
+        sql("INSERT INTO paimon.default.json_variant_evolution_values VALUES "
+                + "(3, 'gamma', JSON '{\"kind\":\"keep\",\"score\":3}'), "
+                + "(4, 'delta', JSON '{\"kind\":\"drop\",\"score\":4}')");
+
+        assertThat(sql("SHOW COLUMNS FROM paimon.default.json_variant_evolution_values")).isEqualTo(
+                "[[id, integer, , ], [name, varchar, , ], [attrs, json, , ]]");
+        assertThat(sql("SELECT id, name, json_format(attrs) "
+                + "FROM paimon.default.json_variant_evolution_values ORDER BY id"))
+                .isEqualTo("[[1, alpha, null], [2, beta, null], [3, gamma, {\"kind\":\"keep\",\"score\":3}], [4, delta, {\"kind\":\"drop\",\"score\":4}]]");
+        assertThat(sql("SELECT id, json_extract_scalar(attrs, '$.kind') "
+                + "FROM paimon.default.json_variant_evolution_values "
+                + "WHERE json_extract_scalar(attrs, '$.kind') = 'keep'"))
+                .isEqualTo("[[3, keep]]");
+
+        List<DataField> fields = loadTable("default", "json_variant_evolution_values").schema().fields();
+        assertThat(fieldType(fields, "attrs").getTypeRoot()).isEqualTo(DataTypeRoot.VARIANT);
+    }
+
+    @Test
     public void testCsvFileFormatReadWrite()
     {
         sql("CREATE TABLE paimon.default.csv_values ("
@@ -1304,26 +1388,74 @@ public class TrinoITCase
     }
 
     @Test
-    public void testSchemaEvolutionFilterOnAddedColumnSkipsOldFiles()
+    public void testSchemaEvolutionFilterOnAddedColumnSkipsOldFilesOnParquetBaseTable()
     {
-        sql("CREATE TABLE paimon.default.direct_filter_schema_evolution ("
+        assertSchemaEvolutionFilterOnAddedColumnSkipsOldFiles("direct_filter_schema_evolution", "PARQUET");
+    }
+
+    @Test
+    public void testSchemaEvolutionFilterOnAddedColumnSkipsOldFilesOnOrcBaseTable()
+    {
+        assertSchemaEvolutionFilterOnAddedColumnSkipsOldFiles("direct_filter_schema_evolution_orc", "ORC");
+    }
+
+    @Test
+    public void testSchemaEvolutionProjectedAddedColumnReadsOldFilesOnParquetBaseTable()
+    {
+        assertSchemaEvolutionProjectedAddedColumnReadsOldFiles("direct_projection_schema_evolution", "PARQUET");
+    }
+
+    @Test
+    public void testSchemaEvolutionProjectedAddedColumnReadsOldFilesOnOrcBaseTable()
+    {
+        assertSchemaEvolutionProjectedAddedColumnReadsOldFiles("direct_projection_schema_evolution_orc", "ORC");
+    }
+
+    private void assertSchemaEvolutionFilterOnAddedColumnSkipsOldFiles(String tableName, String fileFormat)
+    {
+        sql("CREATE TABLE paimon.default." + tableName + " ("
                 + "id integer, "
                 + "payload varchar) "
-                + "WITH (file_format = 'PARQUET')");
-        sql("INSERT INTO paimon.default.direct_filter_schema_evolution VALUES "
+                + "WITH (file_format = '" + fileFormat + "')");
+        sql("INSERT INTO paimon.default." + tableName + " VALUES "
                 + "(1, 'alpha'), "
                 + "(2, 'beta')");
-        sql("ALTER TABLE paimon.default.direct_filter_schema_evolution ADD COLUMN category varchar");
-        sql("INSERT INTO paimon.default.direct_filter_schema_evolution VALUES "
+        sql("ALTER TABLE paimon.default." + tableName + " ADD COLUMN category varchar");
+        sql("INSERT INTO paimon.default." + tableName + " VALUES "
                 + "(3, 'gamma', 'keep'), "
                 + "(4, 'delta', 'drop')");
 
-        assertThat(sql("SELECT id, payload FROM paimon.default.direct_filter_schema_evolution "
+        assertThat(sql("SELECT id, payload FROM paimon.default." + tableName + " "
                 + "WHERE category = 'keep' ORDER BY id"))
                 .isEqualTo("[[3, gamma]]");
-        assertThat(sql("SELECT id FROM paimon.default.direct_filter_schema_evolution "
+        assertThat(sql("SELECT id FROM paimon.default." + tableName + " "
                 + "WHERE category = 'missing'"))
                 .isEqualTo("[]");
+    }
+
+    private void assertSchemaEvolutionProjectedAddedColumnReadsOldFiles(String tableName, String fileFormat)
+    {
+        sql("CREATE TABLE paimon.default." + tableName + " ("
+                + "id integer, "
+                + "payload varchar) "
+                + "WITH (file_format = '" + fileFormat + "')");
+        sql("INSERT INTO paimon.default." + tableName + " VALUES "
+                + "(1, 'alpha'), "
+                + "(2, 'beta')");
+
+        sql("ALTER TABLE paimon.default." + tableName + " ADD COLUMN category varchar");
+        sql("INSERT INTO paimon.default." + tableName + " VALUES "
+                + "(3, 'gamma', 'keep'), "
+                + "(4, 'delta', 'drop')");
+
+        assertThat(sql("SELECT id, category FROM paimon.default." + tableName + " ORDER BY id"))
+                .isEqualTo("[[1, null], [2, null], [3, keep], [4, drop]]");
+        assertThat(sql("SELECT id, category FROM paimon.default." + tableName + " "
+                + "WHERE id <= 2 ORDER BY id"))
+                .isEqualTo("[[1, null], [2, null]]");
+        assertThat(sql("SELECT id FROM paimon.default." + tableName + " "
+                + "WHERE category IS NULL ORDER BY id"))
+                .isEqualTo("[[1], [2]]");
     }
 
     @Test
@@ -1811,6 +1943,15 @@ public class TrinoITCase
             throws Exception
     {
         return FileStoreTableFactory.create(LocalFileIO.create(), new Path(warehouse, schemaName + ".db/" + tableName));
+    }
+
+    private static DataType fieldType(List<DataField> fields, String fieldName)
+    {
+        return fields.stream()
+                .filter(field -> field.name().equals(fieldName))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Field not found: " + fieldName))
+                .type();
     }
 
     protected static String timestampLiteral(long epochMilliSeconds, int precision)
