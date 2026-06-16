@@ -44,7 +44,6 @@ import org.apache.paimon.predicate.LeafPredicate;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
 import org.apache.paimon.predicate.PredicateVisitor;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.Table;
@@ -104,49 +103,49 @@ public class TrinoFilterConverterTest
 
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", new IntType());
         TupleDomain<PaimonColumnHandle> isNull = TupleDomain
-                .withColumnDomains(ImmutableMap.of(idColumn, Domain.onlyNull(INTEGER)));
+                .withColumnDomains(Map.of(idColumn, Domain.onlyNull(INTEGER)));
         Predicate expectedIsNull = builder.isNull(0);
         Predicate actualIsNull = converter.convert(isNull).get();
         assertThat(actualIsNull).isEqualTo(expectedIsNull);
 
         TupleDomain<PaimonColumnHandle> isNotNull = TupleDomain
-                .withColumnDomains(ImmutableMap.of(idColumn, Domain.notNull(INTEGER)));
+                .withColumnDomains(Map.of(idColumn, Domain.notNull(INTEGER)));
         Predicate expectedIsNotNull = builder.isNotNull(0);
         Predicate actualIsNotNull = converter.convert(isNotNull).get();
         assertThat(actualIsNotNull).isEqualTo(expectedIsNotNull);
 
         TupleDomain<PaimonColumnHandle> lt = TupleDomain.withColumnDomains(
-                ImmutableMap.of(idColumn, Domain.create(ValueSet.ofRanges(Range.lessThan(INTEGER, 1L)), false)));
+                Map.of(idColumn, Domain.create(ValueSet.ofRanges(Range.lessThan(INTEGER, 1L)), false)));
         Predicate expectedLt = builder.lessThan(0, 1);
         Predicate actualLt = converter.convert(lt).get();
         assertThat(actualLt).isEqualTo(expectedLt);
 
         TupleDomain<PaimonColumnHandle> ltEq = TupleDomain.withColumnDomains(
-                ImmutableMap.of(idColumn, Domain.create(ValueSet.ofRanges(Range.lessThanOrEqual(INTEGER, 1L)), false)));
+                Map.of(idColumn, Domain.create(ValueSet.ofRanges(Range.lessThanOrEqual(INTEGER, 1L)), false)));
         Predicate expectedLtEq = builder.lessOrEqual(0, 1);
         Predicate actualLtEq = converter.convert(ltEq).get();
         assertThat(actualLtEq).isEqualTo(expectedLtEq);
 
         TupleDomain<PaimonColumnHandle> gt = TupleDomain.withColumnDomains(
-                ImmutableMap.of(idColumn, Domain.create(ValueSet.ofRanges(Range.greaterThan(INTEGER, 1L)), false)));
+                Map.of(idColumn, Domain.create(ValueSet.ofRanges(Range.greaterThan(INTEGER, 1L)), false)));
         Predicate expectedGt = builder.greaterThan(0, 1);
         Predicate actualGt = converter.convert(gt).get();
         assertThat(actualGt).isEqualTo(expectedGt);
 
-        TupleDomain<PaimonColumnHandle> gtEq = TupleDomain.withColumnDomains(ImmutableMap.of(idColumn,
+        TupleDomain<PaimonColumnHandle> gtEq = TupleDomain.withColumnDomains(Map.of(idColumn,
                 Domain.create(ValueSet.ofRanges(Range.greaterThanOrEqual(INTEGER, 1L)), false)));
         Predicate expectedGtEq = builder.greaterOrEqual(0, 1);
         Predicate actualGtEq = converter.convert(gtEq).get();
         assertThat(actualGtEq).isEqualTo(expectedGtEq);
 
         TupleDomain<PaimonColumnHandle> eq = TupleDomain
-                .withColumnDomains(ImmutableMap.of(idColumn, Domain.singleValue(INTEGER, 1L)));
+                .withColumnDomains(Map.of(idColumn, Domain.singleValue(INTEGER, 1L)));
         Predicate expectedEq = builder.equal(0, 1);
         Predicate actualEq = converter.convert(eq).get();
         assertThat(actualEq).isEqualTo(expectedEq);
 
         TupleDomain<PaimonColumnHandle> in = TupleDomain.withColumnDomains(
-                ImmutableMap.of(idColumn, Domain.multipleValues(INTEGER, Arrays.asList(1L, 2L, 3L))));
+                Map.of(idColumn, Domain.multipleValues(INTEGER, Arrays.asList(1L, 2L, 3L))));
         Predicate expectedIn = builder.in(0, Arrays.asList(1, 2, 3));
         Predicate actualIn = converter.convert(in).get();
         assertThat(actualIn).isEqualTo(expectedIn);
@@ -160,7 +159,7 @@ public class TrinoFilterConverterTest
         PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
         PredicateBuilder builder = new PredicateBuilder(rowType);
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("date", new org.apache.paimon.types.CharType(10));
-        TupleDomain<PaimonColumnHandle> eq = TupleDomain.withColumnDomains(ImmutableMap.of(idColumn,
+        TupleDomain<PaimonColumnHandle> eq = TupleDomain.withColumnDomains(Map.of(idColumn,
                 Domain.singleValue(CharType.createCharType(10), Slices.utf8Slice("2020-11-11"))));
         Predicate expectedEqq = builder.equal(0, BinaryString.fromString("2020-11-11"));
         Predicate actualEqq = converter.convert(eq).get();
@@ -176,7 +175,7 @@ public class TrinoFilterConverterTest
         PredicateBuilder builder = new PredicateBuilder(rowType);
         PaimonColumnHandle tsColumn = PaimonColumnHandle.of("ts", new org.apache.paimon.types.TimestampType(3));
         TupleDomain<PaimonColumnHandle> eq = TupleDomain.withColumnDomains(
-                ImmutableMap.of(tsColumn, Domain.singleValue(TimestampType.createTimestampType(3), 1695645403000L)));
+                Map.of(tsColumn, Domain.singleValue(TimestampType.createTimestampType(3), 1695645403000L)));
         Predicate expectedEqq = builder.equal(0, Timestamp.fromEpochMillis(1695645403000L / 1000));
         Predicate actualEqq = converter.convert(eq).get();
         assertThat(actualEqq).isEqualTo(expectedEqq);
@@ -191,7 +190,7 @@ public class TrinoFilterConverterTest
         PredicateBuilder builder = new PredicateBuilder(rowType);
         PaimonColumnHandle tsColumn = PaimonColumnHandle.of("ts", new org.apache.paimon.types.TimestampType(9));
         TupleDomain<PaimonColumnHandle> eq = TupleDomain.withColumnDomains(
-                ImmutableMap.of(tsColumn, Domain.singleValue(TimestampType.createTimestampType(9),
+                Map.of(tsColumn, Domain.singleValue(TimestampType.createTimestampType(9),
                         new LongTimestamp(1_695_645_403_123_456L, 789_000))));
         Predicate expectedEqq = builder.equal(0, Timestamp.fromEpochMillis(1_695_645_403_123L, 456_789));
         Predicate actualEqq = converter.convert(eq).get();
@@ -207,7 +206,7 @@ public class TrinoFilterConverterTest
         PredicateBuilder builder = new PredicateBuilder(rowType);
         PaimonColumnHandle tsColumn = PaimonColumnHandle.of("ts", new org.apache.paimon.types.LocalZonedTimestampType(3));
         TupleDomain<PaimonColumnHandle> eq = TupleDomain
-                .withColumnDomains(ImmutableMap.of(tsColumn, Domain.singleValue(createTimestampWithTimeZoneType(6),
+                .withColumnDomains(Map.of(tsColumn, Domain.singleValue(createTimestampWithTimeZoneType(6),
                         fromEpochMillisAndFraction(1695645403000L, 0, TimeZoneKey.UTC_KEY))));
         Predicate expectedEqq = builder.equal(0, Timestamp.fromEpochMillis(
                 (fromEpochMillisAndFraction(1695645403000L, 0, TimeZoneKey.UTC_KEY)).getEpochMillis()));
@@ -215,7 +214,7 @@ public class TrinoFilterConverterTest
         assertThat(actualEqq).isEqualTo(expectedEqq);
 
         eq = TupleDomain.withColumnDomains(
-                ImmutableMap.of(tsColumn, Domain.singleValue(createTimestampWithTimeZoneType(3),
+                Map.of(tsColumn, Domain.singleValue(createTimestampWithTimeZoneType(3),
                         packDateTimeWithZone(1695645403000L, TimeZoneKey.UTC_KEY))));
         expectedEqq = builder.equal(0, Timestamp.fromEpochMillis(1695645403000L));
         actualEqq = converter.convert(eq).get();
@@ -231,7 +230,7 @@ public class TrinoFilterConverterTest
         PredicateBuilder builder = new PredicateBuilder(rowType);
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("t", new org.apache.paimon.types.TimeType(6));
         TupleDomain<PaimonColumnHandle> eq = TupleDomain
-                .withColumnDomains(ImmutableMap.of(idColumn,
+                .withColumnDomains(Map.of(idColumn,
                         Domain.singleValue(TIME_MICROS, 12_345L * PICOSECONDS_PER_MILLISECOND)));
         Predicate expectedEqq = builder.equal(0, 12_345);
         Predicate actualEqq = converter.convert(eq).get();
@@ -247,7 +246,7 @@ public class TrinoFilterConverterTest
         PredicateBuilder builder = new PredicateBuilder(rowType);
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("tiny", new org.apache.paimon.types.TinyIntType());
         TupleDomain<PaimonColumnHandle> eq = TupleDomain
-                .withColumnDomains(ImmutableMap.of(idColumn, Domain.singleValue(TinyintType.TINYINT, 127L)));
+                .withColumnDomains(Map.of(idColumn, Domain.singleValue(TinyintType.TINYINT, 127L)));
         Predicate expectedEqq = builder.equal(0, Byte.MAX_VALUE);
         Predicate actualEqq = converter.convert(eq).get();
         assertThat(actualEqq).isEqualTo(expectedEqq);
@@ -262,7 +261,7 @@ public class TrinoFilterConverterTest
         PredicateBuilder builder = new PredicateBuilder(rowType);
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("small", new org.apache.paimon.types.SmallIntType());
         TupleDomain<PaimonColumnHandle> eq = TupleDomain
-                .withColumnDomains(ImmutableMap.of(idColumn, Domain.singleValue(SmallintType.SMALLINT, 32767L)));
+                .withColumnDomains(Map.of(idColumn, Domain.singleValue(SmallintType.SMALLINT, 32767L)));
         Predicate expectedEqq = builder.equal(0, Short.MAX_VALUE);
         Predicate actualEqq = converter.convert(eq).get();
         assertThat(actualEqq).isEqualTo(expectedEqq);
@@ -322,7 +321,7 @@ public class TrinoFilterConverterTest
                 mapType)));
         PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
         PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"), mapType);
-        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(ImmutableMap.of(mapElement,
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(Map.of(mapElement,
                 Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south"))));
 
         LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
@@ -349,7 +348,7 @@ public class TrinoFilterConverterTest
                 new DataField(1, "id", new VarCharType(VarCharType.MAX_LENGTH))));
         PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", new IntType());
-        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(ImmutableMap.of(idColumn,
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(Map.of(idColumn,
                 Domain.singleValue(INTEGER, 1L)));
 
         assertThatThrownBy(() -> converter.convert(domain))
@@ -365,7 +364,7 @@ public class TrinoFilterConverterTest
         RowType rowType = new RowType(Collections.singletonList(new DataField(0, "properties", mapType)));
         PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
         PaimonColumnHandle mapColumn = PaimonColumnHandle.of("properties", mapType);
-        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(ImmutableMap.of(mapColumn,
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(Map.of(mapColumn,
                 Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south"))));
 
         LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
@@ -386,7 +385,7 @@ public class TrinoFilterConverterTest
         RowType rowType = new RowType(Collections.singletonList(new DataField(0, "properties", mapType)));
         PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
         PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"), mapType);
-        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(ImmutableMap.of(mapElement,
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(Map.of(mapElement,
                 Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, Slices.utf8Slice("ap-south"))), false)));
 
         assertThat(converter.convertForFileIndex(domain)).isEmpty();
@@ -400,7 +399,7 @@ public class TrinoFilterConverterTest
         RowType rowType = new RowType(Collections.singletonList(new DataField(0, "tags", multisetType)));
         PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
         PaimonColumnHandle multisetElement = PaimonColumnHandle.of(toMapKey("tags", "red"), multisetType);
-        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(ImmutableMap.of(multisetElement,
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(Map.of(multisetElement,
                 Domain.singleValue(INTEGER, 2L)));
 
         assertThat(converter.convertForFileIndex(domain)).isEmpty();
@@ -414,11 +413,11 @@ public class TrinoFilterConverterTest
         PredicateBuilder builder = new PredicateBuilder(rowType);
         PaimonColumnHandle payload = PaimonColumnHandle.of("payload", DataTypes.VARIANT(), TESTING_TYPE_MANAGER);
 
-        TupleDomain<PaimonColumnHandle> isNull = TupleDomain.withColumnDomains(ImmutableMap.of(
+        TupleDomain<PaimonColumnHandle> isNull = TupleDomain.withColumnDomains(Map.of(
                 payload, Domain.onlyNull(JSON_TYPE)));
         assertThat(converter.convert(isNull).orElseThrow()).isEqualTo(builder.isNull(0));
 
-        TupleDomain<PaimonColumnHandle> jsonValue = TupleDomain.withColumnDomains(ImmutableMap.of(
+        TupleDomain<PaimonColumnHandle> jsonValue = TupleDomain.withColumnDomains(Map.of(
                 payload, Domain.singleValue(JSON_TYPE, Slices.utf8Slice("{\"a\":1}"))));
         LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
         LinkedHashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();

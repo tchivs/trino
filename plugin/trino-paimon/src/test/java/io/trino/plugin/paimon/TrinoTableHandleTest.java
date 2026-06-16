@@ -33,7 +33,6 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FullTextSearchTable;
 import org.apache.paimon.table.InnerTable;
@@ -77,7 +76,7 @@ public class TrinoTableHandleTest
     {
         ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
         objectMapperProvider
-                .setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
+                .setJsonDeserializers(Map.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
         return new JsonCodecFactory(objectMapperProvider).jsonCodec(PaimonTableHandle.class);
     }
 

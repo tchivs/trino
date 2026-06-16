@@ -13,13 +13,13 @@
  */
 package io.trino.plugin.paimon;
 
+import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.containers.Minio;
 import io.trino.testing.minio.MinioClient;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
@@ -73,7 +73,7 @@ public class TestPaimonMinioSmokeTest
                         .put("s3.region", MINIO_REGION)
                         .put("s3.endpoint", minio.getMinioAddress())
                         .put("s3.path-style-access", "true")
-                        .build());
+                        .buildOrThrow());
 
         return queryRunner;
     }

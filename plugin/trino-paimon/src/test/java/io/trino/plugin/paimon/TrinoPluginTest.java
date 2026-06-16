@@ -17,14 +17,14 @@ import io.trino.spi.Plugin;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.Map;
 import java.util.UUID;
 
-import static org.apache.paimon.shade.guava30.com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TrinoPluginTest
@@ -36,7 +36,7 @@ public class TrinoPluginTest
         String warehouse = Files.createTempDirectory(UUID.randomUUID().toString()).toUri().toString();
         Plugin plugin = new PaimonPlugin();
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
-        Connector connector = factory.create("paimon", ImmutableMap.of("warehouse", warehouse),
+        Connector connector = factory.create("paimon", Map.of("warehouse", warehouse),
                 new TestingConnectorContext());
         assertThat(connector).isNotNull();
     }

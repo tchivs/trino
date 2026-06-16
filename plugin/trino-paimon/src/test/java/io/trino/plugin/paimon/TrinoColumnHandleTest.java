@@ -20,11 +20,11 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
 import io.trino.type.TypeDeserializer;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -44,7 +44,7 @@ public class TrinoColumnHandleTest
     {
         ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
         objectMapperProvider
-                .setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
+                .setJsonDeserializers(Map.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
         return new JsonCodecFactory(objectMapperProvider)
                 .jsonCodec(PaimonColumnHandle.class);
     }

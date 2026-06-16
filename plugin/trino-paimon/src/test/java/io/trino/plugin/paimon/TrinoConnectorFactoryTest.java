@@ -17,7 +17,6 @@ import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -36,7 +35,7 @@ public class TrinoConnectorFactoryTest
     @Test
     public void testCreateConnector()
     {
-        Map<String, String> config = ImmutableMap.of("warehouse", tempFile.toString());
+        Map<String, String> config = Map.of("warehouse", tempFile.toString());
         ConnectorFactory factory = new PaimonConnectorFactory();
         Connector connector = factory.create("paimon", config, new TestingConnectorContext());
         assertThat(connector).isNotNull();

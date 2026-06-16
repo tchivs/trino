@@ -13,11 +13,11 @@
  */
 package io.trino.plugin.paimon;
 
+import com.google.common.collect.ImmutableMap;
 import io.airlift.log.Logger;
 import io.trino.Session;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.DistributedQueryRunner;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 
 import java.nio.file.Path;
 import java.util.Map;
@@ -38,7 +38,7 @@ public class TrinoQueryRunner
     public static DistributedQueryRunner createPrestoQueryRunner(Map<String, String> extraProperties)
             throws Exception
     {
-        return createPrestoQueryRunner(extraProperties, ImmutableMap.of(), false);
+        return createPrestoQueryRunner(extraProperties, Map.of(), false);
     }
 
     public static DistributedQueryRunner createPrestoQueryRunner(Map<String, String> extraProperties,
@@ -59,7 +59,7 @@ public class TrinoQueryRunner
         queryRunner.installPlugin(new PaimonPlugin());
 
         Map<String, String> options = ImmutableMap.<String, String>builder()
-                .put("warehouse", catalogDir.toFile().toURI().toString()).putAll(extraConnectorProperties).build();
+                .put("warehouse", catalogDir.toFile().toURI().toString()).putAll(extraConnectorProperties).buildOrThrow();
 
         queryRunner.createCatalog(PAIMON_CATALOG, PAIMON_CATALOG, options);
 

@@ -16,8 +16,9 @@ package io.trino.plugin.paimon;
 
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
-import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -36,7 +37,7 @@ public class TestTrinoMetadata
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return TrinoQueryRunner.createPrestoQueryRunner(ImmutableMap.of(), ImmutableMap.of(), false);
+        return TrinoQueryRunner.createPrestoQueryRunner(Map.of(), Map.of(), false);
     }
 
     @Test
