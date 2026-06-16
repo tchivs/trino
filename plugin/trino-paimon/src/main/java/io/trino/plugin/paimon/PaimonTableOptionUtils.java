@@ -14,6 +14,7 @@
 package io.trino.plugin.paimon;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.annotation.Documentation.ExcludeFromDocumentation;
 import org.apache.paimon.options.ConfigOption;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
@@ -184,7 +185,7 @@ public class PaimonTableOptionUtils
         List<OptionInfo> optionInfos = new ArrayList<>();
         List<OptionWithMetaInfo> optionWithMetaInfos = extractConfigOptions(CoreOptions.class);
         for (OptionWithMetaInfo optionWithMetaInfo : optionWithMetaInfos) {
-            if (shouldSkip(optionWithMetaInfo.option, optionWithMetaInfo.field.getName())) {
+            if (shouldSkip(optionWithMetaInfo.option, optionWithMetaInfo.field)) {
                 continue;
             }
 
@@ -252,10 +253,14 @@ public class PaimonTableOptionUtils
         return className;
     }
 
-    private static boolean shouldSkip(ConfigOption<?> option, String fieldName)
+    private static boolean shouldSkip(ConfigOption<?> option, Field field)
     {
         requireNonNull(option, "option is null");
-        switch (fieldName) {
+        requireNonNull(field, "field is null");
+        if (field.getAnnotation(ExcludeFromDocumentation.class) != null) {
+            return true;
+        }
+        switch (field.getName()) {
             case "PRIMARY_KEY" :
             case "PARTITION" :
             case "PATH" :

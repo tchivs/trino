@@ -189,6 +189,14 @@ public class PaimonTableOptionUtilsTest
                 .noneMatch(property -> property.getName().equals("scan_version"));
         assertThat(tableOptions.getTableProperties())
                 .noneMatch(property -> property.getName().equals("incremental_between"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("stream_scan_mode"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("batch_scan_mode"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().startsWith("materialized_table_"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("branch"));
     }
 
     @Test
@@ -305,17 +313,18 @@ public class PaimonTableOptionUtilsTest
     public void testTablePropertiesReflectSchemaOptionsAndLayoutProperties()
     {
         Map<String, Object> properties = PaimonTableOptionUtils.tableProperties(
-                Map.of(
-                        CoreOptions.BUCKET.key(), "7",
-                        CoreOptions.BUCKET_KEY.key(), "id",
-                        CoreOptions.VECTOR_FILE_FORMAT.key(), "lance",
-                        CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(), "file:/tmp/blob-external",
-                        CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key(), "false",
-                        CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key(), "true",
-                        CoreOptions.SCAN_PRIMARY_BRANCH.key(), "main_branch",
-                        CoreOptions.SCAN_SNAPSHOT_ID.key(), "7",
-                        CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2",
-                        CoreOptions.SCAN_FALLBACK_BRANCH.key(), "branch_a"),
+                Map.ofEntries(
+                        entry(CoreOptions.BUCKET.key(), "7"),
+                        entry(CoreOptions.BUCKET_KEY.key(), "id"),
+                        entry(CoreOptions.VECTOR_FILE_FORMAT.key(), "lance"),
+                        entry(CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(), "file:/tmp/blob-external"),
+                        entry(CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key(), "false"),
+                        entry(CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key(), "true"),
+                        entry(CoreOptions.SCAN_PRIMARY_BRANCH.key(), "main_branch"),
+                        entry(CoreOptions.SCAN_SNAPSHOT_ID.key(), "7"),
+                        entry(CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"),
+                        entry(CoreOptions.MATERIALIZED_TABLE_REFRESH_HANDLER_BYTES.key(), "serialized"),
+                        entry(CoreOptions.SCAN_FALLBACK_BRANCH.key(), "branch_a")),
                 List.of("id"),
                 List.of("pt"));
 
@@ -330,7 +339,13 @@ public class PaimonTableOptionUtilsTest
                 .containsEntry("scan_fallback_branch", "branch_a")
                 .containsEntry("scan_fallback_branch_read_fail_fast", "true")
                 .containsEntry("scan_primary_branch", "main_branch")
-                .doesNotContainKeys("scan_snapshot_id", "incremental_between");
+                .doesNotContainKeys(
+                        "scan_snapshot_id",
+                        "incremental_between",
+                        "branch",
+                        "stream_scan_mode",
+                        "batch_scan_mode",
+                        "materialized_table_refresh_handler_bytes");
     }
 
     @Test
