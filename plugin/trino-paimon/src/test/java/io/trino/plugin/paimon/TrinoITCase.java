@@ -97,6 +97,8 @@ public class TrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.json_variant_evolution_values");
             sql("DROP TABLE IF EXISTS paimon.default.direct_projection_schema_evolution");
             sql("DROP TABLE IF EXISTS paimon.default.direct_projection_schema_evolution_orc");
+            sql("DROP TABLE IF EXISTS paimon.default.direct_type_evolution");
+            sql("DROP TABLE IF EXISTS paimon.default.direct_type_evolution_orc");
             sql("DROP TABLE IF EXISTS paimon.default.csv_values");
             sql("DROP TABLE IF EXISTS paimon.default.vector_directive_values");
             sql("DROP TABLE IF EXISTS paimon.default.vector_directive_add_column");
@@ -1411,6 +1413,18 @@ public class TrinoITCase
         assertSchemaEvolutionProjectedAddedColumnReadsOldFiles("direct_projection_schema_evolution_orc", "ORC");
     }
 
+    @Test
+    public void testSchemaEvolutionTypeChangeUsesPaimonReaderOnParquetBaseTable()
+    {
+        assertSchemaEvolutionTypeChangeUsesPaimonReader("direct_type_evolution", "PARQUET");
+    }
+
+    @Test
+    public void testSchemaEvolutionTypeChangeUsesPaimonReaderOnOrcBaseTable()
+    {
+        assertSchemaEvolutionTypeChangeUsesPaimonReader("direct_type_evolution_orc", "ORC");
+    }
+
     private void assertSchemaEvolutionFilterOnAddedColumnSkipsOldFiles(String tableName, String fileFormat)
     {
         sql("CREATE TABLE paimon.default." + tableName + " ("
@@ -1456,6 +1470,27 @@ public class TrinoITCase
         assertThat(sql("SELECT id FROM paimon.default." + tableName + " "
                 + "WHERE category IS NULL ORDER BY id"))
                 .isEqualTo("[[1], [2]]");
+    }
+
+    private void assertSchemaEvolutionTypeChangeUsesPaimonReader(String tableName, String fileFormat)
+    {
+        sql("CREATE TABLE paimon.default." + tableName + " ("
+                + "id integer, "
+                + "payload integer) "
+                + "WITH (file_format = '" + fileFormat + "')");
+        sql("INSERT INTO paimon.default." + tableName + " VALUES "
+                + "(1, 101), "
+                + "(2, 202)");
+
+        sql("ALTER TABLE paimon.default." + tableName + " ALTER COLUMN payload SET DATA TYPE varchar");
+        sql("INSERT INTO paimon.default." + tableName + " VALUES "
+                + "(3, 'new-303'), "
+                + "(4, 'new-404')");
+
+        assertThat(sql("SELECT id, payload FROM paimon.default." + tableName + " ORDER BY id"))
+                .isEqualTo("[[1, 101], [2, 202], [3, new-303], [4, new-404]]");
+        assertThat(sql("SELECT id FROM paimon.default." + tableName + " WHERE payload = '101'"))
+                .isEqualTo("[[1]]");
     }
 
     @Test

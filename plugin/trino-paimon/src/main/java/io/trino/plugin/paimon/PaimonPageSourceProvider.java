@@ -329,6 +329,10 @@ public class PaimonPageSourceProvider
                         if (canSkipDirectReadFile(dataFileColumns, filterDomains, dataSchemaFields)) {
                             continue;
                         }
+                        if (!directReaderSupportsSchemaEvolution(projectedFields, rowType.getFields(), dataSchemaFields)) {
+                            return createPaimonReaderPageSource(table, refreshToLatestSchema, readerFilter, paimonSplit,
+                                    columns, limit, projectedFields);
+                        }
 
                         Optional<DeletionFile> deletionFile = deletionFileAt(deletionFiles, i);
                         Supplier<ConnectorPageSource> sourceSupplier = () -> {
@@ -361,27 +365,41 @@ public class PaimonPageSourceProvider
                 }
             }
             else {
-                Table readTable = PaimonTableHandle.schemaAwareReadTable(table, refreshToLatestSchema);
-                RowType rowType = PaimonTableHandle.effectiveReadRowType(readTable);
-                List<String> fieldNames = rowType.getFieldNames();
-                Optional<Predicate> paimonFilter = new PaimonFilterConverter(rowType).convert(readerFilter);
-                int[] columnIndex = projectionIndexes(fieldNames, projectedFields);
-                RowType projectedReadType = isIdentityProjection(columnIndex, fieldNames.size())
-                        ? rowType
-                        : rowType.project(columnIndex);
-
-                ReadBuilder read = readTable.newReadBuilder();
-                paimonFilter.ifPresent(read::withFilter);
-                if (!readTable.rowType().equals(projectedReadType)) {
-                    read.withReadType(projectedReadType);
-                }
-
-                return new PaimonPageSource(read.newRead().executeFilter().createReader(paimonSplit), columns, limit);
+                return createPaimonReaderPageSource(table, refreshToLatestSchema, readerFilter, paimonSplit, columns,
+                        limit, projectedFields);
             }
         }
         catch (Exception e) {
             throw wrapPaimonReadException(e);
         }
+    }
+
+    private ConnectorPageSource createPaimonReaderPageSource(
+            Table table,
+            boolean refreshToLatestSchema,
+            TupleDomain<PaimonColumnHandle> readerFilter,
+            Split paimonSplit,
+            List<PaimonColumnHandle> columns,
+            OptionalLong limit,
+            List<String> projectedFields)
+            throws IOException
+    {
+        Table readTable = PaimonTableHandle.schemaAwareReadTable(table, refreshToLatestSchema);
+        RowType rowType = PaimonTableHandle.effectiveReadRowType(readTable);
+        List<String> fieldNames = rowType.getFieldNames();
+        Optional<Predicate> paimonFilter = new PaimonFilterConverter(rowType).convert(readerFilter);
+        int[] columnIndex = projectionIndexes(fieldNames, projectedFields);
+        RowType projectedReadType = isIdentityProjection(columnIndex, fieldNames.size())
+                ? rowType
+                : rowType.project(columnIndex);
+
+        ReadBuilder read = readTable.newReadBuilder();
+        paimonFilter.ifPresent(read::withFilter);
+        if (!readTable.rowType().equals(projectedReadType)) {
+            read.withReadType(projectedReadType);
+        }
+
+        return new PaimonPageSource(read.newRead().executeFilter().createReader(paimonSplit), columns, limit);
     }
 
     static TupleDomain<PaimonColumnHandle> readerFilter(TupleDomain<PaimonColumnHandle> filter)
@@ -454,6 +472,48 @@ public class PaimonPageSourceProvider
             }
         }
         return false;
+    }
+
+    static boolean directReaderSupportsSchemaEvolution(List<String> projectedFields, List<DataField> tableFields,
+            List<DataField> dataFields)
+    {
+        requireNonNull(projectedFields, "projectedFields is null");
+        requireNonNull(tableFields, "tableFields is null");
+        requireNonNull(dataFields, "dataFields is null");
+
+        Map<String, DataField> tableFieldByName = new HashMap<>();
+        for (DataField field : tableFields) {
+            requireNonNull(field, "tableFields contains null field");
+            String lowerName = FieldNameUtils.toLowerCase(field.name());
+            DataField previous = tableFieldByName.putIfAbsent(lowerName, field);
+            if (previous != null) {
+                throw new IllegalStateException("Current Paimon table schema contains case-insensitive duplicate field name '%s'"
+                        .formatted(lowerName));
+            }
+        }
+
+        Map<Integer, DataField> dataFieldById = new HashMap<>();
+        for (DataField field : dataFields) {
+            requireNonNull(field, "dataFields contains null field");
+            DataField previous = dataFieldById.putIfAbsent(field.id(), field);
+            if (previous != null) {
+                throw new IllegalStateException("Paimon data file schema contains duplicate field id %s"
+                        .formatted(field.id()));
+            }
+        }
+
+        for (String projectedField : projectedFields) {
+            DataField tableField = tableFieldByName.get(FieldNameUtils.toLowerCase(projectedField));
+            if (tableField == null) {
+                throw new IllegalStateException("Projected field '%s' does not exist in current Paimon table fields %s"
+                        .formatted(projectedField, tableFields.stream().map(DataField::name).toList()));
+            }
+            DataField dataField = dataFieldById.get(tableField.id());
+            if (dataField != null && !dataField.type().equalsIgnoreNullable(tableField.type())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static DirectReadTableContext directReadTableContext(

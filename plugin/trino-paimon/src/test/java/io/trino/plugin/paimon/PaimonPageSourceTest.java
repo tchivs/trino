@@ -300,6 +300,34 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectReaderSchemaEvolutionRequiresProjectedFieldTypesToMatchDataFiles()
+    {
+        List<DataField> currentFields = List.of(
+                new DataField(1, "renamed_id", DataTypes.INT()),
+                new DataField(2, "payload", DataTypes.STRING()),
+                new DataField(3, "new_field", DataTypes.BIGINT()));
+        List<DataField> renamedDataFields = List.of(
+                new DataField(1, "old_id", DataTypes.INT()),
+                new DataField(2, "payload", DataTypes.STRING()));
+
+        assertThat(PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(
+                List.of("renamed_id", "payload", "new_field"), currentFields, renamedDataFields))
+                .isTrue();
+        assertThat(PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(
+                List.of("payload"), currentFields, List.of(
+                        new DataField(1, "old_id", DataTypes.INT()),
+                        new DataField(2, "payload", DataTypes.VARCHAR(10)))))
+                .isFalse();
+        assertThat(PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(
+                List.of("payload"), List.of(
+                        new DataField(2, "payload", DataTypes.ROW(
+                                DataTypes.FIELD(10, "nested", DataTypes.STRING())))),
+                        List.of(new DataField(2, "payload", DataTypes.ROW(
+                                DataTypes.FIELD(10, "nested", DataTypes.INT()))))))
+                .isFalse();
+    }
+
+    @Test
     void testOrcTimeColumnsFallBackFromDirectPageSource()
     {
         assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(rawFile("orc")), List.of(
@@ -1093,6 +1121,28 @@ public class PaimonPageSourceTest
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("dataFields contains null field");
         assertThatThrownBy(() -> PaimonPageSourceProvider.schemaEvolutionFieldNames(
+                Arrays.asList("id", null), tableFields, dataFields))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("fieldName is null");
+
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(null, tableFields, dataFields))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("projectedFields is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(List.of("id"), null, dataFields))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("tableFields is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(List.of("id"), tableFields, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("dataFields is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(
+                List.of("id"), Collections.singletonList(null), dataFields))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("tableFields contains null field");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(
+                List.of("id"), tableFields, Collections.singletonList(null)))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("dataFields contains null field");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(
                 Arrays.asList("id", null), tableFields, dataFields))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("fieldName is null");
