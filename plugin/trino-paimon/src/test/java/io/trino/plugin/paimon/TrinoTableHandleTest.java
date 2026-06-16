@@ -987,6 +987,16 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testTableHandleRejectsRawScanModeDynamicOption()
+    {
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Map.of(
+                CoreOptions.SCAN_MODE.key(), CoreOptions.StartupMode.LATEST.toString()),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("dynamicOptions key 'scan.mode' is not supported; use explicit scan selector keys instead");
+    }
+
+    @Test
     public void testTableHandleRejectsPaimon15CreationTimeStartupSelectionConflicts()
     {
         assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Map.of(
@@ -1007,6 +1017,18 @@ public class TrinoTableHandleTest
 
         assertThatThrownBy(() -> codec.fromJson(json))
                 .hasRootCauseMessage("dynamicOptions may contain only one startup selection, got keys: [incremental-to-auto-tag, scan.snapshot-id]");
+    }
+
+    @Test
+    public void testJsonRejectsRawScanModeDynamicOption()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = replaceJsonField(codec.toJson(handle), "dynamicOptions",
+                "{\"scan.mode\":\"latest\"}");
+
+        assertThatThrownBy(() -> codec.fromJson(json))
+                .hasRootCauseMessage("dynamicOptions key 'scan.mode' is not supported; use explicit scan selector keys instead");
     }
 
     @Test

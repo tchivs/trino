@@ -145,6 +145,10 @@ public class PaimonTableHandle
     {
         requireNonNull(dynamicOptions, "dynamicOptions is null");
 
+        checkArgument(!dynamicOptions.containsKey(CoreOptions.SCAN_MODE.key()),
+                "dynamicOptions key '%s' is not supported; use explicit scan selector keys instead",
+                CoreOptions.SCAN_MODE.key());
+
         List<String> startupSelections = EXPLICIT_STARTUP_OPTION_KEYS.stream()
                 .filter(dynamicOptions::containsKey)
                 .sorted()
