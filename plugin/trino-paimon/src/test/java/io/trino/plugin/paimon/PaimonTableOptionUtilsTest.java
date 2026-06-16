@@ -68,6 +68,47 @@ public class PaimonTableOptionUtilsTest
     }
 
     @Test
+    public void testDocumentedPaimon15OptionsArePassedThroughAsStrings()
+    {
+        Schema.Builder builder = Schema.newBuilder()
+                .column("id", DataTypes.INT())
+                .column("embedding", DataTypes.ARRAY(DataTypes.FLOAT()))
+                .column("payload", DataTypes.BYTES());
+
+        PaimonTableOptionUtils.buildOptions(builder, Map.ofEntries(
+                entry("blob_as_descriptor", "true"),
+                entry("blob_view_resolve_enabled", "false"),
+                entry("blob_write_null_on_missing_file", "true"),
+                entry("blob_target_file_size", "8 MB"),
+                entry("blob_split_by_file_size", "true"),
+                entry("vector_target_file_size", "64 MB"),
+                entry("vector_search_distribute_enabled", "true"),
+                entry("scan_fallback_snapshot_branch", "snapshot_branch"),
+                entry("scan_fallback_delta_branch", "delta_branch"),
+                entry("scan_fallback_branch_read_fail_fast", "true"),
+                entry("scan_primary_branch", "main_branch"),
+                entry("row_tracking_partition_group_on_commit", "false"),
+                entry("data_evolution_merge_into_file_pruning", "false"),
+                entry("data_evolution_merge_into_source_persist", "true")));
+
+        assertThat(builder.build().options())
+                .containsEntry(CoreOptions.BLOB_AS_DESCRIPTOR.key(), "true")
+                .containsEntry(CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key(), "false")
+                .containsEntry(CoreOptions.BLOB_WRITE_NULL_ON_MISSING_FILE.key(), "true")
+                .containsEntry(CoreOptions.BLOB_TARGET_FILE_SIZE.key(), "8 MB")
+                .containsEntry(CoreOptions.BLOB_SPLIT_BY_FILE_SIZE.key(), "true")
+                .containsEntry(CoreOptions.VECTOR_TARGET_FILE_SIZE.key(), "64 MB")
+                .containsEntry(CoreOptions.VECTOR_SEARCH_DISTRIBUTE_ENABLED.key(), "true")
+                .containsEntry(CoreOptions.SCAN_FALLBACK_SNAPSHOT_BRANCH.key(), "snapshot_branch")
+                .containsEntry(CoreOptions.SCAN_FALLBACK_DELTA_BRANCH.key(), "delta_branch")
+                .containsEntry(CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key(), "true")
+                .containsEntry(CoreOptions.SCAN_PRIMARY_BRANCH.key(), "main_branch")
+                .containsEntry(CoreOptions.ROW_TRACKING_PARTITION_GROUP_ON_COMMIT.key(), "false")
+                .containsEntry(CoreOptions.DATA_EVOLUTION_MERGE_INTO_FILE_PRUNING.key(), "false")
+                .containsEntry(CoreOptions.DATA_EVOLUTION_MERGE_INTO_SOURCE_PERSIST.key(), "true");
+    }
+
+    @Test
     public void testCamelCasePaimonOptionsAreExposedAsSnakeCase()
     {
         assertThat(PaimonTableOptionUtils.convertOptionKey(CoreOptions.VARIANT_SHREDDING_SCHEMA.key()))
@@ -89,6 +130,12 @@ public class PaimonTableOptionUtilsTest
                 .isEqualTo(CoreOptions.VECTOR_FILE_FORMAT.key());
         assertThat(PaimonTableOptionUtils.toPaimonOptionKey("scan_fallback_branch"))
                 .isEqualTo(CoreOptions.SCAN_FALLBACK_BRANCH.key());
+        assertThat(PaimonTableOptionUtils.toPaimonOptionKey("scan_fallback_branch_read_fail_fast"))
+                .isEqualTo(CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key());
+        assertThat(PaimonTableOptionUtils.toPaimonOptionKey("blob_view_resolve_enabled"))
+                .isEqualTo(CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key());
+        assertThat(PaimonTableOptionUtils.toPaimonOptionKey("vector_search_distribute_enabled"))
+                .isEqualTo(CoreOptions.VECTOR_SEARCH_DISTRIBUTE_ENABLED.key());
         assertThat(PaimonTableOptionUtils.toPaimonOptionKey("custom.option"))
                 .isEqualTo("custom.option");
     }
@@ -98,34 +145,16 @@ public class PaimonTableOptionUtilsTest
     {
         PaimonTableOptions tableOptions = new PaimonTableOptions();
 
-        assertThat(tableOptions.getTableProperties())
-                .filteredOn(property -> property.getName().equals("merge_engine"))
-                .singleElement()
-                .satisfies(property -> {
-                    assertThat(property.getSqlType()).isEqualTo(VARCHAR);
-                    assertThat(property.getJavaType()).isEqualTo(String.class);
-                });
-        assertThat(tableOptions.getTableProperties())
-                .filteredOn(property -> property.getName().equals("vector_field"))
-                .singleElement()
-                .satisfies(property -> {
-                    assertThat(property.getSqlType()).isEqualTo(VARCHAR);
-                    assertThat(property.getJavaType()).isEqualTo(String.class);
-                });
-        assertThat(tableOptions.getTableProperties())
-                .filteredOn(property -> property.getName().equals("scan_fallback_branch"))
-                .singleElement()
-                .satisfies(property -> {
-                    assertThat(property.getSqlType()).isEqualTo(VARCHAR);
-                    assertThat(property.getJavaType()).isEqualTo(String.class);
-                });
-        assertThat(tableOptions.getTableProperties())
-                .filteredOn(property -> property.getName().equals("blob_external_storage_path"))
-                .singleElement()
-                .satisfies(property -> {
-                    assertThat(property.getSqlType()).isEqualTo(VARCHAR);
-                    assertThat(property.getJavaType()).isEqualTo(String.class);
-                });
+        assertStringTableProperty(tableOptions, "merge_engine");
+        assertStringTableProperty(tableOptions, "vector_field");
+        assertStringTableProperty(tableOptions, "vector_target_file_size");
+        assertStringTableProperty(tableOptions, "vector_search_distribute_enabled");
+        assertStringTableProperty(tableOptions, "scan_fallback_branch");
+        assertStringTableProperty(tableOptions, "scan_fallback_branch_read_fail_fast");
+        assertStringTableProperty(tableOptions, "scan_primary_branch");
+        assertStringTableProperty(tableOptions, "blob_external_storage_path");
+        assertStringTableProperty(tableOptions, "blob_as_descriptor");
+        assertStringTableProperty(tableOptions, "blob_view_resolve_enabled");
         assertThat(tableOptions.getTableProperties())
                 .noneMatch(property -> property.getName().equals("scan_snapshot_id"));
         assertThat(tableOptions.getTableProperties())
@@ -241,6 +270,9 @@ public class PaimonTableOptionUtilsTest
                         CoreOptions.BUCKET_KEY.key(), "id",
                         CoreOptions.VECTOR_FILE_FORMAT.key(), "lance",
                         CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(), "file:/tmp/blob-external",
+                        CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key(), "false",
+                        CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key(), "true",
+                        CoreOptions.SCAN_PRIMARY_BRANCH.key(), "main_branch",
                         CoreOptions.SCAN_SNAPSHOT_ID.key(), "7",
                         CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2",
                         CoreOptions.SCAN_FALLBACK_BRANCH.key(), "branch_a"),
@@ -254,7 +286,10 @@ public class PaimonTableOptionUtilsTest
                 .containsEntry("bucket_key", "id")
                 .containsEntry("vector_file_format", "lance")
                 .containsEntry("blob_external_storage_path", "file:/tmp/blob-external")
+                .containsEntry("blob_view_resolve_enabled", "false")
                 .containsEntry("scan_fallback_branch", "branch_a")
+                .containsEntry("scan_fallback_branch_read_fail_fast", "true")
+                .containsEntry("scan_primary_branch", "main_branch")
                 .doesNotContainKeys("scan_snapshot_id", "incremental_between");
     }
 
@@ -379,5 +414,16 @@ public class PaimonTableOptionUtilsTest
                 PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of(" "))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("partitioned_by contains blank value");
+    }
+
+    private static void assertStringTableProperty(PaimonTableOptions tableOptions, String propertyName)
+    {
+        assertThat(tableOptions.getTableProperties())
+                .filteredOn(property -> property.getName().equals(propertyName))
+                .singleElement()
+                .satisfies(property -> {
+                    assertThat(property.getSqlType()).isEqualTo(VARCHAR);
+                    assertThat(property.getJavaType()).isEqualTo(String.class);
+                });
     }
 }
