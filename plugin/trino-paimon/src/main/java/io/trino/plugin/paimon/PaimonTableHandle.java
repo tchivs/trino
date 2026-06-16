@@ -327,7 +327,10 @@ public class PaimonTableHandle
             Long scanTimestampMills = PaimonSessionProperties.getScanTimestampMillis(session);
             Long scanSnapshotId = PaimonSessionProperties.getScanSnapshotId(session);
             String scanTagName = PaimonSessionProperties.getScanTagName(session);
-            validateSessionScanSelection(scanTimestampMills, scanSnapshotId, scanTagName);
+            Long scanFileCreationTimeMillis = PaimonSessionProperties.getScanFileCreationTimeMillis(session);
+            Long scanCreationTimeMillis = PaimonSessionProperties.getScanCreationTimeMillis(session);
+            validateSessionScanSelection(scanTimestampMills, scanSnapshotId, scanTagName,
+                    scanFileCreationTimeMillis, scanCreationTimeMillis);
             if (scanTimestampMills != null) {
                 dynamicOptions.put(CoreOptions.SCAN_TIMESTAMP_MILLIS.key(), scanTimestampMills.toString());
             }
@@ -337,12 +340,23 @@ public class PaimonTableHandle
             if (scanTagName != null) {
                 dynamicOptions.put(CoreOptions.SCAN_TAG_NAME.key(), scanTagName);
             }
+            if (scanFileCreationTimeMillis != null) {
+                dynamicOptions.put(CoreOptions.SCAN_FILE_CREATION_TIME_MILLIS.key(), scanFileCreationTimeMillis.toString());
+            }
+            if (scanCreationTimeMillis != null) {
+                dynamicOptions.put(CoreOptions.SCAN_CREATION_TIME_MILLIS.key(), scanCreationTimeMillis.toString());
+            }
         }
         validateDynamicOptionsSemantics(dynamicOptions);
         return dynamicOptions;
     }
 
-    private static void validateSessionScanSelection(Long scanTimestampMills, Long scanSnapshotId, String scanTagName)
+    private static void validateSessionScanSelection(
+            Long scanTimestampMills,
+            Long scanSnapshotId,
+            String scanTagName,
+            Long scanFileCreationTimeMillis,
+            Long scanCreationTimeMillis)
     {
         int selections = 0;
         if (scanTimestampMills != null) {
@@ -354,13 +368,21 @@ public class PaimonTableHandle
         if (scanTagName != null) {
             selections++;
         }
+        if (scanFileCreationTimeMillis != null) {
+            selections++;
+        }
+        if (scanCreationTimeMillis != null) {
+            selections++;
+        }
         if (selections > 1) {
             throw new TrinoException(INVALID_SESSION_PROPERTY,
-                    "Only one of %s, %s or %s session properties may be set"
+                    "Only one of %s, %s, %s, %s or %s session properties may be set"
                             .formatted(
                                     PaimonSessionProperties.SCAN_TIMESTAMP,
                                     PaimonSessionProperties.SCAN_SNAPSHOT,
-                                    PaimonSessionProperties.SCAN_TAG));
+                                    PaimonSessionProperties.SCAN_TAG,
+                                    PaimonSessionProperties.SCAN_FILE_CREATION_TIME,
+                                    PaimonSessionProperties.SCAN_CREATION_TIME));
         }
     }
 

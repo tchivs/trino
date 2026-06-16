@@ -22,6 +22,8 @@ import java.util.Map;
 
 import static io.trino.plugin.paimon.PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR;
 import static io.trino.plugin.paimon.PaimonSessionProperties.MINIMUM_SPLIT_WEIGHT;
+import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_CREATION_TIME;
+import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_FILE_CREATION_TIME;
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_TAG;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -54,6 +56,17 @@ public class PaimonSessionPropertiesTest
         assertThat(PaimonSessionProperties.getScanTagName(session(Map.of()))).isNull();
         assertThat(PaimonSessionProperties.getScanTagName(session(Map.of(SCAN_TAG, "tag-1"))))
                 .isEqualTo("tag-1");
+    }
+
+    @Test
+    public void testPaimon15CreationTimeScanDefaultsAndValidValues()
+    {
+        assertThat(PaimonSessionProperties.getScanFileCreationTimeMillis(session(Map.of()))).isNull();
+        assertThat(PaimonSessionProperties.getScanCreationTimeMillis(session(Map.of()))).isNull();
+        assertThat(PaimonSessionProperties.getScanFileCreationTimeMillis(session(Map.of(SCAN_FILE_CREATION_TIME, 1000L))))
+                .isEqualTo(1000L);
+        assertThat(PaimonSessionProperties.getScanCreationTimeMillis(session(Map.of(SCAN_CREATION_TIME, 2000L))))
+                .isEqualTo(2000L);
     }
 
     @Test

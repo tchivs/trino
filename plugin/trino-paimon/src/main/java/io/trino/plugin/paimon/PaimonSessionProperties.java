@@ -30,6 +30,8 @@ import static io.trino.spi.session.PropertyMetadata.longProperty;
 import static io.trino.spi.session.PropertyMetadata.stringProperty;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.String.format;
+import static org.apache.paimon.CoreOptions.SCAN_CREATION_TIME_MILLIS;
+import static org.apache.paimon.CoreOptions.SCAN_FILE_CREATION_TIME_MILLIS;
 import static org.apache.paimon.CoreOptions.SCAN_SNAPSHOT_ID;
 import static org.apache.paimon.CoreOptions.SCAN_TAG_NAME;
 import static org.apache.paimon.CoreOptions.SCAN_TIMESTAMP_MILLIS;
@@ -39,6 +41,8 @@ public class PaimonSessionProperties
     public static final String SCAN_TIMESTAMP = "scan_timestamp_millis";
     public static final String SCAN_SNAPSHOT = "scan_snapshot_id";
     public static final String SCAN_TAG = "scan_tag_name";
+    public static final String SCAN_FILE_CREATION_TIME = "scan_file_creation_time_millis";
+    public static final String SCAN_CREATION_TIME = "scan_creation_time_millis";
     public static final String MINIMUM_SPLIT_WEIGHT = "minimum_split_weight";
     public static final String INSERT_EXISTING_PARTITIONS_BEHAVIOR = "insert_existing_partitions_behavior";
     public static final String DYNAMIC_FILTERING_WAIT_TIMEOUT = "dynamic_filtering_wait_timeout";
@@ -50,6 +54,10 @@ public class PaimonSessionProperties
         sessionProperties = ImmutableList.<PropertyMetadata<?>>builder()
                 .add(longProperty(SCAN_TIMESTAMP, SCAN_TIMESTAMP_MILLIS.description().toString(), null, true))
                 .add(longProperty(SCAN_SNAPSHOT, SCAN_SNAPSHOT_ID.description().toString(), null, true))
+                .add(longProperty(SCAN_FILE_CREATION_TIME,
+                        SCAN_FILE_CREATION_TIME_MILLIS.description().toString(), null, true))
+                .add(longProperty(SCAN_CREATION_TIME,
+                        SCAN_CREATION_TIME_MILLIS.description().toString(), null, true))
                 .add(stringProperty(
                         SCAN_TAG,
                         SCAN_TAG_NAME.description().toString(),
@@ -96,6 +104,16 @@ public class PaimonSessionProperties
     public static String getScanTagName(ConnectorSession session)
     {
         return session.getProperty(SCAN_TAG, String.class);
+    }
+
+    public static Long getScanFileCreationTimeMillis(ConnectorSession session)
+    {
+        return session.getProperty(SCAN_FILE_CREATION_TIME, Long.class);
+    }
+
+    public static Long getScanCreationTimeMillis(ConnectorSession session)
+    {
+        return session.getProperty(SCAN_CREATION_TIME, Long.class);
     }
 
     public static Double getMinimumSplitWeight(ConnectorSession session)
