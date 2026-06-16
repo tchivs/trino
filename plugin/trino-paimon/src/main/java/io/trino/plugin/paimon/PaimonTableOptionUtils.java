@@ -33,6 +33,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toUnmodifiableSet;
 
 public class PaimonTableOptionUtils
 {
@@ -62,6 +63,9 @@ public class PaimonTableOptionUtils
             CoreOptions.STREAMING_READ_SNAPSHOT_DELAY.key(),
             CoreOptions.STREAMING_READ_OVERWRITE.key(),
             CoreOptions.STREAMING_READ_APPEND_OVERWRITE.key());
+    private static final Set<String> EXCLUDED_TABLE_PROPERTY_TRINO_KEYS = EXCLUDED_TABLE_PROPERTY_OPTION_KEYS.stream()
+            .map(PaimonTableOptionUtils::convertOptionKey)
+            .collect(toUnmodifiableSet());
     private static final List<OptionInfo> OPTION_INFOS = buildOptionInfos();
     private static final Map<String, OptionInfo> OPTION_INFO_BY_TRINO_KEY = indexOptionInfosByTrinoKey(OPTION_INFOS);
 
@@ -106,6 +110,25 @@ public class PaimonTableOptionUtils
         }
         OptionInfo optionInfo = OPTION_INFO_BY_TRINO_KEY.get(trinoOptionKey);
         return optionInfo != null ? optionInfo.paimonOptionKey : trinoOptionKey;
+    }
+
+    public static boolean isRuntimeOnlyTableProperty(String trinoOptionKey)
+    {
+        requireNonNull(trinoOptionKey, "trinoOptionKey is null");
+        if (StringUtils.isNullOrWhitespaceOnly(trinoOptionKey)) {
+            throw new IllegalArgumentException("trinoOptionKey is blank");
+        }
+        return EXCLUDED_TABLE_PROPERTY_TRINO_KEYS.contains(trinoOptionKey)
+                || isRuntimeOnlyPaimonOptionKey(toPaimonOptionKey(trinoOptionKey));
+    }
+
+    static boolean isRuntimeOnlyPaimonOptionKey(String paimonOptionKey)
+    {
+        requireNonNull(paimonOptionKey, "paimonOptionKey is null");
+        if (StringUtils.isNullOrWhitespaceOnly(paimonOptionKey)) {
+            throw new IllegalArgumentException("paimonOptionKey is blank");
+        }
+        return EXCLUDED_TABLE_PROPERTY_OPTION_KEYS.contains(paimonOptionKey);
     }
 
     private static void validatePropertyKey(String propertyKey)

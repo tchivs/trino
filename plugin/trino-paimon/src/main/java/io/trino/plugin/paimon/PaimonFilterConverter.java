@@ -180,6 +180,10 @@ public class PaimonFilterConverter
             throw new UnsupportedOperationException(
                     "Value-based predicates on structural types are not supported: " + type);
         }
+        if (logicalType.getTypeRoot() == DataTypeRoot.BLOB) {
+            throw new UnsupportedOperationException(
+                    "Value-based predicates on Paimon BLOB columns are not supported: " + field);
+        }
 
         if (type.isOrderable()) {
             List<Range> orderedRanges = domain.getValues().getRanges().getOrderedRanges();

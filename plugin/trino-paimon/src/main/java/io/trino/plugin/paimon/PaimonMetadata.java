@@ -113,31 +113,6 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
 public record PaimonMetadata(PaimonCatalog catalog,
                              io.trino.spi.type.TypeManager typeManager) implements ConnectorMetadata
 {
-    private static final Set<String> RUNTIME_ONLY_TABLE_PROPERTIES = Set.of(
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_MODE.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_TIMESTAMP.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_TIMESTAMP_MILLIS.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_WATERMARK.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_FILE_CREATION_TIME_MILLIS.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_CREATION_TIME_MILLIS.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_SNAPSHOT_ID.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_TAG_NAME.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_VERSION.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_BOUNDED_WATERMARK.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_MANIFEST_PARALLELISM.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_MAX_SPLITS_PER_TASK.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_IGNORE_CORRUPT_FILE.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_IGNORE_LOST_FILE.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.SCAN_PLAN_AUTO_TAG_FOR_READ_TIME_RETAINED.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.INCREMENTAL_TO_AUTO_TAG.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.STREAMING_READ_SNAPSHOT_DELAY.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.STREAMING_READ_OVERWRITE.key()),
-            PaimonTableOptionUtils.convertOptionKey(CoreOptions.STREAMING_READ_APPEND_OVERWRITE.key()));
-
     public PaimonMetadata
     {
         catalog = requireNonNull(catalog, "catalog is null");
@@ -742,9 +717,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         List<String> unsupportedProperties = properties.keySet().stream()
                 .peek(property -> requireNonNull(property, "properties contains null property name"))
+                .peek(property -> checkArgument(!StringUtils.isNullOrWhitespaceOnly(property),
+                        "properties contains blank property name"))
                 .filter(property -> PaimonTableOptions.PRIMARY_KEY_IDENTIFIER.equals(property)
                         || PaimonTableOptions.PARTITIONED_BY_PROPERTY.equals(property)
-                        || RUNTIME_ONLY_TABLE_PROPERTIES.contains(property))
+                        || PaimonTableOptionUtils.isRuntimeOnlyTableProperty(property))
                 .sorted()
                 .toList();
         if (!unsupportedProperties.isEmpty()) {

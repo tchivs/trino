@@ -79,6 +79,7 @@ import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TimeType.TIME_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
+import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.apache.paimon.fileindex.FileIndexCommon.toMapKey;
@@ -425,6 +426,28 @@ public class TrinoFilterConverterTest
         assertThat(converter.convert(jsonValue, acceptedDomains, unsupportedDomains)).isEmpty();
         assertThat(acceptedDomains).isEmpty();
         assertThat(unsupportedDomains).containsEntry(payload, jsonValue.getDomains().orElseThrow().get(payload));
+    }
+
+    @Test
+    public void testBlobNullPredicateIsConvertedButValuePredicateRemainsInTrino()
+    {
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "payload", DataTypes.BLOB())));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PredicateBuilder builder = new PredicateBuilder(rowType);
+        PaimonColumnHandle payload = PaimonColumnHandle.of("payload", DataTypes.BLOB());
+
+        TupleDomain<PaimonColumnHandle> isNull = TupleDomain.withColumnDomains(Map.of(
+                payload, Domain.onlyNull(VARBINARY)));
+        assertThat(converter.convert(isNull).orElseThrow()).isEqualTo(builder.isNull(0));
+
+        TupleDomain<PaimonColumnHandle> blobValue = TupleDomain.withColumnDomains(Map.of(
+                payload, Domain.singleValue(VARBINARY, Slices.wrappedBuffer(new byte[] {1, 2, 3}))));
+        LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
+        LinkedHashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
+
+        assertThat(converter.convert(blobValue, acceptedDomains, unsupportedDomains)).isEmpty();
+        assertThat(acceptedDomains).isEmpty();
+        assertThat(unsupportedDomains).containsEntry(payload, blobValue.getDomains().orElseThrow().get(payload));
     }
 
     @Test

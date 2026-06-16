@@ -80,18 +80,6 @@ public class PaimonTableHandle
             CoreOptions.INCREMENTAL_BETWEEN.key(),
             CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
             CoreOptions.INCREMENTAL_TO_AUTO_TAG.key());
-    private static final Set<String> READ_ONLY_DYNAMIC_OPTION_KEYS = Set.of(
-            CoreOptions.SCAN_VERSION.key(),
-            CoreOptions.SCAN_SNAPSHOT_ID.key(),
-            CoreOptions.SCAN_TAG_NAME.key(),
-            CoreOptions.SCAN_TIMESTAMP.key(),
-            CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
-            CoreOptions.SCAN_WATERMARK.key(),
-            CoreOptions.INCREMENTAL_BETWEEN.key(),
-            CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
-            CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(),
-            CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(),
-            CoreOptions.INCREMENTAL_TO_AUTO_TAG.key());
     private static final Set<String> HISTORICAL_READ_OPTION_KEYS = Set.of(
             CoreOptions.SCAN_VERSION.key(),
             CoreOptions.SCAN_SNAPSHOT_ID.key(),
@@ -306,7 +294,7 @@ public class PaimonTableHandle
         }
 
         Map<String, String> dynamicOptions = new HashMap<>(this.dynamicOptions);
-        READ_ONLY_DYNAMIC_OPTION_KEYS.forEach(dynamicOptions::remove);
+        dynamicOptions.keySet().removeIf(PaimonTableOptionUtils::isRuntimeOnlyPaimonOptionKey);
         return requireSupportedTable(!dynamicOptions.isEmpty()
                 ? fileStoreTable.copyWithoutTimeTravel(dynamicOptions)
                 : fileStoreTable);

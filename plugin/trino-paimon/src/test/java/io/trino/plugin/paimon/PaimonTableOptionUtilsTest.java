@@ -141,6 +141,34 @@ public class PaimonTableOptionUtilsTest
     }
 
     @Test
+    public void testRuntimeOnlyTablePropertiesAreIdentifiedFromTrinoKeys()
+    {
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("scan_snapshot_id")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("incremental_between")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("incremental_to_auto_tag")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("scan_version")).isTrue();
+
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("scan_fallback_branch")).isFalse();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("blob_view_resolve_enabled")).isFalse();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("vector_file_format")).isFalse();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("custom.option")).isFalse();
+    }
+
+    @Test
+    public void testRuntimeOnlyPaimonOptionKeysAreIdentified()
+    {
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_SNAPSHOT_ID.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.INCREMENTAL_BETWEEN.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_IGNORE_LOST_FILE.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_MANIFEST_PARALLELISM.key())).isTrue();
+
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_FALLBACK_BRANCH.key())).isFalse();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key())).isFalse();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.VECTOR_FILE_FORMAT.key())).isFalse();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey("custom.option")).isFalse();
+    }
+
+    @Test
     public void testPaimonOptionsAreExposedAsStrings()
     {
         PaimonTableOptions tableOptions = new PaimonTableOptions();
@@ -229,6 +257,18 @@ public class PaimonTableOptionUtilsTest
         assertThatThrownBy(() -> PaimonTableOptionUtils.toPaimonOptionKey(" "))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("trinoOptionKey is blank");
+        assertThatThrownBy(() -> PaimonTableOptionUtils.isRuntimeOnlyTableProperty(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("trinoOptionKey is null");
+        assertThatThrownBy(() -> PaimonTableOptionUtils.isRuntimeOnlyTableProperty(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("trinoOptionKey is blank");
+        assertThatThrownBy(() -> PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("paimonOptionKey is null");
+        assertThatThrownBy(() -> PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("paimonOptionKey is blank");
     }
 
     @Test

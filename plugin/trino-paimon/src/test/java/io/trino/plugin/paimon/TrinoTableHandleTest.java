@@ -315,6 +315,27 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testTableWithWriteDynamicOptionsDropsRuntimeScanOptions()
+            throws Exception
+    {
+        Map<String, String> handleOptions = Map.of(
+                "custom.option", "value",
+                CoreOptions.SCAN_IGNORE_LOST_FILE.key(), "true",
+                CoreOptions.SCAN_MANIFEST_PARALLELISM.key(), "4",
+                CoreOptions.SCAN_MAX_SPLITS_PER_TASK.key(), "32",
+                CoreOptions.STREAMING_READ_OVERWRITE.key(), "true");
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
+        FileStoreTable table = capturingFileStoreTable(copiedOptions);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
+        assertThat(copiedOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+    }
+
+    @Test
     public void testTableWithWriteDynamicOptionsKeepsNonFileStoreTableUntouched()
             throws Exception
     {
