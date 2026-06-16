@@ -354,6 +354,42 @@ public class TrinoITCase
         }
 
         {
+            Path tablePath = new Path(warehouse, "default.db/t103");
+            RowType rowType = new RowType(Arrays.asList(
+                    new DataField(0, "id", DataTypes.INT()),
+                    new DataField(1, "properties", DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING())),
+                    new DataField(2, "payload", DataTypes.STRING())));
+            new SchemaManager(LocalFileIO.create(), tablePath).createTable(
+                    new Schema(rowType.getFields(), Collections.emptyList(), Collections.emptyList(), new HashMap<>() {
+                        {
+                            put("file-index.bloom-filter.columns", "properties[region]");
+                        }
+                    }, ""));
+            FileStoreTable table = FileStoreTableFactory.create(LocalFileIO.create(), tablePath);
+            InnerTableWrite writer = table.newWrite("user");
+            writer.withIOManager(new IOManagerImpl("/tmp"));
+            InnerTableCommit commit = table.newCommit("user");
+
+            Map<Object, Object> apSouth = new HashMap<>();
+            apSouth.put(fromString("region"), fromString("ap-south"));
+            apSouth.put(fromString("zone"), fromString("primary"));
+            writer.write(GenericRow.of(1, new GenericMap(apSouth), fromString("keep-ap-south")));
+            commit.commit(0, writer.prepareCommit(true, 0));
+
+            Map<Object, Object> euWest = new HashMap<>();
+            euWest.put(fromString("region"), fromString("eu-west"));
+            euWest.put(fromString("zone"), fromString("secondary"));
+            writer.write(GenericRow.of(2, new GenericMap(euWest), fromString("skip-eu-west")));
+            commit.commit(1, writer.prepareCommit(true, 1));
+
+            Map<Object, Object> usEast = new HashMap<>();
+            usEast.put(fromString("region"), fromString("us-east"));
+            usEast.put(fromString("zone"), fromString("tertiary"));
+            writer.write(GenericRow.of(3, new GenericMap(usEast), fromString("skip-us-east")));
+            commit.commit(2, writer.prepareCommit(true, 2));
+        }
+
+        {
             Path tablePath = new Path(warehouse, "default.db/fixed_bucket_table_wi_pk");
             RowType rowType = new RowType(Arrays.asList(new DataField(0, "id", DataTypes.INT()),
                     new DataField(1, "name", DataTypes.STRING())));
@@ -1673,6 +1709,20 @@ public class TrinoITCase
     public void testFileIndex()
     {
         assertThat(sql("SELECT * FROM paimon.default.t102 where c = 2")).isEqualTo("[[a2, 2, 2]]");
+    }
+
+    @Test
+    public void testFileIndexMapElementPredicateWithProjectedTopLevelMap()
+    {
+        assertThat(sql(
+                "SELECT id FROM paimon.default.t103 "
+                        + "WHERE element_at(properties, 'region') = 'ap-south'"))
+                .isEqualTo("[[1]]");
+
+        assertThat(sql(
+                "SELECT payload FROM paimon.default.t103 "
+                        + "WHERE element_at(properties, 'region') = 'eu-west'"))
+                .isEqualTo("[[skip-eu-west]]");
     }
 
     @Test

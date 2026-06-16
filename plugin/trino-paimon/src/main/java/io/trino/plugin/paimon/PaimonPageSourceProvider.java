@@ -92,6 +92,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
@@ -107,6 +108,7 @@ import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CURSOR_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
+import static org.apache.paimon.fileindex.FileIndexOptions.topLevelIndexOfNested;
 
 public class PaimonPageSourceProvider
         implements
@@ -288,7 +290,7 @@ public class PaimonPageSourceProvider
                     List<RawFile> files = optionalRawFiles.orElseThrow();
                     validateAlignedMetadataFiles("indexFiles", indexFiles, files.size());
                     validateAlignedMetadataFiles("deletionFiles", deletionFiles, files.size());
-                    LinkedList<ConnectorPageSource> sources = new LinkedList<>();
+                    LinkedList<Supplier<ConnectorPageSource>> sources = new LinkedList<>();
 
                     // if file index exists, do the filter.
                     for (int i = 0; i < files.size(); i++) {
@@ -328,14 +330,17 @@ public class PaimonPageSourceProvider
                             continue;
                         }
 
-                        ConnectorPageSource source = createDataPageSource(rawFile.format(),
-                                fileSystem.newInputFile(Location.of(rawFile.path())),
-                                dataFileColumns, type, directReaderDomains(projectedFields, filter,
-                                        deletionFileAt(deletionFiles, i).isPresent()));
-
                         Optional<DeletionFile> deletionFile = deletionFileAt(deletionFiles, i);
-                        if (deletionFile.isPresent()) {
-                            source = PaimonPageSourceWrapper.wrap(source, deletionFile.map(file -> {
+                        Supplier<ConnectorPageSource> sourceSupplier = () -> {
+                            ConnectorPageSource source = createDataPageSource(rawFile.format(),
+                                    fileSystem.newInputFile(Location.of(rawFile.path())),
+                                    dataFileColumns, type, directReaderDomains(projectedFields, filter,
+                                            deletionFile.isPresent()));
+
+                            if (deletionFile.isEmpty()) {
+                                return source;
+                            }
+                            return PaimonPageSourceWrapper.wrap(source, deletionFile.map(file -> {
                                 try {
                                     return DeletionVector.read(fileStoreTable.fileIO(), file);
                                 }
@@ -345,11 +350,11 @@ public class PaimonPageSourceProvider
                                             e);
                                 }
                             }));
-                        }
-                        sources.add(source);
+                        };
+                        sources.add(sourceSupplier);
                     }
 
-                    return new DirectTrinoPageSource(sources, limit);
+                    return DirectTrinoPageSource.lazyPageSources(sources, limit);
                 }
                 catch (Exception e) {
                     throw wrapPaimonReadException(e);
@@ -405,8 +410,16 @@ public class PaimonPageSourceProvider
                 .orElseThrow(() -> new IllegalStateException("Expected filter domains for non-trivial TupleDomain"))
                 .keySet().stream()
                 .map(PaimonColumnHandle::getColumnName)
-                .map(FieldNameUtils::toLowerCase)
+                .map(PaimonPageSourceProvider::requiredProjectedFieldName)
                 .allMatch(projectedFieldNames::contains);
+    }
+
+    private static String requiredProjectedFieldName(String fieldName)
+    {
+        requireNonNull(fieldName, "fieldName is null");
+        return topLevelIndexOfNested(fieldName)
+                .map(index -> FieldNameUtils.toLowerCase(fieldName.substring(0, index)))
+                .orElseGet(() -> FieldNameUtils.toLowerCase(fieldName));
     }
 
     static boolean canSkipDirectReadFile(List<String> dataFileColumns, List<Domain> filterDomains, List<DataField> dataSchemaFields)

@@ -96,6 +96,8 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.trino.plugin.base.util.JsonTypeUtil.jsonParse;
@@ -522,12 +524,20 @@ public class PaimonPageSourceTest
     void testDirectReaderSupportsFilterOnlyWhenProjectedFieldsCoverFilterColumns()
     {
         PaimonColumnHandle categoryColumn = PaimonColumnHandle.of("CATEGORY", DataTypes.STRING());
+        org.apache.paimon.types.MapType propertiesType = DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING());
+        PaimonColumnHandle propertiesRegionColumn = PaimonColumnHandle.of(toMapKey("properties", "region"), propertiesType);
         TupleDomain<PaimonColumnHandle> categoryFilter = TupleDomain.withColumnDomains(Map.of(
                 categoryColumn, Domain.singleValue(VARCHAR, Slices.utf8Slice("keep"))));
+        TupleDomain<PaimonColumnHandle> propertiesRegionFilter = TupleDomain.withColumnDomains(Map.of(
+                propertiesRegionColumn, Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south"))));
 
         assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id", "category"), categoryFilter))
                 .isTrue();
         assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), categoryFilter))
+                .isFalse();
+        assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id", "properties"), propertiesRegionFilter))
+                .isTrue();
+        assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), propertiesRegionFilter))
                 .isFalse();
         assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), TupleDomain.all()))
                 .isTrue();
@@ -1586,6 +1596,108 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectPageSourceAccumulatesProgressAcrossSources()
+    {
+        DelegatingStatePageSource first = new DelegatingStatePageSource(
+                new Page(2, bigintBlock(10, 11)),
+                OptionalLong.of(0),
+                123L,
+                456L);
+        DelegatingStatePageSource second = new DelegatingStatePageSource(
+                new Page(3, bigintBlock(20, 21, 22)),
+                OptionalLong.of(0),
+                321L,
+                654L);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(first, second)),
+                OptionalLong.empty());
+
+        assertThat(pageSource.getCompletedPositions()).hasValue(0L);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(123L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(456L);
+
+        Page firstPage = pageSource.getNextPage();
+        assertThat(firstPage.getPositionCount()).isEqualTo(2);
+        assertThat(pageSource.getCompletedPositions()).hasValue(2L);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(123L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(456L);
+
+        Page secondPage = pageSource.getNextPage();
+        assertThat(secondPage.getPositionCount()).isEqualTo(3);
+        assertThat(pageSource.getCompletedPositions()).hasValue(5L);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(444L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(1110L);
+        assertThat(pageSource.getMetrics()).isEqualTo(new Metrics(Map.of("merge-wrapper", new LongCount(22))));
+    }
+
+    @Test
+    void testDirectPageSourceCloseAccumulatesQueuedSourceState()
+    {
+        DelegatingStatePageSource first = new DelegatingStatePageSource(
+                new Page(1, bigintBlock(1)),
+                OptionalLong.of(0),
+                10L,
+                20L);
+        DelegatingStatePageSource second = new DelegatingStatePageSource(
+                new Page(1, bigintBlock(2)),
+                OptionalLong.of(0),
+                30L,
+                40L);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(first, second)),
+                OptionalLong.empty());
+
+        pageSource.close();
+
+        assertThat(pageSource.getCompletedPositions()).hasValue(0L);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(40L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(60L);
+        assertThat(pageSource.getMetrics()).isEqualTo(new Metrics(Map.of("merge-wrapper", new LongCount(22))));
+    }
+
+    @Test
+    void testDirectPageSourceLazilyOpensQueuedSources()
+    {
+        AtomicInteger firstOpens = new AtomicInteger();
+        AtomicInteger secondOpens = new AtomicInteger();
+        LinkedList<Supplier<ConnectorPageSource>> suppliers = new LinkedList<>(List.of(
+                countingPageSourceSupplier(firstOpens, new TestingPageSource(new Page(1, bigintBlock(1)))),
+                countingPageSourceSupplier(secondOpens, new TestingPageSource(new Page(1, bigintBlock(2))))));
+
+        DirectTrinoPageSource pageSource = DirectTrinoPageSource.lazyPageSources(suppliers, OptionalLong.empty());
+
+        assertThat(firstOpens).hasValue(0);
+        assertThat(secondOpens).hasValue(0);
+
+        Page firstPage = pageSource.getNextPage();
+        assertThat(firstPage.getPositionCount()).isEqualTo(1);
+        assertThat(firstOpens).hasValue(1);
+        assertThat(secondOpens).hasValue(0);
+
+        Page secondPage = pageSource.getNextPage();
+        assertThat(secondPage.getPositionCount()).isEqualTo(1);
+        assertThat(firstOpens).hasValue(1);
+        assertThat(secondOpens).hasValue(1);
+    }
+
+    @Test
+    void testDirectPageSourceLimitDoesNotOpenUnusedQueuedSources()
+    {
+        AtomicInteger firstOpens = new AtomicInteger();
+        AtomicInteger secondOpens = new AtomicInteger();
+        LinkedList<Supplier<ConnectorPageSource>> suppliers = new LinkedList<>(List.of(
+                countingPageSourceSupplier(firstOpens, new TestingPageSource(new Page(2, bigintBlock(1, 2)))),
+                countingPageSourceSupplier(secondOpens, new TestingPageSource(new Page(2, bigintBlock(3, 4))))));
+
+        DirectTrinoPageSource pageSource = DirectTrinoPageSource.lazyPageSources(suppliers, OptionalLong.of(1));
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(firstOpens).hasValue(1);
+        assertThat(secondOpens).hasValue(0);
+        assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
     void testDirectPageSourceWrappedIoUsesCannotOpenSplit()
     {
         IOException failure = new IOException("direct page read failed");
@@ -2187,6 +2299,18 @@ public class PaimonPageSourceTest
         }
     }
 
+    private static Supplier<ConnectorPageSource> countingPageSourceSupplier(
+            AtomicInteger openCount,
+            ConnectorPageSource pageSource)
+    {
+        requireNonNull(openCount, "openCount is null");
+        requireNonNull(pageSource, "pageSource is null");
+        return () -> {
+            openCount.incrementAndGet();
+            return pageSource;
+        };
+    }
+
     private static class ClosableLazyPageSource
             implements ConnectorPageSource
     {
@@ -2385,17 +2509,18 @@ public class PaimonPageSourceTest
             implements ConnectorPageSource
     {
         private final Page page;
-        private final OptionalLong completedPositions;
+        private final OptionalLong completedPositionsBeforePage;
         private final long completedBytes;
         private final long readTimeNanos;
         private final CompletableFuture<?> blockedFuture = new CompletableFuture<>();
         private final Metrics metrics = new Metrics(Map.of("merge-wrapper", new LongCount(11)));
+        private boolean returned;
 
-        private DelegatingStatePageSource(Page page, OptionalLong completedPositions, long completedBytes,
+        private DelegatingStatePageSource(Page page, OptionalLong completedPositionsBeforePage, long completedBytes,
                 long readTimeNanos)
         {
             this.page = requireNonNull(page, "page is null");
-            this.completedPositions = requireNonNull(completedPositions, "completedPositions is null");
+            this.completedPositionsBeforePage = requireNonNull(completedPositionsBeforePage, "completedPositionsBeforePage is null");
             this.completedBytes = completedBytes;
             this.readTimeNanos = readTimeNanos;
         }
@@ -2409,7 +2534,13 @@ public class PaimonPageSourceTest
         @Override
         public OptionalLong getCompletedPositions()
         {
-            return completedPositions;
+            if (completedPositionsBeforePage.isEmpty()) {
+                return OptionalLong.empty();
+            }
+            if (!returned) {
+                return completedPositionsBeforePage;
+            }
+            return OptionalLong.of(completedPositionsBeforePage.getAsLong() + page.getPositionCount());
         }
 
         @Override
@@ -2421,12 +2552,16 @@ public class PaimonPageSourceTest
         @Override
         public boolean isFinished()
         {
-            return false;
+            return returned;
         }
 
         @Override
         public Page getNextPage()
         {
+            if (returned) {
+                return null;
+            }
+            returned = true;
             return page;
         }
 
