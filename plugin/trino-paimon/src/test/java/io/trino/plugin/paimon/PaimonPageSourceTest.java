@@ -1358,21 +1358,15 @@ public class PaimonPageSourceTest
     @Test
     void testNestedPageSourceConversionExceptionsAreNotRewrapped()
     {
-        io.trino.spi.type.ArrayType arrayType = new io.trino.spi.type.ArrayType(INTEGER);
-        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(new GenericRow(0)), List.of(),
-                OptionalLong.empty())
-        {
-            @Override
-            protected void appendTo(Type type, DataType logicalType, Object value, BlockBuilder output)
-            {
-                throw new IllegalArgumentException("nested metadata mismatch");
-            }
-        };
+        RowType rowType = RowType.anonymous(List.of(INTEGER));
 
-        assertThatThrownBy(() -> pageSource.writeBlock(arrayType.createBlockBuilder(null, 1), arrayType,
-                DataTypes.ARRAY(DataTypes.INT()), new GenericArray(new int[] {1})))
+        assertThatThrownBy(() -> appendSingleColumn(rowType,
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.INT()),
+                        DataTypes.FIELD(1, "name", DataTypes.STRING())),
+                GenericRow.of(1)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("nested metadata mismatch");
+                .hasMessage("Paimon ROW field count mismatch: expected 2, got 1");
     }
 
     @Test
@@ -1418,11 +1412,9 @@ public class PaimonPageSourceTest
     void testPageSourceArrayConversionRequiresArrayOrVectorLogicalType()
     {
         io.trino.spi.type.ArrayType arrayType = new io.trino.spi.type.ArrayType(INTEGER);
-        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(new GenericRow(0)), List.of(),
-                OptionalLong.empty());
 
-        assertThatThrownBy(() -> pageSource.writeBlock(arrayType.createBlockBuilder(null, 1), arrayType,
-                DataTypes.MAP(DataTypes.INT(), DataTypes.INT()), new GenericArray(new int[] {1})))
+        assertThatThrownBy(() -> appendSingleColumn(arrayType, DataTypes.MAP(DataTypes.INT(), DataTypes.INT()),
+                new GenericArray(new int[] {1})))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("Paimon ARRAY or VECTOR logical type metadata is required");
     }
@@ -1432,15 +1424,12 @@ public class PaimonPageSourceTest
     {
         RowType rowType = RowType.anonymous(List.of(INTEGER));
         GenericRow row = GenericRow.of(1);
-        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(new GenericRow(0)), List.of(),
-                OptionalLong.empty());
 
-        assertThatThrownBy(() -> pageSource.writeBlock(rowType.createBlockBuilder(null, 1), rowType,
-                DataTypes.ARRAY(DataTypes.INT()), row))
+        assertThatThrownBy(() -> appendSingleColumn(rowType, DataTypes.ARRAY(DataTypes.INT()), row))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("Paimon ROW logical type metadata is required");
 
-        assertThatThrownBy(() -> pageSource.writeBlock(rowType.createBlockBuilder(null, 1), rowType,
+        assertThatThrownBy(() -> appendSingleColumn(rowType,
                 DataTypes.ROW(
                         DataTypes.FIELD(0, "id", DataTypes.INT()),
                         DataTypes.FIELD(1, "name", DataTypes.STRING())),
@@ -1453,11 +1442,8 @@ public class PaimonPageSourceTest
     void testPageSourceMultisetConversionRequiresIntegerCountType()
     {
         MapType multisetType = new MapType(VARCHAR, BIGINT, new TypeOperators());
-        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(new GenericRow(0)), List.of(),
-                OptionalLong.empty());
 
-        assertThatThrownBy(() -> pageSource.writeBlock(multisetType.createBlockBuilder(null, 1), multisetType,
-                DataTypes.MULTISET(DataTypes.STRING()),
+        assertThatThrownBy(() -> appendSingleColumn(multisetType, DataTypes.MULTISET(DataTypes.STRING()),
                 new GenericMap(Map.of(BinaryString.fromString("red"), 2))))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("Paimon MULTISET requires Trino integer count type metadata");
@@ -1466,24 +1452,21 @@ public class PaimonPageSourceTest
     @Test
     void testGetNextPageMapsUnsupportedReadFeaturesToNotSupported()
     {
-        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(GenericRow.of(1)), List.of(
-                PaimonColumnHandle.of("payload", DataTypes.INT())),
-                OptionalLong.empty())
-        {
-            @Override
-            protected void appendTo(Type type, DataType logicalType, Object value, BlockBuilder output)
-            {
-                throw new UnsupportedOperationException("Paimon MULTISET requires Trino integer count type metadata");
-            }
-        };
+        UnsupportedOperationException failure =
+                new UnsupportedOperationException("Paimon MULTISET requires Trino integer count type metadata");
+        AtomicBoolean readerClosed = new AtomicBoolean();
+        PaimonPageSource pageSource = new PaimonPageSource(
+                new FailingRecordReader(failure, null, readerClosed),
+                List.of(PaimonColumnHandle.of("payload", DataTypes.INT())),
+                OptionalLong.empty());
 
         assertThatThrownBy(pageSource::getNextPage)
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessage("Paimon page read uses features which are not supported by the Trino connector");
-                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
-                            .hasMessage("Paimon MULTISET requires Trino integer count type metadata");
+                    assertThat(exception.getCause()).isSameAs(failure);
                 });
+        assertThat(readerClosed).isTrue();
     }
 
     @Test
@@ -2116,6 +2099,12 @@ public class PaimonPageSourceTest
         return java.util.stream.IntStream.range(0, vectorBlock.getPositionCount())
                 .mapToObj(position -> TypeUtils.readNativeValue(elementType, vectorBlock, position))
                 .toList();
+    }
+
+    private static void appendSingleColumn(Type type, DataType logicalType, Object value)
+    {
+        PaimonPageBuilder pageBuilder = new PaimonPageBuilder(List.of(type), List.of(logicalType));
+        pageBuilder.appendRow(GenericRow.of(value));
     }
 
     private static FileStoreTable fileStoreTable()

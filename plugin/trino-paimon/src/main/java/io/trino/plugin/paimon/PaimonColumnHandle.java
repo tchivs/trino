@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.plugin.paimon.PaimonTypeUtils.containsVariant;
 import static io.trino.spi.type.StandardTypes.JSON;
 import static java.util.Objects.requireNonNull;
 
@@ -113,18 +114,6 @@ public final class PaimonColumnHandle
     public void rejectUnknownJsonField(String name, Object value)
     {
         PaimonHandleJsonUtils.rejectUnknownHandleJsonField("PaimonColumnHandle", name, value);
-    }
-
-    private static boolean containsVariant(DataType type)
-    {
-        if (type.getTypeRoot() == DataTypeRoot.VARIANT) {
-            return true;
-        }
-        return switch (type.getTypeRoot()) {
-            case ARRAY, MAP, MULTISET, ROW, VECTOR -> DataTypeChecks.getNestedTypes(type).stream()
-                    .anyMatch(PaimonColumnHandle::containsVariant);
-            default -> false;
-        };
     }
 
     static boolean matchesTrinoType(DataType logicalType, Type trinoType)

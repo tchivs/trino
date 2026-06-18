@@ -50,6 +50,7 @@ import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
+import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataIncrement;
 import org.apache.paimon.manifest.PartitionEntry;
@@ -822,7 +823,9 @@ public class PaimonMetadataTableModeTest
 
         assertThat(metadata.getInsertLayout(session, tableHandle)).isPresent();
 
-        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.FORMAT_PROVIDER, "trino"));
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(catalog.initialized).isTrue();
     }
@@ -928,7 +931,9 @@ public class PaimonMetadataTableModeTest
         assertThat(metadata.beginMerge(session, tableHandle, RetryMode.NO_RETRIES))
                 .isInstanceOf(PaimonMergeTableHandle.class);
 
-        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.FORMAT_PROVIDER, "trino"));
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(catalog.initialized).isTrue();
     }
@@ -1002,7 +1007,9 @@ public class PaimonMetadataTableModeTest
         assertThat(metadata.finishInsert(session, tableHandle, List.of(commitFragment()), List.of()))
                 .isEmpty();
 
-        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.FORMAT_PROVIDER, "trino"));
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(committed).isTrue();
         assertThat(catalog.initialized).isTrue();
@@ -3663,7 +3670,7 @@ public class PaimonMetadataTableModeTest
                         yield fileStoreTable(bucketMode, copiedWithLatestSchema, latestRowType, latestRowType,
                                 partitionKeys, primaryKeys, bucketKey);
                     }
-                    case "copy" -> proxy;
+                    case "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
@@ -3706,8 +3713,7 @@ public class PaimonMetadataTableModeTest
                             }
                         };
                     }
-                    case "copyWithLatestSchema" -> proxy;
-                    case "copy" -> proxy;
+                    case "copyWithLatestSchema", "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "non-serializable-schema-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
@@ -3734,7 +3740,7 @@ public class PaimonMetadataTableModeTest
                         copiedWithLatestSchema.set(true);
                         yield rowTrackingFileStoreTable(copiedWithLatestSchema, latestRowType);
                     }
-                    case "copy" -> proxy;
+                    case "copy", "copyWithoutTimeTravel" -> proxy;
                     case "options" -> Map.of(CoreOptions.ROW_TRACKING_ENABLED.key(), "true");
                     case "coreOptions" -> new CoreOptions(new Options(Map.of(CoreOptions.ROW_TRACKING_ENABLED.key(), "true")));
                     case "toString" -> "testing-row-tracking-file-store-table";
@@ -3765,7 +3771,7 @@ public class PaimonMetadataTableModeTest
                         copiedWithLatestSchema.set(true);
                         yield sequenceNumberEnabledFileStoreTable(copiedWithLatestSchema, latestRowType);
                     }
-                    case "copy" -> proxy;
+                    case "copy", "copyWithoutTimeTravel" -> proxy;
                     case "options" -> options;
                     case "coreOptions" -> new CoreOptions(new Options(
                             Map.of(CoreOptions.TABLE_READ_SEQUENCE_NUMBER_ENABLED.key(), "true")));
@@ -4028,7 +4034,7 @@ public class PaimonMetadataTableModeTest
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "newBatchWriteBuilder" -> batchWriteBuilder;
-                    case "copyWithLatestSchema", "copy" -> proxy;
+                    case "copyWithLatestSchema", "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "latest-truncate-testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
@@ -4041,7 +4047,7 @@ public class PaimonMetadataTableModeTest
                         copiedWithLatestSchema.set(true);
                         yield latestTableRef.get();
                     }
-                    case "copy" -> proxy;
+                    case "copy", "copyWithoutTimeTravel" -> proxy;
                     case "newBatchWriteBuilder" -> throw new AssertionError(
                             "stale FileStoreTable should not create BatchWriteBuilder before latest-schema refresh");
                     case "toString" -> "stale-truncate-testing-file-store-table";
@@ -4078,7 +4084,7 @@ public class PaimonMetadataTableModeTest
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "newBatchWriteBuilder" -> batchWriteBuilder;
-                    case "copyWithLatestSchema", "copy" -> proxy;
+                    case "copyWithLatestSchema", "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "latest-failing-truncate-testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
@@ -4091,7 +4097,7 @@ public class PaimonMetadataTableModeTest
                         copiedWithLatestSchema.set(true);
                         yield latestTableRef.get();
                     }
-                    case "copy" -> proxy;
+                    case "copy", "copyWithoutTimeTravel" -> proxy;
                     case "newBatchWriteBuilder" -> throw new AssertionError(
                             "stale FileStoreTable should not create BatchWriteBuilder before latest-schema refresh");
                     case "toString" -> "stale-failing-truncate-testing-file-store-table";

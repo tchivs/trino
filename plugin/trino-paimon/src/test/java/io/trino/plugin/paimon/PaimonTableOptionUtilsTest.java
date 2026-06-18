@@ -14,6 +14,7 @@
 package io.trino.plugin.paimon;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.api.Test;
@@ -161,6 +162,7 @@ public class PaimonTableOptionUtilsTest
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.INCREMENTAL_BETWEEN.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_IGNORE_LOST_FILE.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_MANIFEST_PARALLELISM.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(FileFormatProvider.FORMAT_PROVIDER)).isTrue();
 
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_FALLBACK_BRANCH.key())).isFalse();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key())).isFalse();
