@@ -58,7 +58,6 @@ import io.trino.spi.type.Type;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.deletionvectors.DeletionVector;
 import org.apache.paimon.fileindex.FileIndexPredicate;
-import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.schema.SchemaManager;
@@ -107,7 +106,6 @@ import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_BAD_DATA;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CURSOR_ERROR;
-import static io.trino.plugin.paimon.format.TrinoPaimonFileFormatProvider.IDENTIFIER;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.fileindex.FileIndexOptions.topLevelIndexOfNested;
@@ -395,10 +393,6 @@ public class PaimonPageSourceProvider
         RowType paimonReadType = isIdentityProjection(columnIndex, fieldNames.size())
                 ? rowType
                 : rowType.project(columnIndex);
-        if (readTable instanceof FileStoreTable && canUseTrinoFormatReader(paimonReadType)) {
-            readTable = readTable.copy(Map.of(FileFormatProvider.READ_FORMAT_PROVIDER, IDENTIFIER));
-        }
-
         ReadBuilder read = readTable.newReadBuilder();
         paimonFilter.ifPresent(read::withFilter);
         if (!readTable.rowType().equals(paimonReadType)) {
@@ -434,14 +428,6 @@ public class PaimonPageSourceProvider
                 .filter(field -> readFieldNames.add(FieldNameUtils.toLowerCase(field)))
                 .forEach(readFields::add);
         return List.copyOf(readFields);
-    }
-
-    static boolean canUseTrinoFormatReader(RowType paimonReadType)
-    {
-        requireNonNull(paimonReadType, "paimonReadType is null");
-        return paimonReadType.getFields().stream()
-                .map(field -> field.type())
-                .noneMatch(PaimonTypeUtils::containsUnsupportedTrinoFormatProviderReadType);
     }
 
     static TupleDomain<PaimonColumnHandle> readerFilter(TupleDomain<PaimonColumnHandle> filter)

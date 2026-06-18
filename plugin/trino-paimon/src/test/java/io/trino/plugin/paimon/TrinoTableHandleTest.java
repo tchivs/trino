@@ -139,6 +139,52 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testTableWithDynamicOptionsUsesTrinoReadProviderForFileStoreTables()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of("custom.option", "value"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
+        FileStoreTable table = capturingReadFileStoreTable(copiedOptions);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(SCAN_TAG, "tag-2"))
+                .build();
+
+        assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, session)).isSameAs(table);
+        assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                CoreOptions.SCAN_TAG_NAME.key(), "tag-2",
+                FileFormatProvider.READ_FORMAT_PROVIDER, "trino"));
+    }
+
+    @Test
+    public void testTableWithDynamicOptionsUsesPluginContextClassLoader()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        AtomicReference<ClassLoader> copyContextClassLoader = new AtomicReference<>();
+        FileStoreTable table = contextCapturingFileStoreTable("copy", copyContextClassLoader);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        ClassLoader previous = Thread.currentThread().getContextClassLoader();
+        ClassLoader sentinel = new ClassLoader(null) {};
+        Thread.currentThread().setContextClassLoader(sentinel);
+        try {
+            assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, SESSION)).isSameAs(table);
+            assertThat(copyContextClassLoader.get()).isSameAs(PaimonTableHandle.class.getClassLoader());
+            assertThat(Thread.currentThread().getContextClassLoader()).isSameAs(sentinel);
+        }
+        finally {
+            Thread.currentThread().setContextClassLoader(previous);
+        }
+    }
+
+    @Test
     public void testTableWithDynamicOptionsMergesPaimon15SessionCreationTimeOptions()
             throws Exception
     {
@@ -309,6 +355,29 @@ public class TrinoTableHandleTest
                 FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
     }
 
+    @Test
+    public void testTableWithWriteDynamicOptionsUsesPluginContextClassLoader()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        AtomicReference<ClassLoader> copyContextClassLoader = new AtomicReference<>();
+        FileStoreTable table = contextCapturingFileStoreTable("copyWithoutTimeTravel", copyContextClassLoader);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        ClassLoader previous = Thread.currentThread().getContextClassLoader();
+        ClassLoader sentinel = new ClassLoader(null) {};
+        Thread.currentThread().setContextClassLoader(sentinel);
+        try {
+            assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
+            assertThat(copyContextClassLoader.get()).isSameAs(PaimonTableHandle.class.getClassLoader());
+            assertThat(Thread.currentThread().getContextClassLoader()).isSameAs(sentinel);
+        }
+        finally {
+            Thread.currentThread().setContextClassLoader(previous);
+        }
+    }
+
     private static void assertSessionScanSelectionMerged(
             Map<String, Object> sessionProperties,
             Map<String, String> expectedDynamicOptions)
@@ -396,7 +465,7 @@ public class TrinoTableHandleTest
     }
 
     @Test
-    public void testTableWithWriteDynamicOptionsSkipsTrinoProviderForVariantWriteColumns()
+    public void testTableWithWriteDynamicOptionsUsesTrinoProviderForVariantWriteColumns()
             throws Exception
     {
         PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of("custom.option", "value"),
@@ -410,11 +479,13 @@ public class TrinoTableHandleTest
         setCachedTable(handle, TESTING_CATALOG, table);
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
-        assertThat(copiedOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
     }
 
     @Test
-    public void testTableWithWriteDynamicOptionsSkipsTrinoProviderForNestedVariantWriteColumns()
+    public void testTableWithWriteDynamicOptionsUsesTrinoProviderForNestedVariantWriteColumns()
             throws Exception
     {
         PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of("custom.option", "value"),
@@ -431,7 +502,9 @@ public class TrinoTableHandleTest
         setCachedTable(handle, TESTING_CATALOG, table);
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
-        assertThat(copiedOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
     }
 
     @Test
@@ -626,6 +699,29 @@ public class TrinoTableHandleTest
                 .containsEntry("bucket_key", "id")
                 .containsEntry("vector_file_format", "lance")
                 .doesNotContainKey("scan_version");
+    }
+
+    @Test
+    public void testTableUsesPluginContextClassLoader()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of("custom.option", "value"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        AtomicReference<ClassLoader> copyContextClassLoader = new AtomicReference<>();
+        FileStoreTable table = contextCapturingFileStoreTable("copy", copyContextClassLoader);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        ClassLoader previous = Thread.currentThread().getContextClassLoader();
+        ClassLoader sentinel = new ClassLoader(null) {};
+        Thread.currentThread().setContextClassLoader(sentinel);
+        try {
+            assertThat(handle.table(TESTING_CATALOG)).isSameAs(table);
+            assertThat(copyContextClassLoader.get()).isSameAs(PaimonTableHandle.class.getClassLoader());
+            assertThat(Thread.currentThread().getContextClassLoader()).isSameAs(sentinel);
+        }
+        finally {
+            Thread.currentThread().setContextClassLoader(previous);
+        }
     }
 
     @Test
@@ -1268,6 +1364,58 @@ public class TrinoTableHandleTest
                     }
                     if (method.getName().equals("toString")) {
                         return "capturingFileStoreTable";
+                    }
+                    if (method.getName().equals("hashCode")) {
+                        return System.identityHashCode(proxy);
+                    }
+                    if (method.getName().equals("equals")) {
+                        return proxy == args[0];
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
+        tableReference.set(table);
+        return table;
+    }
+
+    private static FileStoreTable capturingReadFileStoreTable(AtomicReference<Map<String, String>> copiedOptions)
+    {
+        AtomicReference<FileStoreTable> tableReference = new AtomicReference<>();
+        FileStoreTable table = (FileStoreTable) Proxy.newProxyInstance(
+                FileStoreTable.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("copy")) {
+                        copiedOptions.set(Map.copyOf((Map<String, String>) args[0]));
+                        return tableReference.get();
+                    }
+                    if (method.getName().equals("toString")) {
+                        return "capturingReadFileStoreTable";
+                    }
+                    if (method.getName().equals("hashCode")) {
+                        return System.identityHashCode(proxy);
+                    }
+                    if (method.getName().equals("equals")) {
+                        return proxy == args[0];
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
+        tableReference.set(table);
+        return table;
+    }
+
+    private static FileStoreTable contextCapturingFileStoreTable(String copyMethodName, AtomicReference<ClassLoader> copyContextClassLoader)
+    {
+        AtomicReference<FileStoreTable> tableReference = new AtomicReference<>();
+        FileStoreTable table = (FileStoreTable) Proxy.newProxyInstance(
+                FileStoreTable.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals(copyMethodName)) {
+                        copyContextClassLoader.set(Thread.currentThread().getContextClassLoader());
+                        return tableReference.get();
+                    }
+                    if (method.getName().equals("toString")) {
+                        return "contextCapturingFileStoreTable";
                     }
                     if (method.getName().equals("hashCode")) {
                         return System.identityHashCode(proxy);

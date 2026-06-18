@@ -29,10 +29,14 @@ import org.apache.paimon.format.FormatWriter;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.fs.local.LocalFileIO;
+import org.apache.paimon.io.DataFileRecordReader;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.reader.FileRecordReader;
+import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.FormatReaderMapping;
 import org.apache.paimon.utils.RoaringBitmap32;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -40,6 +44,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -83,6 +88,14 @@ public class TestTrinoPaimonFileFormatProvider
     }
 
     @Test
+    void testTrinoReaderWorksWithPaimonSchemaEvolutionMapping()
+            throws Exception
+    {
+        assertTrinoReaderWorksWithPaimonSchemaEvolutionMapping("parquet", "snappy");
+        assertTrinoReaderWorksWithPaimonSchemaEvolutionMapping("orc", "zstd");
+    }
+
+    @Test
     void testTrinoReaderRejectsPaimonSpecialTypes()
     {
         FileFormat trinoReadFormat = FileFormat.readerFromIdentifier("parquet", trinoReadProviderOptions());
@@ -91,6 +104,28 @@ public class TestTrinoPaimonFileFormatProvider
         assertThatThrownBy(() -> trinoReadFormat.createReaderFactory(rowType, rowType, new ArrayList<>()))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
+    }
+
+    @Test
+    void testTrinoWriterRejectsPaimonSpecialTypes()
+    {
+        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", trinoProviderOptions());
+        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.BLOB()));
+
+        assertThatThrownBy(() -> trinoWriteFormat.createWriterFactory(rowType))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
+    }
+
+    @Test
+    void testTrinoWriterRejectsPaimonVariant()
+    {
+        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", trinoProviderOptions());
+        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.VARIANT()));
+
+        assertThatThrownBy(() -> trinoWriteFormat.createWriterFactory(rowType))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
     }
 
     private void assertRoundTrip(String formatIdentifier, String compression)
@@ -159,6 +194,91 @@ public class TestTrinoPaimonFileFormatProvider
                         new PositionedRow(2, canonicalRows.get(2)));
     }
 
+    private void assertTrinoReaderWorksWithPaimonSchemaEvolutionMapping(String formatIdentifier, String compression)
+            throws Exception
+    {
+        TableSchema dataSchema = tableSchema(
+                1,
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "old_name", DataTypes.STRING()),
+                        DataTypes.FIELD(1, "old_amount", DataTypes.INT())));
+        TableSchema tableSchema = tableSchema(
+                2,
+                DataTypes.ROW(
+                        DataTypes.FIELD(1, "amount", DataTypes.BIGINT()),
+                        DataTypes.FIELD(2, "new_comment", DataTypes.STRING()),
+                        DataTypes.FIELD(0, "name", DataTypes.STRING())));
+        RowType tableRowType = tableSchema.logicalRowType();
+        Path file = new Path(tempDir.resolve("schema-evolution-data." + formatIdentifier).toUri().toString());
+        LocalFileIO fileIO = LocalFileIO.create();
+
+        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
+        try (PositionOutputStream out = fileIO.newOutputStream(file, false);
+                FormatWriter writer = trinoWriteFormat.createWriterFactory(dataSchema.logicalRowType()).create(out, compression)) {
+            writer.addElement(GenericRow.of(BinaryString.fromString("alpha"), 12));
+            writer.addElement(GenericRow.of(BinaryString.fromString("beta"), 34));
+        }
+
+        FormatReaderMapping mapping = new FormatReaderMapping.Builder(
+                identifier -> FileFormat.readerFromIdentifier(identifier, trinoReadProviderOptions()),
+                tableSchema.fields(),
+                TableSchema::fields,
+                new ArrayList<>(),
+                null,
+                null)
+                .build(formatIdentifier, tableSchema, dataSchema);
+        InternalRowSerializer serializer = new InternalRowSerializer(tableRowType);
+
+        try (FileRecordReader<InternalRow> reader = new DataFileRecordReader(
+                tableRowType,
+                mapping.getReaderFactory(),
+                new FormatReaderContext(fileIO, file, fileIO.getFileSize(file)),
+                false,
+                false,
+                mapping.getIndexMapping(),
+                mapping.getCastMapping(),
+                null,
+                false,
+                null,
+                0,
+                mapping.getSystemFields())) {
+            List<InternalRow> rows = new ArrayList<>();
+            reader.forEachRemaining(row -> rows.add(serializer.toBinaryRow(row).copy()));
+
+            assertThat(rows).hasSize(2);
+            assertThat(rows.get(0).getLong(0)).isEqualTo(12L);
+            assertThat(rows.get(0).isNullAt(1)).isTrue();
+            assertThat(rows.get(0).getString(2)).isEqualTo(BinaryString.fromString("alpha"));
+            assertThat(rows.get(1).getLong(0)).isEqualTo(34L);
+            assertThat(rows.get(1).isNullAt(1)).isTrue();
+            assertThat(rows.get(1).getString(2)).isEqualTo(BinaryString.fromString("beta"));
+        }
+
+        RoaringBitmap32 selection = new RoaringBitmap32();
+        selection.add(1);
+        try (FileRecordReader<InternalRow> reader = new DataFileRecordReader(
+                tableRowType,
+                mapping.getReaderFactory(),
+                new FormatReaderContext(fileIO, file, fileIO.getFileSize(file), selection),
+                false,
+                false,
+                mapping.getIndexMapping(),
+                mapping.getCastMapping(),
+                null,
+                false,
+                null,
+                0,
+                mapping.getSystemFields())) {
+            List<InternalRow> rows = new ArrayList<>();
+            reader.forEachRemaining(row -> rows.add(serializer.toBinaryRow(row).copy()));
+
+            assertThat(rows).hasSize(1);
+            assertThat(rows.get(0).getLong(0)).isEqualTo(34L);
+            assertThat(rows.get(0).isNullAt(1)).isTrue();
+            assertThat(rows.get(0).getString(2)).isEqualTo(BinaryString.fromString("beta"));
+        }
+    }
+
     private static Options trinoProviderOptions()
     {
         Options options = new Options();
@@ -189,6 +309,21 @@ public class TestTrinoPaimonFileFormatProvider
                         DataTypes.ROW(
                                 DataTypes.FIELD(7, "flag", DataTypes.BOOLEAN()),
                                 DataTypes.FIELD(8, "note", DataTypes.STRING()))));
+    }
+
+    private static TableSchema tableSchema(long id, RowType rowType)
+    {
+        return new TableSchema(
+                id,
+                rowType.getFields(),
+                rowType.getFields().stream()
+                        .mapToInt(DataField::id)
+                        .max()
+                        .orElse(0),
+                Collections.emptyList(),
+                Collections.emptyList(),
+                Collections.emptyMap(),
+                null);
     }
 
     private static List<GenericRow> rows()
