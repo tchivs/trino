@@ -32,6 +32,7 @@ import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.options.ConfigOption;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
@@ -51,6 +52,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.plugin.paimon.format.TrinoPaimonFileFormatProvider.IDENTIFIER;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -304,6 +306,11 @@ public class PaimonTableHandle
 
         Map<String, String> dynamicOptions = new HashMap<>(this.dynamicOptions);
         dynamicOptions.keySet().removeIf(PaimonTableOptionUtils::isRuntimeOnlyPaimonOptionKey);
+        if (writeColumns.isEmpty() || writeColumns.get().stream()
+                .map(PaimonColumnHandle::logicalType)
+                .noneMatch(PaimonTypeUtils::containsVariant)) {
+            dynamicOptions.put(FileFormatProvider.FORMAT_PROVIDER, IDENTIFIER);
+        }
         return requireSupportedTable(!dynamicOptions.isEmpty()
                 ? fileStoreTable.copyWithoutTimeTravel(dynamicOptions)
                 : fileStoreTable);

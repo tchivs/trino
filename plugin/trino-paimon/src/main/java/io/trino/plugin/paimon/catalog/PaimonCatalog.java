@@ -31,6 +31,7 @@ import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.catalog.TableQueryAuthResult;
+import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.function.Function;
 import org.apache.paimon.function.FunctionChange;
 import org.apache.paimon.options.Options;
@@ -55,6 +56,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import static io.trino.plugin.paimon.format.TrinoPaimonFileFormatProvider.IDENTIFIER;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.options.CatalogOptions.RESOLVING_FILE_IO_ENABLED;
 
@@ -98,6 +100,9 @@ public class PaimonCatalog
             // when Hadoop is not on the classpath. Use the string key instead.
             Map<String, String> catalogOptionMap = new HashMap<>(options.toMap());
             catalogOptionMap.put("hadoop-load-default-config", "false");
+            catalogOptionMap.put(
+                    Catalog.TABLE_RUNTIME_OPTION_PREFIX + FileFormatProvider.FORMAT_PROVIDER,
+                    IDENTIFIER);
             Options catalogOptions = Options.fromMap(catalogOptionMap);
             catalogOptions.set(RESOLVING_FILE_IO_ENABLED, false);
             CatalogContext catalogContext = CatalogContext.create(catalogOptions,

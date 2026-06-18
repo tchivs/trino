@@ -26,6 +26,7 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
@@ -228,7 +229,9 @@ public class PaimonPageSinkProviderTest
                 null);
 
         assertThat(pageSink).isNotNull();
-        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.FORMAT_PROVIDER, "trino"));
         assertThat(copiedWithLatestSchema).isTrue();
     }
 
@@ -812,6 +815,7 @@ public class PaimonPageSinkProviderTest
                         copiedWithLatestSchema.set(true);
                         yield proxy;
                     }
+                    case "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });

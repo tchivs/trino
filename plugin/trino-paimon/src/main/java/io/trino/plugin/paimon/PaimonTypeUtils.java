@@ -34,7 +34,9 @@ import org.apache.paimon.types.BooleanType;
 import org.apache.paimon.types.CharType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeChecks;
 import org.apache.paimon.types.DataTypeDefaultVisitor;
+import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.DateType;
 import org.apache.paimon.types.DecimalType;
@@ -82,6 +84,19 @@ public class PaimonTypeUtils
     public static DataType toPaimonType(Type trinoType)
     {
         return new TrinoToPaimonTypeVistor().visit(requireNonNull(trinoType, "trinoType is null"));
+    }
+
+    public static boolean containsVariant(DataType type)
+    {
+        requireNonNull(type, "type is null");
+        if (type.getTypeRoot() == DataTypeRoot.VARIANT) {
+            return true;
+        }
+        return switch (type.getTypeRoot()) {
+            case ARRAY, MAP, MULTISET, ROW, VECTOR -> DataTypeChecks.getNestedTypes(type).stream()
+                    .anyMatch(PaimonTypeUtils::containsVariant);
+            default -> false;
+        };
     }
 
     private static class PaimonToTrinoTypeVistor

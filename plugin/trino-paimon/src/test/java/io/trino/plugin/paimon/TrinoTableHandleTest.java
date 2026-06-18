@@ -30,6 +30,7 @@ import io.trino.type.TypeDeserializer;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
@@ -303,7 +304,9 @@ public class TrinoTableHandleTest
         setCachedTable(handle, TESTING_CATALOG, table);
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
-        assertThat(copiedOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.FORMAT_PROVIDER, "trino"));
     }
 
     private static void assertSessionScanSelectionMerged(
@@ -342,7 +345,9 @@ public class TrinoTableHandleTest
         setCachedTable(handle, TESTING_CATALOG, table);
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
-        assertThat(copiedOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.FORMAT_PROVIDER, "trino"));
     }
 
     @Test
@@ -362,7 +367,9 @@ public class TrinoTableHandleTest
         setCachedTable(handle, TESTING_CATALOG, table);
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
-        assertThat(copiedOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+        assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.FORMAT_PROVIDER, "trino"));
     }
 
     @Test
@@ -377,6 +384,47 @@ public class TrinoTableHandleTest
                 CoreOptions.STREAMING_READ_OVERWRITE.key(), "true");
         PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
                 Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
+        FileStoreTable table = capturingFileStoreTable(copiedOptions);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
+        assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "custom.option", "value",
+                FileFormatProvider.FORMAT_PROVIDER, "trino"));
+    }
+
+    @Test
+    public void testTableWithWriteDynamicOptionsSkipsTrinoProviderForVariantWriteColumns()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of("custom.option", "value"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty())
+                .withWriteColumns(List.of(
+                        PaimonColumnHandle.of("id", DataTypes.INT()),
+                        PaimonColumnHandle.of("payload", DataTypes.VARIANT(), TESTING_TYPE_MANAGER)));
+
+        AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
+        FileStoreTable table = capturingFileStoreTable(copiedOptions);
+        setCachedTable(handle, TESTING_CATALOG, table);
+
+        assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
+        assertThat(copiedOptions.get()).containsExactlyEntriesOf(Map.of("custom.option", "value"));
+    }
+
+    @Test
+    public void testTableWithWriteDynamicOptionsSkipsTrinoProviderForNestedVariantWriteColumns()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of("custom.option", "value"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty())
+                .withWriteColumns(List.of(
+                        PaimonColumnHandle.of("id", DataTypes.INT()),
+                        PaimonColumnHandle.of(
+                                "payloads",
+                                DataTypes.ARRAY(DataTypes.VARIANT()),
+                                TESTING_TYPE_MANAGER)));
 
         AtomicReference<Map<String, String>> copiedOptions = new AtomicReference<>();
         FileStoreTable table = capturingFileStoreTable(copiedOptions);
