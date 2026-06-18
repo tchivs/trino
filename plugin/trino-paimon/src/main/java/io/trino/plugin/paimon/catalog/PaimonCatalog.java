@@ -47,6 +47,7 @@ import org.apache.paimon.view.View;
 import org.apache.paimon.view.ViewChange;
 
 import java.security.Principal;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -56,7 +57,6 @@ import java.util.concurrent.ConcurrentMap;
 
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.options.CatalogOptions.RESOLVING_FILE_IO_ENABLED;
-import static org.apache.paimon.utils.HadoopUtils.HADOOP_LOAD_DEFAULT_CONFIG;
 
 public class PaimonCatalog
         implements
@@ -93,8 +93,12 @@ public class PaimonCatalog
     {
         return ClassLoaderUtils.runWithContextClassLoader(() -> {
             TrinoFileSystem trinoFileSystem = paimonFileSystemFactory.create(connectorSession);
-            Options catalogOptions = Options.fromMap(options.toMap());
-            catalogOptions.set(HADOOP_LOAD_DEFAULT_CONFIG, false);
+            // Avoid referencing HadoopUtils.HADOOP_LOAD_DEFAULT_CONFIG directly, as loading
+            // HadoopUtils triggers NoClassDefFoundError for org.apache.hadoop.conf.Configuration
+            // when Hadoop is not on the classpath. Use the string key instead.
+            Map<String, String> catalogOptionMap = new HashMap<>(options.toMap());
+            catalogOptionMap.put("hadoop-load-default-config", "false");
+            Options catalogOptions = Options.fromMap(catalogOptionMap);
             catalogOptions.set(RESOLVING_FILE_IO_ENABLED, false);
             CatalogContext catalogContext = CatalogContext.create(catalogOptions,
                     new PaimonFileIOLoader(trinoFileSystem), null);
