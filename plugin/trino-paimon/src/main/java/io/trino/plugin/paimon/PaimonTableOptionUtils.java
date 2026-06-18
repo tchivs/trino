@@ -63,6 +63,9 @@ public class PaimonTableOptionUtils
             CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(),
             CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(),
             FileFormatProvider.FORMAT_PROVIDER,
+            FileFormatProvider.READ_FORMAT_PROVIDER,
+            FileFormatProvider.WRITE_FORMAT_PROVIDER,
+            FileFormatProvider.VALIDATION_FORMAT_PROVIDER,
             CoreOptions.STREAMING_READ_SNAPSHOT_DELAY.key(),
             CoreOptions.STREAMING_READ_OVERWRITE.key(),
             CoreOptions.STREAMING_READ_APPEND_OVERWRITE.key());

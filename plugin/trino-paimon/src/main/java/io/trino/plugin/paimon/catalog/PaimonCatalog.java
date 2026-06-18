@@ -101,7 +101,7 @@ public class PaimonCatalog
             Map<String, String> catalogOptionMap = new HashMap<>(options.toMap());
             catalogOptionMap.put("hadoop-load-default-config", "false");
             catalogOptionMap.put(
-                    Catalog.TABLE_RUNTIME_OPTION_PREFIX + FileFormatProvider.FORMAT_PROVIDER,
+                    Catalog.TABLE_RUNTIME_OPTION_PREFIX + FileFormatProvider.VALIDATION_FORMAT_PROVIDER,
                     IDENTIFIER);
             Options catalogOptions = Options.fromMap(catalogOptionMap);
             catalogOptions.set(RESOLVING_FILE_IO_ENABLED, false);

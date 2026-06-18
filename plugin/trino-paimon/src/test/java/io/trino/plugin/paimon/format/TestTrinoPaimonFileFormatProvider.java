@@ -80,7 +80,7 @@ public class TestTrinoPaimonFileFormatProvider
         Path file = new Path(tempDir.resolve("data." + formatIdentifier).toUri().toString());
         LocalFileIO fileIO = LocalFileIO.create();
 
-        FileFormat trinoFormat = FileFormat.fromIdentifier(formatIdentifier, trinoProviderOptions());
+        FileFormat trinoFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
         try (PositionOutputStream out = fileIO.newOutputStream(file, false);
                 FormatWriter writer = trinoFormat.createWriterFactory(rowType).create(out, compression)) {
             for (GenericRow row : rows) {
@@ -97,7 +97,7 @@ public class TestTrinoPaimonFileFormatProvider
             throws IOException
     {
         TrackingPositionOutputStream out = new TrackingPositionOutputStream();
-        FileFormat trinoFormat = FileFormat.fromIdentifier(formatIdentifier, trinoProviderOptions());
+        FileFormat trinoFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
 
         trinoFormat.createWriterFactory(rowType()).create(out, compression).close();
 
@@ -110,7 +110,7 @@ public class TestTrinoPaimonFileFormatProvider
     private static Options trinoProviderOptions()
     {
         Options options = new Options();
-        options.setString(FileFormatProvider.FORMAT_PROVIDER, TrinoPaimonFileFormatProvider.IDENTIFIER);
+        options.setString(FileFormatProvider.WRITE_FORMAT_PROVIDER, TrinoPaimonFileFormatProvider.IDENTIFIER);
         options.set(CoreOptions.WRITE_BATCH_SIZE, 1);
         return options;
     }

@@ -306,7 +306,7 @@ public class TrinoTableHandleTest
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "custom.option", "value",
-                FileFormatProvider.FORMAT_PROVIDER, "trino"));
+                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
     }
 
     private static void assertSessionScanSelectionMerged(
@@ -347,7 +347,7 @@ public class TrinoTableHandleTest
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "custom.option", "value",
-                FileFormatProvider.FORMAT_PROVIDER, "trino"));
+                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
     }
 
     @Test
@@ -369,7 +369,7 @@ public class TrinoTableHandleTest
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "custom.option", "value",
-                FileFormatProvider.FORMAT_PROVIDER, "trino"));
+                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
     }
 
     @Test
@@ -392,7 +392,7 @@ public class TrinoTableHandleTest
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "custom.option", "value",
-                FileFormatProvider.FORMAT_PROVIDER, "trino"));
+                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
     }
 
     @Test
