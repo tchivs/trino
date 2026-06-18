@@ -58,6 +58,7 @@ import io.trino.spi.type.Type;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.deletionvectors.DeletionVector;
 import org.apache.paimon.fileindex.FileIndexPredicate;
+import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.schema.SchemaManager;
@@ -106,6 +107,7 @@ import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_BAD_DATA;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CURSOR_ERROR;
+import static io.trino.plugin.paimon.format.TrinoPaimonFileFormatProvider.IDENTIFIER;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.fileindex.FileIndexOptions.topLevelIndexOfNested;
@@ -388,18 +390,58 @@ public class PaimonPageSourceProvider
         RowType rowType = PaimonTableHandle.effectiveReadRowType(readTable);
         List<String> fieldNames = rowType.getFieldNames();
         Optional<Predicate> paimonFilter = new PaimonFilterConverter(rowType).convert(readerFilter);
-        int[] columnIndex = projectionIndexes(fieldNames, projectedFields);
-        RowType projectedReadType = isIdentityProjection(columnIndex, fieldNames.size())
+        List<String> readFields = readerFields(fieldNames, projectedFields, readerFilter);
+        int[] columnIndex = projectionIndexes(fieldNames, readFields);
+        RowType paimonReadType = isIdentityProjection(columnIndex, fieldNames.size())
                 ? rowType
                 : rowType.project(columnIndex);
+        if (readTable instanceof FileStoreTable && canUseTrinoFormatReader(paimonReadType)) {
+            readTable = readTable.copy(Map.of(FileFormatProvider.READ_FORMAT_PROVIDER, IDENTIFIER));
+        }
 
         ReadBuilder read = readTable.newReadBuilder();
         paimonFilter.ifPresent(read::withFilter);
-        if (!readTable.rowType().equals(projectedReadType)) {
-            read.withReadType(projectedReadType);
+        if (!readTable.rowType().equals(paimonReadType)) {
+            read.withReadType(paimonReadType);
         }
 
         return new PaimonPageSource(read.newRead().executeFilter().createReader(paimonSplit), columns, limit);
+    }
+
+    static List<String> readerFields(List<String> fieldNames, List<String> projectedFields, TupleDomain<PaimonColumnHandle> readerFilter)
+    {
+        requireNonNull(fieldNames, "fieldNames is null");
+        requireNonNull(projectedFields, "projectedFields is null");
+        requireNonNull(readerFilter, "readerFilter is null");
+        List<String> readFields = new ArrayList<>(projectedFields);
+        Set<String> readFieldNames = readFields.stream()
+                .map(field -> requireNonNull(field, "projectedFields contains null field"))
+                .map(FieldNameUtils::toLowerCase)
+                .collect(Collectors.toCollection(HashSet::new));
+        if (readerFilter.isNone() || readerFilter.isAll()) {
+            return List.copyOf(readFields);
+        }
+
+        Set<String> requiredFilterFields = readerFilter.getDomains()
+                .orElseThrow(() -> new IllegalStateException("Expected reader filter domains for non-trivial TupleDomain"))
+                .keySet().stream()
+                .map(PaimonColumnHandle::getColumnName)
+                .map(PaimonPageSourceProvider::requiredProjectedFieldName)
+                .collect(Collectors.toSet());
+        fieldNames.stream()
+                .map(field -> requireNonNull(field, "fieldNames contains null field"))
+                .filter(field -> requiredFilterFields.contains(FieldNameUtils.toLowerCase(field)))
+                .filter(field -> readFieldNames.add(FieldNameUtils.toLowerCase(field)))
+                .forEach(readFields::add);
+        return List.copyOf(readFields);
+    }
+
+    static boolean canUseTrinoFormatReader(RowType paimonReadType)
+    {
+        requireNonNull(paimonReadType, "paimonReadType is null");
+        return paimonReadType.getFields().stream()
+                .map(field -> field.type())
+                .noneMatch(PaimonTypeUtils::containsUnsupportedTrinoFormatProviderReadType);
     }
 
     static TupleDomain<PaimonColumnHandle> readerFilter(TupleDomain<PaimonColumnHandle> filter)
@@ -891,6 +933,22 @@ public class PaimonPageSourceProvider
     private ConnectorPageSource createDataPageSource(String format, TrinoInputFile inputFile,
             List<String> columns, List<Type> types, List<Domain> domains)
     {
+        return createNativeDataPageSource(format, inputFile, columns, types, domains, orcReaderOptions,
+                parquetReaderOptions);
+    }
+
+    public static ConnectorPageSource createNativeDataPageSource(String format, TrinoInputFile inputFile,
+            List<String> columns, List<Type> types, List<Domain> domains)
+    {
+        return createNativeDataPageSource(format, inputFile, columns, types, domains,
+                new OrcReaderOptions().withTinyStripeThreshold(DataSize.of(4, DataSize.Unit.KILOBYTE)),
+                new ParquetReaderOptions());
+    }
+
+    private static ConnectorPageSource createNativeDataPageSource(String format, TrinoInputFile inputFile,
+            List<String> columns, List<Type> types, List<Domain> domains, OrcReaderOptions orcReaderOptions,
+            ParquetReaderOptions parquetReaderOptions)
+    {
         validateDirectPageSourceInputs(format, inputFile, columns, types, domains);
         switch (format.toLowerCase(Locale.ENGLISH)) {
             case "orc" : {
@@ -942,7 +1000,7 @@ public class PaimonPageSourceProvider
         }
     }
 
-    private ConnectorPageSource createOrcDataPageSource(TrinoInputFile inputFile, OrcReaderOptions options,
+    private static ConnectorPageSource createOrcDataPageSource(TrinoInputFile inputFile, OrcReaderOptions options,
             List<String> columns, List<Type> types, List<Domain> domains)
     {
         OrcDataSource orcDataSource = null;
@@ -994,7 +1052,7 @@ public class PaimonPageSourceProvider
         }
     }
 
-    private ConnectorPageSource createParquetDataPageSource(TrinoInputFile inputFile, ParquetReaderOptions options,
+    private static ConnectorPageSource createParquetDataPageSource(TrinoInputFile inputFile, ParquetReaderOptions options,
             List<String> columns, List<Type> types, List<Domain> domains, long fileSize)
     {
         ParquetDataSource dataSource = null;
@@ -1101,7 +1159,7 @@ public class PaimonPageSourceProvider
         return parquetSourceChannel + 1;
     }
 
-    private TupleDomain<ColumnDescriptor> buildParquetTupleDomain(Map<List<String>, ColumnDescriptor> descriptorsByPath,
+    private static TupleDomain<ColumnDescriptor> buildParquetTupleDomain(Map<List<String>, ColumnDescriptor> descriptorsByPath,
             List<String> columns, List<Domain> domains, Map<String, org.apache.parquet.schema.Type> fieldsByName)
     {
         com.google.common.collect.ImmutableMap.Builder<ColumnDescriptor, Domain> predicateBuilder = com.google.common.collect.ImmutableMap
@@ -1157,7 +1215,7 @@ public class PaimonPageSourceProvider
         return fieldsByName;
     }
 
-    private Optional<Field> constructField(Type type, org.apache.parquet.io.ColumnIO columnIO)
+    private static Optional<Field> constructField(Type type, org.apache.parquet.io.ColumnIO columnIO)
     {
         if (columnIO == null) {
             return Optional.empty();
