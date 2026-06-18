@@ -538,6 +538,63 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testTrinoFormatReaderIsEnabledOnlyForSupportedPaimonTypes()
+    {
+        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.BIGINT()),
+                DataTypes.FIELD(1, "payload", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())))))
+                .isTrue();
+        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
+                DataTypes.FIELD(0, "payload", DataTypes.BLOB()))))
+                .isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
+                DataTypes.FIELD(0, "payload", DataTypes.VARIANT()))))
+                .isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
+                DataTypes.FIELD(0, "embedding", DataTypes.VECTOR(3, DataTypes.FLOAT())))))
+                .isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
+                DataTypes.FIELD(0, "nested", DataTypes.ARRAY(DataTypes.BLOB())))))
+                .isFalse();
+        assertThatThrownBy(() -> PaimonPageSourceProvider.canUseTrinoFormatReader(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("paimonReadType is null");
+    }
+
+    @Test
+    void testPaimonReaderFallbackReadsFilterColumns()
+    {
+        PaimonColumnHandle categoryColumn = PaimonColumnHandle.of("category", DataTypes.STRING());
+        org.apache.paimon.types.MapType propertiesType = DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING());
+        PaimonColumnHandle propertiesRegionColumn = PaimonColumnHandle.of(toMapKey("properties", "region"), propertiesType);
+        TupleDomain<PaimonColumnHandle> filter = TupleDomain.withColumnDomains(Map.of(
+                categoryColumn, Domain.singleValue(VARCHAR, Slices.utf8Slice("keep")),
+                propertiesRegionColumn, Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south"))));
+
+        assertThat(PaimonPageSourceProvider.readerFields(List.of("id", "category", "payload", "properties"), List.of("id", "payload"), filter))
+                .containsExactly("id", "payload", "category", "properties");
+        assertThat(PaimonPageSourceProvider.readerFields(List.of("id", "category", "payload", "properties"), List.of("id", "CATEGORY", "properties"), filter))
+                .containsExactly("id", "CATEGORY", "properties");
+        assertThat(PaimonPageSourceProvider.readerFields(List.of("id", "category", "payload", "properties"), List.of("id"), TupleDomain.all()))
+                .containsExactly("id");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.readerFields(null, List.of("id"), filter))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("fieldNames is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.readerFields(List.of("id"), null, filter))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("projectedFields is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.readerFields(List.of("id"), List.of("id"), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("readerFilter is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.readerFields(List.of("id"), Arrays.asList("id", null), filter))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("projectedFields contains null field");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.readerFields(Arrays.asList("id", null), List.of("id"), filter))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("fieldNames contains null field");
+    }
+
+    @Test
     void testDirectReaderDomainsAreDisabledWhenDeletionVectorsArePresent()
     {
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());

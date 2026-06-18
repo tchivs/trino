@@ -54,7 +54,8 @@ public class TrinoPaimonFileFormat
     public FormatReaderFactory createReaderFactory(RowType dataSchemaRowType, RowType projectedRowType,
             @Nullable List<Predicate> filters)
     {
-        throw new UnsupportedOperationException("Trino Paimon file format provider only supports writes");
+        validateSupportedReadType(projectedRowType);
+        return new TrinoPaimonFormatReaderFactory(formatIdentifier, projectedRowType);
     }
 
     @Override
@@ -102,6 +103,16 @@ public class TrinoPaimonFileFormat
     private static void validateSupportedWriteType(RowType rowType)
     {
         rowType.getFields().forEach(field -> validateSupportedWriteType(field.type()));
+    }
+
+    private static void validateSupportedReadType(RowType rowType)
+    {
+        if (rowType.getFields().stream()
+                .map(field -> field.type())
+                .anyMatch(PaimonTypeUtils::containsUnsupportedTrinoFormatProviderReadType)) {
+            throw new UnsupportedOperationException(
+                    "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
+        }
     }
 
     private static void validateSupportedWriteType(DataType type)

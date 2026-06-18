@@ -60,6 +60,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
@@ -88,13 +89,27 @@ public class PaimonTypeUtils
 
     public static boolean containsVariant(DataType type)
     {
+        return contains(type, dataType -> dataType.getTypeRoot() == DataTypeRoot.VARIANT);
+    }
+
+    public static boolean containsUnsupportedTrinoFormatProviderReadType(DataType type)
+    {
+        return contains(type, dataType -> dataType.getTypeRoot() == DataTypeRoot.VARIANT
+                || dataType instanceof BlobType
+                || dataType instanceof MultisetType
+                || dataType instanceof VectorType);
+    }
+
+    private static boolean contains(DataType type, Predicate<DataType> predicate)
+    {
         requireNonNull(type, "type is null");
-        if (type.getTypeRoot() == DataTypeRoot.VARIANT) {
+        requireNonNull(predicate, "predicate is null");
+        if (predicate.test(type)) {
             return true;
         }
         return switch (type.getTypeRoot()) {
             case ARRAY, MAP, MULTISET, ROW, VECTOR -> DataTypeChecks.getNestedTypes(type).stream()
-                    .anyMatch(PaimonTypeUtils::containsVariant);
+                    .anyMatch(nestedType -> contains(nestedType, predicate));
             default -> false;
         };
     }

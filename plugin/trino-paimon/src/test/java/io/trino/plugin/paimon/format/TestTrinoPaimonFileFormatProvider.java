@@ -33,6 +33,7 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.reader.FileRecordReader;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.RoaringBitmap32;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -44,6 +45,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTrinoPaimonFileFormatProvider
 {
@@ -72,6 +74,25 @@ public class TestTrinoPaimonFileFormatProvider
         assertWriterCloseLeavesPaimonOutputStreamOpen("orc", "zstd");
     }
 
+    @Test
+    void testTrinoReaderPreservesFilePositionsForPaimonSelection()
+            throws Exception
+    {
+        assertTrinoReaderPreservesFilePositionsForPaimonSelection("parquet", "snappy");
+        assertTrinoReaderPreservesFilePositionsForPaimonSelection("orc", "zstd");
+    }
+
+    @Test
+    void testTrinoReaderRejectsPaimonSpecialTypes()
+    {
+        FileFormat trinoReadFormat = FileFormat.readerFromIdentifier("parquet", trinoReadProviderOptions());
+        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.BLOB()));
+
+        assertThatThrownBy(() -> trinoReadFormat.createReaderFactory(rowType, rowType, new ArrayList<>()))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
+    }
+
     private void assertRoundTrip(String formatIdentifier, String compression)
             throws Exception
     {
@@ -91,6 +112,10 @@ public class TestTrinoPaimonFileFormatProvider
         FileFormat paimonFormat = FileFormat.fromIdentifier(formatIdentifier, new Options());
         assertThat(readRows(paimonFormat, rowType, fileIO, file))
                 .containsExactlyElementsOf(canonicalizeRows(rowType, rows));
+
+        FileFormat trinoReadFormat = FileFormat.readerFromIdentifier(formatIdentifier, trinoReadProviderOptions());
+        assertThat(readRows(trinoReadFormat, rowType, fileIO, file))
+                .containsExactlyElementsOf(canonicalizeRows(rowType, rows));
     }
 
     private static void assertWriterCloseLeavesPaimonOutputStreamOpen(String formatIdentifier, String compression)
@@ -107,11 +132,45 @@ public class TestTrinoPaimonFileFormatProvider
         assertThat(out.closed()).isTrue();
     }
 
+    private void assertTrinoReaderPreservesFilePositionsForPaimonSelection(String formatIdentifier, String compression)
+            throws Exception
+    {
+        RowType rowType = rowType();
+        List<GenericRow> rows = rows();
+        List<InternalRow> canonicalRows = canonicalizeRows(rowType, rows);
+        Path file = new Path(tempDir.resolve("selection-data." + formatIdentifier).toUri().toString());
+        LocalFileIO fileIO = LocalFileIO.create();
+        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
+        try (PositionOutputStream out = fileIO.newOutputStream(file, false);
+                FormatWriter writer = trinoWriteFormat.createWriterFactory(rowType).create(out, compression)) {
+            for (GenericRow row : rows) {
+                writer.addElement(row);
+            }
+        }
+
+        RoaringBitmap32 selection = new RoaringBitmap32();
+        selection.add(1);
+        selection.add(2);
+        FileFormat trinoReadFormat = FileFormat.readerFromIdentifier(formatIdentifier, trinoReadProviderOptions());
+
+        assertThat(readRowsWithPositions(trinoReadFormat, rowType, fileIO, file, selection))
+                .containsExactly(
+                        new PositionedRow(1, canonicalRows.get(1)),
+                        new PositionedRow(2, canonicalRows.get(2)));
+    }
+
     private static Options trinoProviderOptions()
     {
         Options options = new Options();
         options.setString(FileFormatProvider.WRITE_FORMAT_PROVIDER, TrinoPaimonFileFormatProvider.IDENTIFIER);
         options.set(CoreOptions.WRITE_BATCH_SIZE, 1);
+        return options;
+    }
+
+    private static Options trinoReadProviderOptions()
+    {
+        Options options = new Options();
+        options.setString(FileFormatProvider.READ_FORMAT_PROVIDER, TrinoPaimonFileFormatProvider.IDENTIFIER);
         return options;
     }
 
@@ -153,6 +212,14 @@ public class TestTrinoPaimonFileFormatProvider
                         Timestamp.fromEpochMillis(1_695_645_404_000L, 0),
                         new GenericArray(new int[] {4, 5}),
                         new GenericMap(Map.of(BinaryString.fromString("green"), 13)),
+                        GenericRow.of(false, BinaryString.fromString("nested-beta"))),
+                GenericRow.of(
+                        3,
+                        BinaryString.fromString("gamma"),
+                        Decimal.fromBigDecimal(new BigDecimal("90.12"), 12, 2),
+                        Timestamp.fromEpochMillis(1_695_645_405_000L, 123_000),
+                        new GenericArray(new int[] {6}),
+                        new GenericMap(Map.of(BinaryString.fromString("yellow"), 17)),
                         GenericRow.of(false, BinaryString.fromString("nested-beta"))));
     }
 
@@ -173,6 +240,26 @@ public class TestTrinoPaimonFileFormatProvider
         return rows;
     }
 
+    private static List<PositionedRow> readRowsWithPositions(
+            FileFormat format,
+            RowType rowType,
+            LocalFileIO fileIO,
+            Path file,
+            RoaringBitmap32 selection)
+            throws IOException
+    {
+        InternalRowSerializer serializer = new InternalRowSerializer(rowType);
+        List<PositionedRow> rows = new ArrayList<>();
+        try (FileRecordReader<InternalRow> reader =
+                format.createReaderFactory(rowType, rowType, new ArrayList<>())
+                        .createReader(new FormatReaderContext(fileIO, file, fileIO.getFileSize(file), selection))) {
+            reader.forEachRemainingWithPosition(
+                    (position, row) ->
+                            rows.add(new PositionedRow(position, serializer.toBinaryRow(row).copy())));
+        }
+        return rows;
+    }
+
     private static List<InternalRow> canonicalizeRows(RowType rowType, List<GenericRow> rows)
     {
         InternalRowSerializer serializer = new InternalRowSerializer(rowType);
@@ -180,6 +267,8 @@ public class TestTrinoPaimonFileFormatProvider
                 .map(row -> (InternalRow) serializer.toBinaryRow(row).copy())
                 .toList();
     }
+
+    private record PositionedRow(long position, InternalRow row) {}
 
     private static class TrackingPositionOutputStream
             extends PositionOutputStream
