@@ -279,12 +279,17 @@ public class PaimonPageSinkProvider
     private PaimonPageSink createPageSink(FileStoreTable table, boolean overwrite, List<Type> columnTypes,
             List<DataType> logicalTypes)
     {
-        BatchWriteBuilder batchWriteBuilder = table.newBatchWriteBuilder();
-        if (overwrite) {
-            batchWriteBuilder.withOverwrite();
+        try {
+            BatchWriteBuilder batchWriteBuilder = table.newBatchWriteBuilder();
+            if (overwrite) {
+                batchWriteBuilder.withOverwrite();
+            }
+            BatchTableWrite write = batchWriteBuilder.newWrite();
+            return new PaimonPageSink(write, columnTypes, logicalTypes);
         }
-        BatchTableWrite write = batchWriteBuilder.newWrite();
-        return new PaimonPageSink(write, columnTypes, logicalTypes);
+        catch (Exception e) {
+            throw PaimonPageSink.wrapWriteException(e);
+        }
     }
 
     @Override

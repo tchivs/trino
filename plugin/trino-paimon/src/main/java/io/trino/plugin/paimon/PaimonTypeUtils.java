@@ -94,6 +94,16 @@ public class PaimonTypeUtils
 
     public static boolean containsUnsupportedTrinoFormatProviderReadType(DataType type)
     {
+        return containsUnsupportedTrinoFormatProviderType(type);
+    }
+
+    public static boolean containsUnsupportedTrinoFormatProviderWriteType(DataType type)
+    {
+        return containsUnsupportedTrinoFormatProviderType(type);
+    }
+
+    private static boolean containsUnsupportedTrinoFormatProviderType(DataType type)
+    {
         return contains(type, dataType -> dataType.getTypeRoot() == DataTypeRoot.VARIANT
                 || dataType instanceof BlobType
                 || dataType instanceof MultisetType

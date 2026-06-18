@@ -24,8 +24,6 @@ import org.apache.paimon.format.FormatWriterFactory;
 import org.apache.paimon.format.SimpleStatsExtractor;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.statistics.SimpleColStatsCollector;
-import org.apache.paimon.types.DataType;
-import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.RowType;
 
 import javax.annotation.Nullable;
@@ -102,7 +100,12 @@ public class TrinoPaimonFileFormat
 
     private static void validateSupportedWriteType(RowType rowType)
     {
-        rowType.getFields().forEach(field -> validateSupportedWriteType(field.type()));
+        if (rowType.getFields().stream()
+                .map(field -> field.type())
+                .anyMatch(PaimonTypeUtils::containsUnsupportedTrinoFormatProviderWriteType)) {
+            throw new UnsupportedOperationException(
+                    "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
+        }
     }
 
     private static void validateSupportedReadType(RowType rowType)
@@ -112,34 +115,6 @@ public class TrinoPaimonFileFormat
                 .anyMatch(PaimonTypeUtils::containsUnsupportedTrinoFormatProviderReadType)) {
             throw new UnsupportedOperationException(
                     "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
-        }
-    }
-
-    private static void validateSupportedWriteType(DataType type)
-    {
-        if (type.getTypeRoot() == DataTypeRoot.VARIANT) {
-            throw new UnsupportedOperationException(
-                    "Trino Paimon file format provider does not support Paimon VARIANT writes");
-        }
-        if (type instanceof org.apache.paimon.types.ArrayType arrayType) {
-            validateSupportedWriteType(arrayType.getElementType());
-            return;
-        }
-        if (type instanceof org.apache.paimon.types.MapType mapType) {
-            validateSupportedWriteType(mapType.getKeyType());
-            validateSupportedWriteType(mapType.getValueType());
-            return;
-        }
-        if (type instanceof org.apache.paimon.types.MultisetType multisetType) {
-            validateSupportedWriteType(multisetType.getElementType());
-            return;
-        }
-        if (type instanceof org.apache.paimon.types.RowType rowType) {
-            validateSupportedWriteType(rowType);
-            return;
-        }
-        if (type instanceof org.apache.paimon.types.VectorType vectorType) {
-            validateSupportedWriteType(vectorType.getElementType());
         }
     }
 }

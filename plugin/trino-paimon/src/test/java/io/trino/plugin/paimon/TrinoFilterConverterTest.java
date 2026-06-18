@@ -901,6 +901,7 @@ public class TrinoFilterConverterTest
                 TrinoFilterConverterTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
                     case "coreOptions" -> new org.apache.paimon.CoreOptions(new org.apache.paimon.options.Options());
                     case "rowType" -> latestRowType;
                     case "partitionKeys" -> latestPartitionKeys;
@@ -911,6 +912,7 @@ public class TrinoFilterConverterTest
                 TrinoFilterConverterTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
                     case "copyWithLatestSchema" -> {
                         copiedWithLatestSchema.set(true);
                         yield latestTable;
@@ -929,6 +931,7 @@ public class TrinoFilterConverterTest
                 TrinoFilterConverterTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
                     case "rowType" -> rowType;
                     case "partitionKeys" -> List.of();
                     case "coreOptions" -> new org.apache.paimon.CoreOptions(
@@ -941,6 +944,7 @@ public class TrinoFilterConverterTest
                 TrinoFilterConverterTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
                     case "copyWithLatestSchema" -> {
                         copiedWithLatestSchema.set(true);
                         yield latestTable;

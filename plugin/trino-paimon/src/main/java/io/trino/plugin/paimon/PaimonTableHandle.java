@@ -52,6 +52,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.format.TrinoPaimonFileFormatProvider.IDENTIFIER;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
@@ -278,10 +279,15 @@ public class PaimonTableHandle
     {
         requireNonNull(catalog, "catalog is null");
         requireNonNull(session, "session is null");
-        Table paimonTable = rawTable(catalog);
-        Map<String, String> dynamicOptions = readDynamicOptions(session);
-        validateHistoricalReadSupported(dynamicOptions);
-        return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
+        return runWithContextClassLoader(() -> {
+            Table paimonTable = rawTable(catalog);
+            Map<String, String> dynamicOptions = readDynamicOptions(session);
+            validateHistoricalReadSupported(dynamicOptions);
+            if (paimonTable instanceof FileStoreTable) {
+                dynamicOptions.put(FileFormatProvider.READ_FORMAT_PROVIDER, IDENTIFIER);
+            }
+            return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
+        }, PaimonTableHandle.class.getClassLoader());
     }
 
     public boolean usesHistoricalReadSchema(ConnectorSession session)
@@ -299,21 +305,19 @@ public class PaimonTableHandle
     public Table tableWithWriteDynamicOptions(Catalog catalog)
     {
         requireNonNull(catalog, "catalog is null");
-        Table paimonTable = rawTable(catalog);
-        if (!(paimonTable instanceof FileStoreTable fileStoreTable)) {
-            return requireSupportedTable(paimonTable);
-        }
+        return runWithContextClassLoader(() -> {
+            Table paimonTable = rawTable(catalog);
+            if (!(paimonTable instanceof FileStoreTable fileStoreTable)) {
+                return requireSupportedTable(paimonTable);
+            }
 
-        Map<String, String> dynamicOptions = new HashMap<>(this.dynamicOptions);
-        dynamicOptions.keySet().removeIf(PaimonTableOptionUtils::isRuntimeOnlyPaimonOptionKey);
-        if (writeColumns.isEmpty() || writeColumns.get().stream()
-                .map(PaimonColumnHandle::logicalType)
-                .noneMatch(PaimonTypeUtils::containsVariant)) {
+            Map<String, String> dynamicOptions = new HashMap<>(this.dynamicOptions);
+            dynamicOptions.keySet().removeIf(PaimonTableOptionUtils::isRuntimeOnlyPaimonOptionKey);
             dynamicOptions.put(FileFormatProvider.WRITE_FORMAT_PROVIDER, IDENTIFIER);
-        }
-        return requireSupportedTable(!dynamicOptions.isEmpty()
-                ? fileStoreTable.copyWithoutTimeTravel(dynamicOptions)
-                : fileStoreTable);
+            return requireSupportedTable(!dynamicOptions.isEmpty()
+                    ? fileStoreTable.copyWithoutTimeTravel(dynamicOptions)
+                    : fileStoreTable);
+        }, PaimonTableHandle.class.getClassLoader());
     }
 
     private static boolean hasExplicitStartupSelection(Map<String, String> dynamicOptions)
@@ -400,9 +404,11 @@ public class PaimonTableHandle
     public Table table(Catalog catalog)
     {
         requireNonNull(catalog, "catalog is null");
-        validateHistoricalReadSupported(dynamicOptions);
-        Table paimonTable = rawTable(catalog);
-        return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
+        return runWithContextClassLoader(() -> {
+            validateHistoricalReadSupported(dynamicOptions);
+            Table paimonTable = rawTable(catalog);
+            return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
+        }, PaimonTableHandle.class.getClassLoader());
     }
 
     static boolean supportsHistoricalRead(Identifier identifier)

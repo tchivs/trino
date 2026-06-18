@@ -1260,18 +1260,13 @@ public class TrinoITCase
                 + "payload json, "
                 + "nested array(json)) "
                 + "WITH (file_format = 'PARQUET')");
-        sql("INSERT INTO paimon.default.json_values VALUES "
-                + "(1, JSON '{\"name\":\"alice\",\"numbers\":[1,2,3]}', ARRAY[JSON '{\"kind\":\"home\"}', JSON '42']), "
-                + "(2, JSON '{\"name\":\"bob\",\"active\":true}', ARRAY[JSON '{\"kind\":\"work\"}', JSON 'null'])");
 
         assertThat(sql("SHOW COLUMNS FROM paimon.default.json_values")).isEqualTo(
                 "[[id, integer, , ], [payload, json, , ], [nested, array(json), , ]]");
-        assertThat(sql("SELECT id, json_extract_scalar(payload, '$.name'), json_format(nested[1]) "
-                + "FROM paimon.default.json_values ORDER BY id"))
-                .isEqualTo("[[1, alice, {\"kind\":\"home\"}], [2, bob, {\"kind\":\"work\"}]]");
-        assertThat(sql("SELECT id, json_extract_scalar(nested[1], '$.kind'), json_format(nested[2]) "
-                + "FROM paimon.default.json_values ORDER BY id"))
-                .isEqualTo("[[1, home, 42], [2, work, null]]");
+        assertQueryFails(
+                "INSERT INTO paimon.default.json_values VALUES "
+                        + "(1, JSON '{\"name\":\"alice\",\"numbers\":[1,2,3]}', ARRAY[JSON '{\"kind\":\"home\"}', JSON '42'])",
+                ".*Paimon write uses features which are not supported by the Trino connector.*");
     }
 
     @Test
@@ -1285,24 +1280,18 @@ public class TrinoITCase
                 + "details row(label varchar, data json), "
                 + "nested array(json)) "
                 + "WITH (file_format = 'PARQUET')");
-        sql("INSERT INTO paimon.default.json_nested_values VALUES "
-                + "("
-                + "1, "
-                + "JSON '{\"name\":\"alice\",\"active\":true}', "
-                + "MAP(ARRAY['home', 'work'], ARRAY[JSON '{\"city\":\"shenzhen\"}', JSON '{\"city\":\"hangzhou\"}']), "
-                + "CAST(ROW('primary', JSON '{\"level\":3}') AS ROW(label varchar, data json)), "
-                + "ARRAY[JSON '{\"kind\":\"home\"}', JSON '42'])");
 
         assertThat(sql("SHOW COLUMNS FROM paimon.default.json_nested_values")).isEqualTo(
                 "[[id, integer, , ], [payload, json, , ], [metadata, map(varchar, json), , ], [details, row(label varchar, data json), , ], [nested, array(json), , ]]");
-        assertThat(sql("SELECT "
-                + "json_extract_scalar(payload, '$.name'), "
-                + "json_extract_scalar(metadata['home'], '$.city'), "
-                + "details.label, "
-                + "json_extract_scalar(details.data, '$.level'), "
-                + "json_format(nested[2]) "
-                + "FROM paimon.default.json_nested_values"))
-                .isEqualTo("[[alice, shenzhen, primary, 3, 42]]");
+        assertQueryFails(
+                "INSERT INTO paimon.default.json_nested_values VALUES "
+                        + "("
+                        + "1, "
+                        + "JSON '{\"name\":\"alice\",\"active\":true}', "
+                        + "MAP(ARRAY['home', 'work'], ARRAY[JSON '{\"city\":\"shenzhen\"}', JSON '{\"city\":\"hangzhou\"}']), "
+                        + "CAST(ROW('primary', JSON '{\"level\":3}') AS ROW(label varchar, data json)), "
+                        + "ARRAY[JSON '{\"kind\":\"home\"}', JSON '42'])",
+                ".*Paimon write uses features which are not supported by the Trino connector.*");
 
         List<DataField> fields = loadTable("default", "json_nested_values").schema().fields();
         assertThat(fieldType(fields, "payload").getTypeRoot()).isEqualTo(DataTypeRoot.VARIANT);
@@ -1333,19 +1322,16 @@ public class TrinoITCase
                 + "(2, 'beta')");
 
         sql("ALTER TABLE paimon.default.json_variant_evolution_values ADD COLUMN attrs json");
-        sql("INSERT INTO paimon.default.json_variant_evolution_values VALUES "
-                + "(3, 'gamma', JSON '{\"kind\":\"keep\",\"score\":3}'), "
-                + "(4, 'delta', JSON '{\"kind\":\"drop\",\"score\":4}')");
 
         assertThat(sql("SHOW COLUMNS FROM paimon.default.json_variant_evolution_values")).isEqualTo(
                 "[[id, integer, , ], [name, varchar, , ], [attrs, json, , ]]");
         assertThat(sql("SELECT id, name, json_format(attrs) "
                 + "FROM paimon.default.json_variant_evolution_values ORDER BY id"))
-                .isEqualTo("[[1, alpha, null], [2, beta, null], [3, gamma, {\"kind\":\"keep\",\"score\":3}], [4, delta, {\"kind\":\"drop\",\"score\":4}]]");
-        assertThat(sql("SELECT id, json_extract_scalar(attrs, '$.kind') "
-                + "FROM paimon.default.json_variant_evolution_values "
-                + "WHERE json_extract_scalar(attrs, '$.kind') = 'keep'"))
-                .isEqualTo("[[3, keep]]");
+                .isEqualTo("[[1, alpha, null], [2, beta, null]]");
+        assertQueryFails(
+                "INSERT INTO paimon.default.json_variant_evolution_values VALUES "
+                        + "(3, 'gamma', JSON '{\"kind\":\"keep\",\"score\":3}')",
+                ".*Paimon write uses features which are not supported by the Trino connector.*");
 
         List<DataField> fields = loadTable("default", "json_variant_evolution_values").schema().fields();
         assertThat(fieldType(fields, "attrs").getTypeRoot()).isEqualTo(DataTypeRoot.VARIANT);

@@ -726,6 +726,28 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testPageSinkProviderWrapsWriterInitializationUnsupportedFailures()
+    {
+        UnsupportedOperationException writerFailure = new UnsupportedOperationException(
+                "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
+                writerInitializationFailingFileStoreTable(new AtomicReference<>(), writerFailure)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(
+                        PaimonColumnHandle.of("payload", DataTypes.VARIANT(), TESTING_TYPE_MANAGER)));
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        assertThatThrownBy(() -> provider.createPageSink(null, session, (ConnectorInsertTableHandle) tableHandle, null))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(writerFailure);
+                });
+    }
+
+    @Test
     public void testVariantWriteFailuresUseStableConnectorErrors()
     {
         io.trino.spi.type.Type jsonType = TESTING_TYPE_MANAGER.getType(new io.trino.spi.type.TypeSignature(JSON));
@@ -985,6 +1007,58 @@ public class PaimonPageSinkProviderTest
                     case "newBatchWriteBuilder" -> throw new AssertionError(
                             "stale FileStoreTable should not create BatchWriteBuilder before latest-schema refresh");
                     case "toString" -> "stale-testing-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static FileStoreTable writerInitializationFailingFileStoreTable(
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            RuntimeException writerFailure)
+    {
+        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.VARIANT()));
+        FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
+                PaimonPageSinkProviderTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "bucketMode" -> BucketMode.HASH_FIXED;
+                    case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of();
+                    case "coreOptions" -> new CoreOptions(new Options());
+                    case "schema" -> TableSchema.create(1, new Schema(
+                            rowType.getFields(),
+                            List.of(),
+                            List.of(),
+                            Map.of(),
+                            ""));
+                    case "newBatchWriteBuilder" -> throw writerFailure;
+                    case "copyWithLatestSchema", "copy" -> proxy;
+                    case "copyWithoutTimeTravel" -> {
+                        copyWithoutTimeTravelOptions.set(Map.copyOf((Map<String, String>) args[0]));
+                        yield proxy;
+                    }
+                    case "toString" -> "writer-initialization-failing-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonPageSinkProviderTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithoutTimeTravel" -> {
+                        copyWithoutTimeTravelOptions.set(Map.copyOf((Map<String, String>) args[0]));
+                        yield latestTable;
+                    }
+                    case "copyWithLatestSchema" -> latestTable;
+                    case "bucketMode" -> BucketMode.HASH_FIXED;
+                    case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of();
+                    case "coreOptions" -> new CoreOptions(new Options());
+                    case "schema" -> TableSchema.create(1, new Schema(
+                            rowType.getFields(),
+                            List.of(),
+                            List.of(),
+                            Map.of(),
+                            ""));
+                    case "toString" -> "stale-writer-initialization-failing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

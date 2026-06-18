@@ -38,6 +38,7 @@ import io.trino.spi.block.SqlMap;
 import io.trino.spi.block.SqlRow;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.DynamicFilter;
@@ -62,6 +63,7 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.GenericVariant;
 import org.apache.paimon.deletionvectors.DeletionVector;
+import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.LeafPredicate;
@@ -74,6 +76,7 @@ import org.apache.paimon.table.Table;
 import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.table.source.DeletionFile;
 import org.apache.paimon.table.source.RawFile;
+import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
@@ -97,6 +100,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static io.airlift.slice.Slices.EMPTY_SLICE;
@@ -538,27 +542,30 @@ public class PaimonPageSourceTest
     }
 
     @Test
-    void testTrinoFormatReaderIsEnabledOnlyForSupportedPaimonTypes()
+    void testTrinoFormatProviderUnsupportedTypeDetection()
     {
-        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
-                DataTypes.FIELD(0, "id", DataTypes.BIGINT()),
-                DataTypes.FIELD(1, "payload", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())))))
-                .isTrue();
-        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
-                DataTypes.FIELD(0, "payload", DataTypes.BLOB()))))
-                .isFalse();
-        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
-                DataTypes.FIELD(0, "payload", DataTypes.VARIANT()))))
-                .isFalse();
-        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
-                DataTypes.FIELD(0, "embedding", DataTypes.VECTOR(3, DataTypes.FLOAT())))))
-                .isFalse();
-        assertThat(PaimonPageSourceProvider.canUseTrinoFormatReader(DataTypes.ROW(
-                DataTypes.FIELD(0, "nested", DataTypes.ARRAY(DataTypes.BLOB())))))
-                .isFalse();
-        assertThatThrownBy(() -> PaimonPageSourceProvider.canUseTrinoFormatReader(null))
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderReadType(
+                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))).isFalse();
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderWriteType(
+                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))).isFalse();
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderReadType(DataTypes.BLOB())).isTrue();
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderWriteType(DataTypes.BLOB())).isTrue();
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderReadType(DataTypes.VARIANT())).isTrue();
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderWriteType(DataTypes.VARIANT())).isTrue();
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderReadType(
+                DataTypes.VECTOR(3, DataTypes.FLOAT()))).isTrue();
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderWriteType(
+                DataTypes.VECTOR(3, DataTypes.FLOAT()))).isTrue();
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderReadType(
+                DataTypes.ARRAY(DataTypes.BLOB()))).isTrue();
+        assertThat(PaimonTypeUtils.containsUnsupportedTrinoFormatProviderWriteType(
+                DataTypes.ARRAY(DataTypes.BLOB()))).isTrue();
+        assertThatThrownBy(() -> PaimonTypeUtils.containsUnsupportedTrinoFormatProviderReadType(null))
                 .isInstanceOf(NullPointerException.class)
-                .hasMessage("paimonReadType is null");
+                .hasMessage("type is null");
+        assertThatThrownBy(() -> PaimonTypeUtils.containsUnsupportedTrinoFormatProviderWriteType(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("type is null");
     }
 
     @Test
@@ -811,6 +818,59 @@ public class PaimonPageSourceTest
 
         assertThat(pageSource.isFinished()).isTrue();
         assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
+    void testPaimonReaderFallbackUsesTrinoReadProviderForUnsupportedProviderTypes()
+    {
+        AtomicReference<Map<String, String>> copyOptions = new AtomicReference<>();
+        UnsupportedOperationException readFailure = new UnsupportedOperationException(
+                "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
+        FileStoreTable table = readFailingFileStoreTable(copyOptions, DataTypes.ROW(
+                DataTypes.FIELD(0, "payload", DataTypes.BLOB())), readFailure);
+        PaimonPageSourceProvider provider = new PaimonPageSourceProvider(
+                session -> {
+                    throw new AssertionError("filesystem should not be used by Paimon reader fallback");
+                },
+                new PaimonMetadataFactory(new Options(),
+                        session -> {
+                            throw new AssertionError("filesystem should not be used by Paimon reader fallback catalog");
+                        },
+                        TESTING_TYPE_MANAGER)
+                {
+                    @Override
+                    public PaimonMetadata create()
+                    {
+                        return new PaimonMetadata(new TestingCatalog(table), TESTING_TYPE_MANAGER);
+                    }
+                },
+                new OrcReaderConfig(),
+                new ParquetReaderConfig());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.of(List.of(PaimonColumnHandle.of("payload", DataTypes.BLOB()))),
+                Optional.empty(),
+                OptionalLong.empty());
+        ConnectorSession session = io.trino.testing.TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        assertThatThrownBy(() -> provider.createPageSource(null, session,
+                PaimonSplit.fromSplit(testingSplit(1), 1.0),
+                tableHandle,
+                List.of(PaimonColumnHandle.of("payload", DataTypes.BLOB())),
+                DynamicFilter.EMPTY))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage(
+                            "Paimon page read uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(readFailure);
+                });
+        assertThat(copyOptions.get()).containsExactly(
+                Map.entry(FileFormatProvider.READ_FORMAT_PROVIDER, "trino"));
     }
 
     @Test
@@ -2197,6 +2257,41 @@ public class PaimonPageSourceTest
                 });
     }
 
+    private static FileStoreTable readFailingFileStoreTable(
+            AtomicReference<Map<String, String>> copyOptions,
+            org.apache.paimon.types.RowType rowType,
+            UnsupportedOperationException readFailure)
+    {
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonPageSourceTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithLatestSchema" -> proxy;
+                    case "copy" -> {
+                        copyOptions.set(Map.copyOf((Map<String, String>) args[0]));
+                        yield proxy;
+                    }
+                    case "rowType" -> rowType;
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(new Options());
+                    case "newReadBuilder" -> readBuilder(readFailure);
+                    case "toString" -> "read-failing-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder readBuilder(UnsupportedOperationException readFailure)
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                PaimonPageSourceTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "newRead" -> throw readFailure;
+                    case "tableName" -> "testing";
+                    case "toString" -> "read-failing-read-builder";
+                    default -> proxy;
+                });
+    }
+
     private static FileStoreTable staleFileStoreTable(FileStoreTable latestTable)
     {
         return (FileStoreTable) Proxy.newProxyInstance(
@@ -2219,6 +2314,55 @@ public class PaimonPageSourceTest
                     case "toString" -> "testing-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    private static org.apache.paimon.table.source.Split testingSplit(long rowCount)
+    {
+        return new org.apache.paimon.table.source.Split()
+        {
+            @Override
+            public long rowCount()
+            {
+                return rowCount;
+            }
+
+            @Override
+            public OptionalLong mergedRowCount()
+            {
+                return OptionalLong.empty();
+            }
+        };
+    }
+
+    private static class TestingCatalog
+            extends io.trino.plugin.paimon.catalog.PaimonCatalog
+    {
+        private final Table table;
+
+        private TestingCatalog(Table table)
+        {
+            super(new Options(), session -> {
+                throw new AssertionError("filesystem should not be used");
+            });
+            this.table = table;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession)
+        {
+        }
+
+        @Override
+        public org.apache.paimon.catalog.Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public Table getTable(org.apache.paimon.catalog.Identifier identifier)
+        {
+            return table;
+        }
     }
 
     private static DynamicFilter dynamicFilter(TupleDomain<ColumnHandle> predicate)
