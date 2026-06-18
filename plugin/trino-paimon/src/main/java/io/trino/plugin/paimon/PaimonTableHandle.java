@@ -309,7 +309,7 @@ public class PaimonTableHandle
         if (writeColumns.isEmpty() || writeColumns.get().stream()
                 .map(PaimonColumnHandle::logicalType)
                 .noneMatch(PaimonTypeUtils::containsVariant)) {
-            dynamicOptions.put(FileFormatProvider.FORMAT_PROVIDER, IDENTIFIER);
+            dynamicOptions.put(FileFormatProvider.WRITE_FORMAT_PROVIDER, IDENTIFIER);
         }
         return requireSupportedTable(!dynamicOptions.isEmpty()
                 ? fileStoreTable.copyWithoutTimeTravel(dynamicOptions)

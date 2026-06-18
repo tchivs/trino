@@ -231,7 +231,7 @@ public class PaimonPageSinkProviderTest
         assertThat(pageSink).isNotNull();
         assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "custom.option", "value",
-                FileFormatProvider.FORMAT_PROVIDER, "trino"));
+                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
         assertThat(copiedWithLatestSchema).isTrue();
     }
 
