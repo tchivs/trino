@@ -13,7 +13,17 @@
  */
 package io.trino.plugin.paimon;
 
+import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import io.trino.Session;
+import io.trino.orc.MemoryOrcDataSource;
+import io.trino.orc.OrcDataSourceId;
+import io.trino.orc.OrcReader;
+import io.trino.orc.OrcReaderOptions;
+import io.trino.parquet.AbstractParquetDataSource;
+import io.trino.parquet.ParquetDataSourceId;
+import io.trino.parquet.ParquetReaderOptions;
+import io.trino.parquet.reader.MetadataReader;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
@@ -37,6 +47,8 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.sink.InnerTableCommit;
 import org.apache.paimon.table.sink.InnerTableWrite;
+import org.apache.paimon.table.source.DataSplit;
+import org.apache.paimon.table.source.Split;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.BigIntType;
 import org.apache.paimon.types.CharType;
@@ -80,6 +92,8 @@ public class TrinoITCase
 {
     private static final String CATALOG = "paimon";
     private static final String DB = "default";
+    private static final String TRINO_PAIMON_WRITER_VERSION = "trino-paimon";
+    private static final String TRINO_PAIMON_ORC_WRITER_METADATA_KEY = "trino.paimon.writer";
 
     private String warehouse;
     protected long t2FirstCommitTimestamp;
@@ -119,6 +133,8 @@ public class TrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.incremental_tag_snapshot_values");
             sql("DROP TABLE IF EXISTS paimon.default.incremental_auto_tag_values");
             sql("DROP TABLE IF EXISTS paimon.default.row_tracking_values");
+            sql("DROP TABLE IF EXISTS paimon.default.provider_sql_parquet_values");
+            sql("DROP TABLE IF EXISTS paimon.default.provider_sql_orc_values");
             sql("DROP TABLE IF EXISTS paimon.default.branch_values");
             sql("DROP TABLE IF EXISTS paimon.default.branch_schema_values");
             sql("DROP TABLE IF EXISTS paimon.default.branch_fallback_values");
@@ -1253,6 +1269,14 @@ public class TrinoITCase
     }
 
     @Test
+    public void testSqlCreateInsertReadUsesTrinoProviderForParquetAndOrc()
+            throws Exception
+    {
+        assertSqlCreateInsertReadUsesTrinoProvider("provider_sql_parquet_values", "PARQUET");
+        assertSqlCreateInsertReadUsesTrinoProvider("provider_sql_orc_values", "ORC");
+    }
+
+    @Test
     public void testJsonVariantType()
     {
         sql("CREATE TABLE paimon.default.json_values ("
@@ -1477,6 +1501,55 @@ public class TrinoITCase
                 .isEqualTo("[[1, 101], [2, 202], [3, new-303], [4, new-404]]");
         assertThat(sql("SELECT id FROM paimon.default." + tableName + " WHERE payload = '101'"))
                 .isEqualTo("[[1]]");
+    }
+
+    private void assertSqlCreateInsertReadUsesTrinoProvider(String tableName, String fileFormat)
+            throws Exception
+    {
+        sql("CREATE TABLE paimon.default." + tableName + " ("
+                + "id integer, "
+                + "name varchar, "
+                + "score bigint) "
+                + "WITH (file_format = '" + fileFormat + "', bucket = '-1')");
+        sql("INSERT INTO paimon.default." + tableName + " VALUES "
+                + "(1, 'alpha', 11), "
+                + "(2, 'beta', 22), "
+                + "(3, 'gamma', 33)");
+
+        assertThat(sql("SELECT id, name, score FROM paimon.default." + tableName + " ORDER BY id"))
+                .isEqualTo("[[1, alpha, 11], [2, beta, 22], [3, gamma, 33]]");
+
+        Path dataFile = onlyDataFilePath(tableName);
+        Slice data = Slices.wrappedBuffer(Files.readAllBytes(java.nio.file.Path.of(dataFile.toUri())));
+        if ("PARQUET".equals(fileFormat)) {
+            assertThat(MetadataReader.readFooter(
+                            new SliceParquetDataSource(data, new ParquetReaderOptions()),
+                            java.util.Optional.empty())
+                    .getFileMetaData()
+                    .getCreatedBy())
+                    .contains(TRINO_PAIMON_WRITER_VERSION);
+            return;
+        }
+        assertThat(OrcReader.createOrcReader(
+                        new MemoryOrcDataSource(new OrcDataSourceId(dataFile.toString()), data),
+                        new OrcReaderOptions())
+                .orElseThrow()
+                .getFooter()
+                .getUserMetadata()
+                .get(TRINO_PAIMON_ORC_WRITER_METADATA_KEY)
+                .toStringUtf8())
+                .isEqualTo(TRINO_PAIMON_WRITER_VERSION);
+    }
+
+    private Path onlyDataFilePath(String tableName)
+            throws Exception
+    {
+        FileStoreTable table = loadTable("default", tableName);
+        List<Split> splits = new ArrayList<>(table.newScan().plan().splits());
+        assertThat(splits).hasSize(1);
+        DataSplit split = (DataSplit) splits.get(0);
+        assertThat(split.dataFiles()).hasSize(1);
+        return new Path(split.bucketPath(), split.dataFiles().get(0).fileName());
     }
 
     @Test
@@ -1979,5 +2052,23 @@ public class TrinoITCase
     {
         return DateTimeFormatter.ofPattern("''yyyy-MM-dd HH:mm:ss." + "S".repeat(precision) + " VV''")
                 .format(Instant.ofEpochMilli(epochMilliSeconds).atZone(UTC));
+    }
+
+    private static class SliceParquetDataSource
+            extends AbstractParquetDataSource
+    {
+        private final Slice data;
+
+        private SliceParquetDataSource(Slice data, ParquetReaderOptions options)
+        {
+            super(new ParquetDataSourceId("slice"), data.length(), options);
+            this.data = data;
+        }
+
+        @Override
+        protected void readInternal(long position, byte[] buffer, int bufferOffset, int bufferLength)
+        {
+            data.getBytes((int) position, buffer, bufferOffset, bufferLength);
+        }
     }
 }

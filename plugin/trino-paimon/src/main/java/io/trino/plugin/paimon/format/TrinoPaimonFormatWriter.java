@@ -53,6 +53,7 @@ class TrinoPaimonFormatWriter
         implements FormatWriter
 {
     private static final String TRINO_PAIMON_WRITER_VERSION = "trino-paimon";
+    private static final String TRINO_PAIMON_WRITER_METADATA_KEY = "trino.paimon.writer";
 
     private final PaimonPageBuilder pageBuilder;
     private final SimpleStatsCollector statsCollector;
@@ -183,7 +184,7 @@ class TrinoPaimonFormatWriter
                         OrcType.createRootOrcType(columnNames, columnTypes),
                         orcCompressionKind(compression),
                         orcWriterOptions,
-                        ImmutableMap.of(),
+                        ImmutableMap.of(TRINO_PAIMON_WRITER_METADATA_KEY, TRINO_PAIMON_WRITER_VERSION),
                         true,
                         BOTH,
                         new OrcWriterStats());
