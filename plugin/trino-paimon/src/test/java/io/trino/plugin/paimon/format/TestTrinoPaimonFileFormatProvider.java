@@ -34,6 +34,7 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.reader.FileRecordReader;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.FormatReaderMapping;
@@ -54,6 +55,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTrinoPaimonFileFormatProvider
 {
+    private static final String UNSUPPORTED_PROVIDER_READ_MESSAGE = "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads";
+    private static final String UNSUPPORTED_PROVIDER_WRITE_MESSAGE = "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes";
+
     @TempDir
     java.nio.file.Path tempDir;
 
@@ -99,33 +103,26 @@ public class TestTrinoPaimonFileFormatProvider
     void testTrinoReaderRejectsPaimonSpecialTypes()
     {
         FileFormat trinoReadFormat = FileFormat.readerFromIdentifier("parquet", trinoReadProviderOptions());
-        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.BLOB()));
 
-        assertThatThrownBy(() -> trinoReadFormat.createReaderFactory(rowType, rowType, new ArrayList<>()))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessage("Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
+        for (RowType rowType : unsupportedTrinoProviderTypes()) {
+            assertThatThrownBy(() -> trinoReadFormat.createReaderFactory(rowType, rowType, new ArrayList<>()))
+                    .as("read provider should reject %s", rowType)
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessage(UNSUPPORTED_PROVIDER_READ_MESSAGE);
+        }
     }
 
     @Test
     void testTrinoWriterRejectsPaimonSpecialTypes()
     {
         FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", trinoProviderOptions());
-        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.BLOB()));
 
-        assertThatThrownBy(() -> trinoWriteFormat.createWriterFactory(rowType))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessage("Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
-    }
-
-    @Test
-    void testTrinoWriterRejectsPaimonVariant()
-    {
-        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", trinoProviderOptions());
-        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.VARIANT()));
-
-        assertThatThrownBy(() -> trinoWriteFormat.createWriterFactory(rowType))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessage("Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
+        for (RowType rowType : unsupportedTrinoProviderTypes()) {
+            assertThatThrownBy(() -> trinoWriteFormat.createWriterFactory(rowType))
+                    .as("write provider should reject %s", rowType)
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessage(UNSUPPORTED_PROVIDER_WRITE_MESSAGE);
+        }
     }
 
     private void assertRoundTrip(String formatIdentifier, String compression)
@@ -309,6 +306,25 @@ public class TestTrinoPaimonFileFormatProvider
                         DataTypes.ROW(
                                 DataTypes.FIELD(7, "flag", DataTypes.BOOLEAN()),
                                 DataTypes.FIELD(8, "note", DataTypes.STRING()))));
+    }
+
+    private static List<RowType> unsupportedTrinoProviderTypes()
+    {
+        return List.of(
+                rowTypeWith(DataTypes.BLOB()),
+                rowTypeWith(DataTypes.VARIANT()),
+                rowTypeWith(DataTypes.VECTOR(3, DataTypes.FLOAT())),
+                rowTypeWith(DataTypes.MULTISET(DataTypes.STRING())),
+                rowTypeWith(DataTypes.ARRAY(DataTypes.VARIANT())),
+                rowTypeWith(DataTypes.MAP(DataTypes.STRING(), DataTypes.BLOB())),
+                rowTypeWith(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(10, "nested_vector", DataTypes.VECTOR(3, DataTypes.FLOAT())))));
+    }
+
+    private static RowType rowTypeWith(DataType type)
+    {
+        return DataTypes.ROW(DataTypes.FIELD(0, "payload", type));
     }
 
     private static TableSchema tableSchema(long id, RowType rowType)
