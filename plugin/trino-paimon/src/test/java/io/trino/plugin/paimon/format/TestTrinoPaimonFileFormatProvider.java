@@ -41,12 +41,23 @@ import org.apache.paimon.format.SimpleStatsExtractor;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.fs.local.LocalFileIO;
+import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.io.DataFileRecordReader;
 import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.reader.FileRecordReader;
+import org.apache.paimon.schema.Schema;
+import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.statistics.SimpleColStatsCollector;
+import org.apache.paimon.stats.SimpleStats;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FileStoreTableFactory;
+import org.apache.paimon.table.sink.BatchTableCommit;
+import org.apache.paimon.table.sink.BatchTableWrite;
+import org.apache.paimon.table.sink.BatchWriteBuilder;
+import org.apache.paimon.table.sink.CommitMessage;
+import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
@@ -108,6 +119,14 @@ public class TestTrinoPaimonFileFormatProvider
     {
         assertWriterMetadataPreservesPaimonColumnStats("parquet", "snappy");
         assertWriterMetadataPreservesPaimonColumnStats("orc", "zstd");
+    }
+
+    @Test
+    void testPaimonTableWriteStoresProviderColumnStatsInDataFileMeta()
+            throws Exception
+    {
+        assertPaimonTableWriteStoresProviderColumnStatsInDataFileMeta("parquet", "snappy");
+        assertPaimonTableWriteStoresProviderColumnStatsInDataFileMeta("orc", "zstd");
     }
 
     @Test
@@ -366,6 +385,60 @@ public class TestTrinoPaimonFileFormatProvider
         assertThatThrownBy(() -> fullStatsExtractor.extract(fileIO, file, fileIO.getFileSize(file)))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("Trino Paimon file format provider can extract column stats only from writer metadata");
+    }
+
+    private void assertPaimonTableWriteStoresProviderColumnStatsInDataFileMeta(String formatIdentifier, String compression)
+            throws Exception
+    {
+        RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "name", DataTypes.STRING()));
+        LocalFileIO fileIO = LocalFileIO.create();
+        Path tablePath = new Path(tempDir.resolve("stats-table-" + formatIdentifier).toUri().toString());
+        Options options = trinoProviderOptions();
+        options.set(CoreOptions.FILE_FORMAT, formatIdentifier);
+        options.set(CoreOptions.FILE_COMPRESSION, compression);
+        options.set(CoreOptions.BUCKET, 1);
+        options.set(CoreOptions.BUCKET_KEY, "id");
+        options.set(CoreOptions.METADATA_STATS_MODE, "full");
+        options.setString(FileFormatProvider.VALIDATION_FORMAT_PROVIDER, TrinoPaimonFileFormatProvider.IDENTIFIER);
+        new SchemaManager(fileIO, tablePath).createTable(new Schema(
+                rowType.getFields(),
+                Collections.emptyList(),
+                Collections.emptyList(),
+                options.toMap(),
+                ""));
+
+        FileStoreTable table = FileStoreTableFactory.create(fileIO, tablePath);
+        BatchWriteBuilder writeBuilder = table.newBatchWriteBuilder();
+        List<CommitMessage> commitMessages;
+        try (BatchTableWrite write = writeBuilder.newWrite()) {
+            write.write(GenericRow.of(2, BinaryString.fromString("beta")));
+            write.write(GenericRow.of(null, BinaryString.fromString("alpha")));
+            write.write(GenericRow.of(1, null));
+            commitMessages = write.prepareCommit();
+        }
+
+        List<DataFileMeta> dataFiles = commitMessages.stream()
+                .map(CommitMessageImpl.class::cast)
+                .flatMap(message -> message.newFilesIncrement().newFiles().stream())
+                .toList();
+        assertThat(dataFiles).hasSize(1);
+        DataFileMeta dataFile = dataFiles.get(0);
+        assertThat(dataFile.rowCount()).isEqualTo(3);
+        assertThat(dataFile.valueStatsCols()).isNull();
+
+        SimpleStats stats = dataFile.valueStats();
+        assertThat(stats.minValues().getInt(0)).isEqualTo(1);
+        assertThat(stats.maxValues().getInt(0)).isEqualTo(2);
+        assertThat(stats.nullCounts().getLong(0)).isEqualTo(1L);
+        assertThat(stats.minValues().getString(1)).isEqualTo(BinaryString.fromString("alpha"));
+        assertThat(stats.maxValues().getString(1)).isEqualTo(BinaryString.fromString("beta"));
+        assertThat(stats.nullCounts().getLong(1)).isEqualTo(1L);
+
+        try (BatchTableCommit commit = writeBuilder.newCommit()) {
+            commit.commit(commitMessages);
+        }
     }
 
     private void assertTrinoReaderPreservesFilePositionsForPaimonSelection(String formatIdentifier, String compression)
