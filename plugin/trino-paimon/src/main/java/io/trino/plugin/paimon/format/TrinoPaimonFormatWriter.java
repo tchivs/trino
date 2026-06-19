@@ -61,7 +61,7 @@ class TrinoPaimonFormatWriter
             List<Type> columnTypes,
             List<DataType> logicalTypes,
             int writeBatchSize,
-            Optional<Long> blockSizeBytes,
+            TrinoPaimonFormatWriterOptions writerOptions,
             PositionOutputStream out,
             String compression)
             throws IOException
@@ -69,8 +69,8 @@ class TrinoPaimonFormatWriter
         this.pageBuilder = new PaimonPageBuilder(columnTypes, logicalTypes);
         this.writeBatchSize = writeBatchSize;
         this.writer = switch (requireNonNull(formatIdentifier, "formatIdentifier is null")) {
-            case PARQUET -> createParquetWriter(out, columnNames, columnTypes, blockSizeBytes, compression);
-            case ORC -> createOrcWriter(out, columnNames, columnTypes, blockSizeBytes, compression);
+            case PARQUET -> createParquetWriter(out, columnNames, columnTypes, writerOptions, compression);
+            case ORC -> createOrcWriter(out, columnNames, columnTypes, writerOptions, compression);
             default -> throw new UnsupportedOperationException(
                     "Unsupported Trino Paimon file format: " + formatIdentifier);
         };
@@ -119,19 +119,21 @@ class TrinoPaimonFormatWriter
             PositionOutputStream out,
             List<String> columnNames,
             List<Type> columnTypes,
-            Optional<Long> blockSizeBytes,
+            TrinoPaimonFormatWriterOptions writerOptions,
             String compression)
     {
         ParquetSchemaConverter schemaConverter =
                 new ParquetSchemaConverter(columnTypes, columnNames, true, true);
-        ParquetWriterOptions.Builder writerOptions = ParquetWriterOptions.builder();
-        blockSizeBytes.map(DataSize::ofBytes).ifPresent(writerOptions::setMaxBlockSize);
+        ParquetWriterOptions.Builder parquetWriterOptions = ParquetWriterOptions.builder();
+        writerOptions.blockSizeBytes().map(DataSize::ofBytes).ifPresent(parquetWriterOptions::setMaxBlockSize);
+        writerOptions.parquetPageSizeBytes().map(DataSize::ofBytes).ifPresent(parquetWriterOptions::setMaxPageSize);
+        writerOptions.parquetPageValueCountLimit().ifPresent(parquetWriterOptions::setMaxPageValueCount);
         ParquetWriter parquetWriter =
                 new ParquetWriter(
                         new CloseShieldOutputStream(out),
                         schemaConverter.getMessageType(),
                         schemaConverter.getPrimitiveTypes(),
-                        writerOptions.build(),
+                        parquetWriterOptions.build(),
                         parquetCompressionCodec(compression),
                         TRINO_PAIMON_WRITER_VERSION,
                         Optional.of(DateTimeZone.UTC),
@@ -143,14 +145,14 @@ class TrinoPaimonFormatWriter
             PositionOutputStream out,
             List<String> columnNames,
             List<Type> columnTypes,
-            Optional<Long> blockSizeBytes,
+            TrinoPaimonFormatWriterOptions writerOptions,
             String compression)
             throws IOException
     {
-        OrcWriterOptions writerOptions = new OrcWriterOptions();
-        if (blockSizeBytes.isPresent()) {
-            DataSize stripeSize = DataSize.ofBytes(blockSizeBytes.get());
-            writerOptions = writerOptions
+        OrcWriterOptions orcWriterOptions = new OrcWriterOptions();
+        if (writerOptions.blockSizeBytes().isPresent()) {
+            DataSize stripeSize = DataSize.ofBytes(writerOptions.blockSizeBytes().get());
+            orcWriterOptions = orcWriterOptions
                     .withStripeMinSize(stripeSize)
                     .withStripeMaxSize(stripeSize);
         }
@@ -161,7 +163,7 @@ class TrinoPaimonFormatWriter
                         columnTypes,
                         OrcType.createRootOrcType(columnNames, columnTypes),
                         orcCompressionKind(compression),
-                        writerOptions,
+                        orcWriterOptions,
                         ImmutableMap.of(),
                         true,
                         BOTH,

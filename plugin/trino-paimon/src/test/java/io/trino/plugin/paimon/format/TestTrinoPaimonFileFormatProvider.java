@@ -50,10 +50,14 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.FormatReaderMapping;
 import org.apache.paimon.utils.RoaringBitmap32;
+import org.apache.parquet.format.PageHeader;
+import org.apache.parquet.format.Util;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -138,6 +142,38 @@ public class TestTrinoPaimonFileFormatProvider
     }
 
     @Test
+    void testParquetWriterUsesPaimonParquetPageOptions()
+            throws Exception
+    {
+        RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "payload", DataTypes.STRING()));
+        Path file = new Path(tempDir.resolve("page-options-data.parquet").toUri().toString());
+        LocalFileIO fileIO = LocalFileIO.create();
+        Options options = trinoProviderOptions();
+        options.set("parquet.block.size", String.valueOf(1024 * 1024));
+        options.set("parquet.page.size", "1024");
+        options.set("parquet.page.row.count.limit", "5");
+        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", options);
+        try (PositionOutputStream out = fileIO.newOutputStream(file, false);
+                FormatWriter writer = trinoWriteFormat.createWriterFactory(rowType).create(out, "snappy")) {
+            for (GenericRow row : largeRows(40)) {
+                writer.addElement(row);
+            }
+        }
+
+        Slice data = Slices.wrappedBuffer(java.nio.file.Files.readAllBytes(java.nio.file.Path.of(file.toUri())));
+        ParquetMetadata metadata = MetadataReader.readFooter(
+                new SliceParquetDataSource(data, new ParquetReaderOptions()),
+                java.util.Optional.empty());
+        assertThat(metadata.getBlocks()).hasSize(1);
+
+        assertThat(readDataPageValueCounts(data, metadata.getBlocks().get(0).getColumns().get(0)))
+                .hasSizeGreaterThan(1)
+                .allSatisfy(valueCount -> assertThat(valueCount).isLessThanOrEqualTo(5));
+    }
+
+    @Test
     void testOrcWriterUsesPaimonFileBlockSize()
             throws Exception
     {
@@ -173,6 +209,26 @@ public class TestTrinoPaimonFileFormatProvider
         assertThatThrownBy(() -> trinoWriteFormat.createWriterFactory(rowType()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("file.block-size must be greater than 0 bytes");
+    }
+
+    @Test
+    void testWriterRejectsNonPositivePaimonParquetPageOptions()
+    {
+        Options pageSizeOptions = trinoProviderOptions();
+        pageSizeOptions.set("parquet.page.size", "0");
+        FileFormat pageSizeFormat = FileFormat.writerFromIdentifier("parquet", pageSizeOptions);
+
+        assertThatThrownBy(() -> pageSizeFormat.createWriterFactory(rowType()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("parquet.page.size must be greater than 0");
+
+        Options rowCountLimitOptions = trinoProviderOptions();
+        rowCountLimitOptions.set("parquet.page.row.count.limit", "0");
+        FileFormat rowCountLimitFormat = FileFormat.writerFromIdentifier("parquet", rowCountLimitOptions);
+
+        assertThatThrownBy(() -> rowCountLimitFormat.createWriterFactory(rowType()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("parquet.page.row.count.limit must be greater than 0");
     }
 
     @Test
@@ -465,6 +521,26 @@ public class TestTrinoPaimonFileFormatProvider
             rows.add(GenericRow.of(index, BinaryString.fromString(payload + index)));
         }
         return rows;
+    }
+
+    private static List<Integer> readDataPageValueCounts(Slice fileData, ColumnChunkMetaData columnChunk)
+            throws IOException
+    {
+        long start = columnChunk.getStartingPos();
+        long end = start + columnChunk.getTotalSize();
+        ByteArrayInputStream input = new ByteArrayInputStream(fileData.getBytes((int) start, (int) (end - start)));
+        List<Integer> valueCounts = new ArrayList<>();
+        while (input.available() > 0) {
+            PageHeader pageHeader = Util.readPageHeader(input);
+            if (pageHeader.isSetData_page_header()) {
+                valueCounts.add(pageHeader.getData_page_header().getNum_values());
+            }
+            if (pageHeader.isSetData_page_header_v2()) {
+                valueCounts.add(pageHeader.getData_page_header_v2().getNum_values());
+            }
+            input.skipNBytes(pageHeader.getCompressed_page_size());
+        }
+        return valueCounts;
     }
 
     private static List<InternalRow> readRows(

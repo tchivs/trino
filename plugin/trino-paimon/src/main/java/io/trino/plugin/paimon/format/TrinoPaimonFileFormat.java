@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.plugin.paimon.format.TrinoPaimonFormatWriterOptions.empty;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.format.parquet.ParquetSchemaConverter.convertToParquetMessageType;
 
@@ -40,6 +41,10 @@ public class TrinoPaimonFileFormat
 {
     static final String ORC = "orc";
     static final String PARQUET = "parquet";
+    private static final String ORC_STRIPE_SIZE = "orc.stripe.size";
+    private static final String PARQUET_BLOCK_SIZE = "parquet.block.size";
+    private static final String PARQUET_PAGE_SIZE = "parquet.page.size";
+    private static final String PARQUET_PAGE_ROW_COUNT_LIMIT = "parquet.page.row.count.limit";
 
     private final FormatContext context;
 
@@ -65,12 +70,7 @@ public class TrinoPaimonFileFormat
                 formatIdentifier,
                 type,
                 context.writeBatchSize(),
-                Optional.ofNullable(context.blockSize())
-                        .map(blockSize -> {
-                            long blockSizeBytes = blockSize.getBytes();
-                            checkArgument(blockSizeBytes > 0, "file.block-size must be greater than 0 bytes");
-                            return blockSizeBytes;
-                        }));
+                writerOptions());
     }
 
     @Override
@@ -106,6 +106,54 @@ public class TrinoPaimonFileFormat
         return rowType.getFields().stream()
                 .map(field -> PaimonTypeUtils.fromPaimonType(field.type()))
                 .toList();
+    }
+
+    private TrinoPaimonFormatWriterOptions writerOptions()
+    {
+        if (PARQUET.equals(formatIdentifier)) {
+            return new TrinoPaimonFormatWriterOptions(
+                    blockSizeBytes(PARQUET_BLOCK_SIZE),
+                    positiveIntegerOption(PARQUET_PAGE_SIZE),
+                    positiveIntegerOption(PARQUET_PAGE_ROW_COUNT_LIMIT));
+        }
+        if (ORC.equals(formatIdentifier)) {
+            return new TrinoPaimonFormatWriterOptions(
+                    blockSizeBytes(ORC_STRIPE_SIZE),
+                    Optional.empty(),
+                    Optional.empty());
+        }
+        return empty();
+    }
+
+    private Optional<Long> blockSizeBytes(String formatSpecificKey)
+    {
+        Optional<Long> blockSizeBytes = Optional.ofNullable(context.blockSize())
+                .map(blockSize -> blockSize.getBytes());
+        if (blockSizeBytes.isEmpty()) {
+            blockSizeBytes = positiveLongOption(formatSpecificKey);
+        }
+        blockSizeBytes.ifPresent(size -> checkArgument(size > 0, "file.block-size must be greater than 0 bytes"));
+        return blockSizeBytes;
+    }
+
+    private Optional<Long> positiveLongOption(String key)
+    {
+        if (!context.options().containsKey(key)) {
+            return Optional.empty();
+        }
+        long value = context.options().getLong(key, -1);
+        checkArgument(value > 0, "%s must be greater than 0", key);
+        return Optional.of(value);
+    }
+
+    private Optional<Integer> positiveIntegerOption(String key)
+    {
+        if (!context.options().containsKey(key)) {
+            return Optional.empty();
+        }
+        int value = context.options().getInteger(key, -1);
+        checkArgument(value > 0, "%s must be greater than 0", key);
+        return Optional.of(value);
     }
 
     private static void validateSupportedWriteType(RowType rowType)
