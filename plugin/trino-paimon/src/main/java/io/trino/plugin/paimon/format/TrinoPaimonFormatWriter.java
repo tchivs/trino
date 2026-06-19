@@ -14,6 +14,7 @@
 package io.trino.plugin.paimon.format;
 
 import com.google.common.collect.ImmutableMap;
+import io.airlift.units.DataSize;
 import io.trino.orc.OrcWriter;
 import io.trino.orc.OrcWriterOptions;
 import io.trino.orc.OrcWriterStats;
@@ -60,6 +61,7 @@ class TrinoPaimonFormatWriter
             List<Type> columnTypes,
             List<DataType> logicalTypes,
             int writeBatchSize,
+            Optional<Long> blockSizeBytes,
             PositionOutputStream out,
             String compression)
             throws IOException
@@ -67,8 +69,8 @@ class TrinoPaimonFormatWriter
         this.pageBuilder = new PaimonPageBuilder(columnTypes, logicalTypes);
         this.writeBatchSize = writeBatchSize;
         this.writer = switch (requireNonNull(formatIdentifier, "formatIdentifier is null")) {
-            case PARQUET -> createParquetWriter(out, columnNames, columnTypes, compression);
-            case ORC -> createOrcWriter(out, columnNames, columnTypes, compression);
+            case PARQUET -> createParquetWriter(out, columnNames, columnTypes, blockSizeBytes, compression);
+            case ORC -> createOrcWriter(out, columnNames, columnTypes, blockSizeBytes, compression);
             default -> throw new UnsupportedOperationException(
                     "Unsupported Trino Paimon file format: " + formatIdentifier);
         };
@@ -117,16 +119,19 @@ class TrinoPaimonFormatWriter
             PositionOutputStream out,
             List<String> columnNames,
             List<Type> columnTypes,
+            Optional<Long> blockSizeBytes,
             String compression)
     {
         ParquetSchemaConverter schemaConverter =
                 new ParquetSchemaConverter(columnTypes, columnNames, true, true);
+        ParquetWriterOptions.Builder writerOptions = ParquetWriterOptions.builder();
+        blockSizeBytes.map(DataSize::ofBytes).ifPresent(writerOptions::setMaxBlockSize);
         ParquetWriter parquetWriter =
                 new ParquetWriter(
                         new CloseShieldOutputStream(out),
                         schemaConverter.getMessageType(),
                         schemaConverter.getPrimitiveTypes(),
-                        ParquetWriterOptions.builder().build(),
+                        writerOptions.build(),
                         parquetCompressionCodec(compression),
                         TRINO_PAIMON_WRITER_VERSION,
                         Optional.of(DateTimeZone.UTC),
@@ -138,9 +143,17 @@ class TrinoPaimonFormatWriter
             PositionOutputStream out,
             List<String> columnNames,
             List<Type> columnTypes,
+            Optional<Long> blockSizeBytes,
             String compression)
             throws IOException
     {
+        OrcWriterOptions writerOptions = new OrcWriterOptions();
+        if (blockSizeBytes.isPresent()) {
+            DataSize stripeSize = DataSize.ofBytes(blockSizeBytes.get());
+            writerOptions = writerOptions
+                    .withStripeMinSize(stripeSize)
+                    .withStripeMaxSize(stripeSize);
+        }
         OrcWriter orcWriter =
                 new OrcWriter(
                         OutputStreamOrcDataSink.create(new CloseShieldOutputStream(out)),
@@ -148,7 +161,7 @@ class TrinoPaimonFormatWriter
                         columnTypes,
                         OrcType.createRootOrcType(columnNames, columnTypes),
                         orcCompressionKind(compression),
-                        new OrcWriterOptions(),
+                        writerOptions,
                         ImmutableMap.of(),
                         true,
                         BOTH,
