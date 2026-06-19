@@ -36,6 +36,8 @@ import org.apache.paimon.format.FileFormat;
 import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.format.FormatReaderContext;
 import org.apache.paimon.format.FormatWriter;
+import org.apache.paimon.format.SimpleColStats;
+import org.apache.paimon.format.SimpleStatsExtractor;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.fs.local.LocalFileIO;
@@ -44,6 +46,7 @@ import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.reader.FileRecordReader;
 import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.statistics.SimpleColStatsCollector;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
@@ -97,6 +100,14 @@ public class TestTrinoPaimonFileFormatProvider
     {
         assertWriterCloseLeavesPaimonOutputStreamOpen("parquet", "snappy");
         assertWriterCloseLeavesPaimonOutputStreamOpen("orc", "zstd");
+    }
+
+    @Test
+    void testWriterMetadataPreservesPaimonColumnStats()
+            throws Exception
+    {
+        assertWriterMetadataPreservesPaimonColumnStats("parquet", "snappy");
+        assertWriterMetadataPreservesPaimonColumnStats("orc", "zstd");
     }
 
     @Test
@@ -294,6 +305,67 @@ public class TestTrinoPaimonFileFormatProvider
         assertThatCode(out::flush).doesNotThrowAnyException();
         assertThatCode(out::close).doesNotThrowAnyException();
         assertThat(out.closed()).isTrue();
+    }
+
+    private void assertWriterMetadataPreservesPaimonColumnStats(String formatIdentifier, String compression)
+            throws Exception
+    {
+        RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "name", DataTypes.STRING()));
+        Path file = new Path(tempDir.resolve("stats-data." + formatIdentifier).toUri().toString());
+        LocalFileIO fileIO = LocalFileIO.create();
+        FileFormat trinoFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
+
+        Object writerMetadata;
+        try (PositionOutputStream out = fileIO.newOutputStream(file, false)) {
+            FormatWriter writer = trinoFormat.createWriterFactory(rowType).create(out, compression);
+            writer.addElement(GenericRow.of(2, BinaryString.fromString("beta")));
+            writer.addElement(GenericRow.of(null, BinaryString.fromString("alpha")));
+            writer.addElement(GenericRow.of(1, null));
+
+            assertThat(writer.writerMetadata()).isNull();
+            writer.close();
+            writerMetadata = writer.writerMetadata();
+        }
+
+        assertThat(writerMetadata).isNotNull();
+
+        SimpleStatsExtractor fullStatsExtractor = trinoFormat.createStatsExtractor(
+                rowType,
+                new SimpleColStatsCollector.Factory[] {
+                        SimpleColStatsCollector.from("FULL"),
+                        SimpleColStatsCollector.from("FULL"),
+                })
+                .orElseThrow();
+        SimpleColStats[] fullStats = fullStatsExtractor.extract(fileIO, file, 0, writerMetadata);
+
+        assertThat(fullStats[0].min()).isEqualTo(1);
+        assertThat(fullStats[0].max()).isEqualTo(2);
+        assertThat(fullStats[0].nullCount()).isEqualTo(1L);
+        assertThat(fullStats[1].min()).isEqualTo(BinaryString.fromString("alpha"));
+        assertThat(fullStats[1].max()).isEqualTo(BinaryString.fromString("beta"));
+        assertThat(fullStats[1].nullCount()).isEqualTo(1L);
+
+        SimpleStatsExtractor countsStatsExtractor = trinoFormat.createStatsExtractor(
+                rowType,
+                new SimpleColStatsCollector.Factory[] {
+                        SimpleColStatsCollector.from("COUNTS"),
+                        SimpleColStatsCollector.from("COUNTS"),
+                })
+                .orElseThrow();
+        SimpleColStats[] countsStats = countsStatsExtractor.extract(fileIO, file, 0, writerMetadata);
+
+        assertThat(countsStats[0].min()).isNull();
+        assertThat(countsStats[0].max()).isNull();
+        assertThat(countsStats[0].nullCount()).isEqualTo(1L);
+        assertThat(countsStats[1].min()).isNull();
+        assertThat(countsStats[1].max()).isNull();
+        assertThat(countsStats[1].nullCount()).isEqualTo(1L);
+
+        assertThatThrownBy(() -> fullStatsExtractor.extract(fileIO, file, fileIO.getFileSize(file)))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Trino Paimon file format provider can extract column stats only from writer metadata");
     }
 
     private void assertTrinoReaderPreservesFilePositionsForPaimonSelection(String formatIdentifier, String compression)

@@ -98,7 +98,7 @@ public class TrinoPaimonFileFormat
     public Optional<SimpleStatsExtractor> createStatsExtractor(
             RowType type, SimpleColStatsCollector.Factory[] statsCollectors)
     {
-        return Optional.empty();
+        return Optional.of(new TrinoPaimonSimpleStatsExtractor(type, statsCollectors));
     }
 
     static List<Type> trinoTypes(RowType rowType)

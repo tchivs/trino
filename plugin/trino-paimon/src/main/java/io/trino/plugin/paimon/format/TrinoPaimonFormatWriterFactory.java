@@ -59,6 +59,7 @@ class TrinoPaimonFormatWriterFactory
     {
         return new TrinoPaimonFormatWriter(
                 formatIdentifier,
+                rowType,
                 columnNames,
                 columnTypes,
                 logicalTypes,

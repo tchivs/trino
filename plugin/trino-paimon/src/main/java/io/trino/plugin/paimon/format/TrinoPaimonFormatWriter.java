@@ -29,13 +29,17 @@ import io.trino.spi.Page;
 import io.trino.spi.type.Type;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.format.FormatWriter;
+import org.apache.paimon.format.SimpleColStats;
+import org.apache.paimon.format.SimpleStatsCollector;
 import org.apache.paimon.fs.CloseShieldOutputStream;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.RowType;
 import org.joda.time.DateTimeZone;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -51,12 +55,15 @@ class TrinoPaimonFormatWriter
     private static final String TRINO_PAIMON_WRITER_VERSION = "trino-paimon";
 
     private final PaimonPageBuilder pageBuilder;
+    private final SimpleStatsCollector statsCollector;
     private final int writeBatchSize;
     private final WriterAdapter writer;
     private boolean closed;
+    private SimpleColStats[] stats;
 
     TrinoPaimonFormatWriter(
             String formatIdentifier,
+            RowType rowType,
             List<String> columnNames,
             List<Type> columnTypes,
             List<DataType> logicalTypes,
@@ -66,6 +73,7 @@ class TrinoPaimonFormatWriter
             String compression)
             throws IOException
     {
+        this.statsCollector = new SimpleStatsCollector(requireNonNull(rowType, "rowType is null"));
         this.pageBuilder = new PaimonPageBuilder(columnTypes, logicalTypes);
         this.writeBatchSize = writeBatchSize;
         this.writer = switch (requireNonNull(formatIdentifier, "formatIdentifier is null")) {
@@ -85,6 +93,7 @@ class TrinoPaimonFormatWriter
                 || (writeBatchSize > 0 && pageBuilder.getPositionCount() >= writeBatchSize)) {
             flush();
         }
+        statsCollector.collect(element);
     }
 
     @Override
@@ -103,6 +112,16 @@ class TrinoPaimonFormatWriter
         closed = true;
         flush();
         writer.close();
+        stats = statsCollector.extract();
+    }
+
+    @Override
+    public Object writerMetadata()
+    {
+        if (stats == null) {
+            return null;
+        }
+        return new WriterMetadata(stats);
     }
 
     private void flush()
@@ -241,6 +260,20 @@ class TrinoPaimonFormatWriter
                 throws IOException
         {
             writer.close();
+        }
+    }
+
+    record WriterMetadata(SimpleColStats[] simpleColStats)
+    {
+        WriterMetadata
+        {
+            simpleColStats = Arrays.copyOf(requireNonNull(simpleColStats, "simpleColStats is null"), simpleColStats.length);
+        }
+
+        @Override
+        public SimpleColStats[] simpleColStats()
+        {
+            return Arrays.copyOf(simpleColStats, simpleColStats.length);
         }
     }
 
