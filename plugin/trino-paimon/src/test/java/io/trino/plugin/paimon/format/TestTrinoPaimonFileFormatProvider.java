@@ -13,6 +13,16 @@
  */
 package io.trino.plugin.paimon.format;
 
+import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
+import io.trino.orc.MemoryOrcDataSource;
+import io.trino.orc.OrcDataSourceId;
+import io.trino.orc.OrcReader;
+import io.trino.orc.OrcReaderOptions;
+import io.trino.parquet.AbstractParquetDataSource;
+import io.trino.parquet.ParquetDataSourceId;
+import io.trino.parquet.ParquetReaderOptions;
+import io.trino.parquet.reader.MetadataReader;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Decimal;
@@ -30,6 +40,7 @@ import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.io.DataFileRecordReader;
+import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.reader.FileRecordReader;
 import org.apache.paimon.schema.TableSchema;
@@ -39,6 +50,7 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.FormatReaderMapping;
 import org.apache.paimon.utils.RoaringBitmap32;
+import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -97,6 +109,70 @@ public class TestTrinoPaimonFileFormatProvider
     {
         assertTrinoReaderWorksWithPaimonSchemaEvolutionMapping("parquet", "snappy");
         assertTrinoReaderWorksWithPaimonSchemaEvolutionMapping("orc", "zstd");
+    }
+
+    @Test
+    void testParquetWriterUsesPaimonFileBlockSize()
+            throws Exception
+    {
+        RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "payload", DataTypes.STRING()));
+        Path file = new Path(tempDir.resolve("block-size-data.parquet").toUri().toString());
+        LocalFileIO fileIO = LocalFileIO.create();
+        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", trinoProviderOptionsWithBlockSize(2 * 1024));
+        try (PositionOutputStream out = fileIO.newOutputStream(file, false);
+                FormatWriter writer = trinoWriteFormat.createWriterFactory(rowType).create(out, "snappy")) {
+            for (GenericRow row : largeRows(200)) {
+                writer.addElement(row);
+            }
+        }
+
+        Slice data = Slices.wrappedBuffer(java.nio.file.Files.readAllBytes(java.nio.file.Path.of(file.toUri())));
+        ParquetMetadata metadata = MetadataReader.readFooter(
+                new SliceParquetDataSource(data, new ParquetReaderOptions()),
+                java.util.Optional.empty());
+        assertThat(metadata.getBlocks())
+                .hasSizeGreaterThan(1)
+                .allSatisfy(block -> assertThat(block.getRowCount()).isPositive());
+    }
+
+    @Test
+    void testOrcWriterUsesPaimonFileBlockSize()
+            throws Exception
+    {
+        RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "payload", DataTypes.STRING()));
+        Path file = new Path(tempDir.resolve("block-size-data.orc").toUri().toString());
+        LocalFileIO fileIO = LocalFileIO.create();
+        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("orc", trinoProviderOptionsWithBlockSize(2 * 1024));
+        try (PositionOutputStream out = fileIO.newOutputStream(file, false);
+                FormatWriter writer = trinoWriteFormat.createWriterFactory(rowType).create(out, "zstd")) {
+            for (GenericRow row : largeRows(200)) {
+                writer.addElement(row);
+            }
+        }
+
+        Slice data = Slices.wrappedBuffer(java.nio.file.Files.readAllBytes(java.nio.file.Path.of(file.toUri())));
+        assertThat(OrcReader.createOrcReader(
+                        new MemoryOrcDataSource(new OrcDataSourceId(file.toString()), data),
+                        new OrcReaderOptions())
+                .orElseThrow()
+                .getFooter()
+                .getStripes())
+                .hasSizeGreaterThan(1)
+                .allSatisfy(stripe -> assertThat(stripe.getNumberOfRows()).isPositive());
+    }
+
+    @Test
+    void testWriterRejectsNonPositivePaimonFileBlockSize()
+    {
+        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", trinoProviderOptionsWithBlockSize(0));
+
+        assertThatThrownBy(() -> trinoWriteFormat.createWriterFactory(rowType()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("file.block-size must be greater than 0 bytes");
     }
 
     @Test
@@ -284,6 +360,13 @@ public class TestTrinoPaimonFileFormatProvider
         return options;
     }
 
+    private static Options trinoProviderOptionsWithBlockSize(long blockSizeBytes)
+    {
+        Options options = trinoProviderOptions();
+        options.set(CoreOptions.FILE_BLOCK_SIZE, MemorySize.ofBytes(blockSizeBytes));
+        return options;
+    }
+
     private static Options trinoReadProviderOptions()
     {
         Options options = new Options();
@@ -372,6 +455,16 @@ public class TestTrinoPaimonFileFormatProvider
                         new GenericArray(new int[] {6}),
                         new GenericMap(Map.of(BinaryString.fromString("yellow"), 17)),
                         GenericRow.of(false, BinaryString.fromString("nested-beta"))));
+    }
+
+    private static List<GenericRow> largeRows(int count)
+    {
+        String payload = "x".repeat(1024);
+        List<GenericRow> rows = new ArrayList<>();
+        for (int index = 0; index < count; index++) {
+            rows.add(GenericRow.of(index, BinaryString.fromString(payload + index)));
+        }
+        return rows;
     }
 
     private static List<InternalRow> readRows(
@@ -470,6 +563,24 @@ public class TestTrinoPaimonFileFormatProvider
         boolean closed()
         {
             return closed;
+        }
+    }
+
+    private static class SliceParquetDataSource
+            extends AbstractParquetDataSource
+    {
+        private final Slice data;
+
+        private SliceParquetDataSource(Slice data, ParquetReaderOptions options)
+        {
+            super(new ParquetDataSourceId("slice"), data.length(), options);
+            this.data = data;
+        }
+
+        @Override
+        protected void readInternal(long position, byte[] buffer, int bufferOffset, int bufferLength)
+        {
+            data.getBytes((int) position, buffer, bufferOffset, bufferLength);
         }
     }
 }

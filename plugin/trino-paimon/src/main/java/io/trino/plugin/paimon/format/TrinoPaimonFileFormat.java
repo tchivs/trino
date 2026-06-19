@@ -31,6 +31,7 @@ import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Optional;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.format.parquet.ParquetSchemaConverter.convertToParquetMessageType;
 
@@ -60,7 +61,16 @@ public class TrinoPaimonFileFormat
     public FormatWriterFactory createWriterFactory(RowType type)
     {
         validateSupportedWriteType(type);
-        return new TrinoPaimonFormatWriterFactory(formatIdentifier, type, context.writeBatchSize());
+        return new TrinoPaimonFormatWriterFactory(
+                formatIdentifier,
+                type,
+                context.writeBatchSize(),
+                Optional.ofNullable(context.blockSize())
+                        .map(blockSize -> {
+                            long blockSizeBytes = blockSize.getBytes();
+                            checkArgument(blockSizeBytes > 0, "file.block-size must be greater than 0 bytes");
+                            return blockSizeBytes;
+                        }));
     }
 
     @Override
