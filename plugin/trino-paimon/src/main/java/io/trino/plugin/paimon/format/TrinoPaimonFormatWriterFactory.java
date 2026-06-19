@@ -22,7 +22,6 @@ import org.apache.paimon.types.RowType;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
@@ -35,13 +34,13 @@ class TrinoPaimonFormatWriterFactory
     private final List<Type> columnTypes;
     private final List<DataType> logicalTypes;
     private final int writeBatchSize;
-    private final Optional<Long> blockSizeBytes;
+    private final TrinoPaimonFormatWriterOptions writerOptions;
 
     TrinoPaimonFormatWriterFactory(
             String formatIdentifier,
             RowType rowType,
             int writeBatchSize,
-            Optional<Long> blockSizeBytes)
+            TrinoPaimonFormatWriterOptions writerOptions)
     {
         this.formatIdentifier = requireNonNull(formatIdentifier, "formatIdentifier is null");
         this.rowType = requireNonNull(rowType, "rowType is null");
@@ -51,7 +50,7 @@ class TrinoPaimonFormatWriterFactory
                 .map(field -> field.type())
                 .toList();
         this.writeBatchSize = writeBatchSize;
-        this.blockSizeBytes = requireNonNull(blockSizeBytes, "blockSizeBytes is null");
+        this.writerOptions = requireNonNull(writerOptions, "writerOptions is null");
     }
 
     @Override
@@ -64,7 +63,7 @@ class TrinoPaimonFormatWriterFactory
                 columnTypes,
                 logicalTypes,
                 writeBatchSize,
-                blockSizeBytes,
+                writerOptions,
                 requireNonNull(out, "out is null"),
                 requireNonNull(compression, "compression is null"));
     }
