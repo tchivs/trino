@@ -3213,7 +3213,8 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testBeginCreateTableUsesCreatedPaimonSchemaForWriteColumns()
     {
-        CreatedSchemaCatalog catalog = new CreatedSchemaCatalog(createdVectorAndBlobTable());
+        AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions = new AtomicReference<>();
+        CreatedSchemaCatalog catalog = new CreatedSchemaCatalog(createdVectorAndBlobTable(copyWithoutTimeTravelOptions));
         PaimonMetadata metadata = new PaimonMetadata(catalog,
                 TESTING_TYPE_MANAGER);
         ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
@@ -3240,6 +3241,8 @@ public class PaimonMetadataTableModeTest
             assertThat(writeColumns).extracting(column -> column.logicalType().getTypeRoot())
                     .containsExactly(DataTypeRoot.VECTOR, DataTypeRoot.BLOB);
         });
+        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
         assertThat(catalog.createdSchema.fields()).extracting(field -> field.description())
                 .containsExactly("__VECTOR_FIELD;3; embedding", "__BLOB_FIELD; profile picture");
     }
@@ -4111,16 +4114,21 @@ public class PaimonMetadataTableModeTest
         return ((PaimonPartitioningHandle) partitioningHandle).getOriginalSchema();
     }
 
-    private static Table createdVectorAndBlobTable()
+    private static FileStoreTable createdVectorAndBlobTable(
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions)
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
                 DataTypes.FIELD(0, "embedding", DataTypes.VECTOR(3, DataTypes.FLOAT())),
                 DataTypes.FIELD(1, "picture", DataTypes.BLOB()));
-        return (Table) Proxy.newProxyInstance(
+        return (FileStoreTable) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
-                new Class<?>[] {Table.class},
+                new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "copy" -> proxy;
+                    case "copyWithoutTimeTravel" -> {
+                        copyWithoutTimeTravelOptions.set(Map.copyOf((Map<String, String>) args[0]));
+                        yield proxy;
+                    }
                     case "rowType" -> rowType;
                     case "toString" -> "created-vector-and-blob-table";
                     default -> throw new UnsupportedOperationException(method.getName());

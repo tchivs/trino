@@ -168,7 +168,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonTableHandle tableHandle = requireNonNull(getTableHandle(session, tableMetadata.getTable(),
                 Collections.emptyMap()));
         Catalog sessionCatalog = catalog.forSession(session);
-        Table table = tableHandle.table(sessionCatalog);
+        Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
         validateNoCaseInsensitiveDuplicateCreatedFieldNames(table.rowType().getFields(), tableMetadata.getTable());
         return tableHandle.withWriteColumns(tableMetadata.getColumns().stream()
                 .map(column -> {
