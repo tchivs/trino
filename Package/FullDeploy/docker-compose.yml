@@ -1,0 +1,12 @@
+services:
+  trino:
+    image: 'commandcenter/public/trino:${TAG}'
+    container_name: '${CONTAINER_NAME}'
+    hostname: trino
+    ports:
+      - "38080:8080"
+    environment:
+      CATALOG_MANAGEMENT: static
+      UCMS_ADDR_URL: "${UCMS_ADDR_URL}"
+    volumes:
+      - /usr/CommandCenter/trino/catalog:/etc/trino/catalog:ro

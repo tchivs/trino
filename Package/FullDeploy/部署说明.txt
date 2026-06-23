@@ -1,0 +1,4 @@
+
+1、在服务器的/usr/CommandCenter/trino/catalog目录把当前部署配置的paimon_aia.properties文件上传，并修改s3.endpoint为minio的地址，和flink的配置的一致
+2、UCMS部署
+3、部署成功后可以访问IP:38080 如果有页面出来说明部署完成
