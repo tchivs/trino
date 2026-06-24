@@ -13,8 +13,6 @@
  */
 package io.trino.plugin.paimon.format;
 
-import io.trino.orc.metadata.OrcType;
-import io.trino.parquet.writer.ParquetSchemaConverter;
 import io.trino.plugin.paimon.PaimonTypeUtils;
 import io.trino.spi.type.Type;
 import org.apache.paimon.format.FileFormat;
@@ -34,7 +32,6 @@ import java.util.Optional;
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.paimon.format.TrinoPaimonFormatWriterOptions.empty;
 import static java.util.Objects.requireNonNull;
-import static org.apache.paimon.format.parquet.ParquetSchemaConverter.convertToParquetMessageType;
 
 public class TrinoPaimonFileFormat
         extends FileFormat
@@ -76,19 +73,8 @@ public class TrinoPaimonFileFormat
     @Override
     public void validateDataFields(RowType rowType)
     {
-        if (PARQUET.equals(formatIdentifier)) {
-            if (rowType.getFields().stream()
-                    .map(field -> field.type())
-                    .anyMatch(PaimonTypeUtils::containsVariant)) {
-                convertToParquetMessageType(rowType);
-                return;
-            }
-            new ParquetSchemaConverter(trinoTypes(rowType), rowType.getFieldNames(), true, true);
-            return;
-        }
-        if (ORC.equals(formatIdentifier)) {
+        if (PARQUET.equals(formatIdentifier) || ORC.equals(formatIdentifier)) {
             validateSupportedWriteType(rowType);
-            OrcType.createRootOrcType(rowType.getFieldNames(), trinoTypes(rowType));
             return;
         }
         throw new UnsupportedOperationException("Unsupported Trino Paimon file format: " + formatIdentifier);
@@ -162,7 +148,7 @@ public class TrinoPaimonFileFormat
                 .map(field -> field.type())
                 .anyMatch(PaimonTypeUtils::containsUnsupportedTrinoFormatProviderWriteType)) {
             throw new UnsupportedOperationException(
-                    "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
+                    "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
         }
     }
 
@@ -172,7 +158,7 @@ public class TrinoPaimonFileFormat
                 .map(field -> field.type())
                 .anyMatch(PaimonTypeUtils::containsUnsupportedTrinoFormatProviderReadType)) {
             throw new UnsupportedOperationException(
-                    "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
+                    "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
         }
     }
 }

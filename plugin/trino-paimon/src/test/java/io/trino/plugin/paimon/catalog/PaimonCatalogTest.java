@@ -21,7 +21,6 @@ import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
-import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.view.View;
@@ -36,7 +35,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static io.trino.plugin.paimon.format.TrinoPaimonFileFormatProvider.IDENTIFIER;
 import static org.apache.paimon.options.CatalogOptions.WAREHOUSE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -87,18 +85,13 @@ public class PaimonCatalogTest
     }
 
     @Test
-    public void testCatalogInjectsNoHadoopFormatProviders()
+    public void testCatalogDoesNotInjectNoHadoopFormatProviders()
     {
         PaimonCatalog catalog = catalog();
         catalog.initSession(TestingConnectorSession.SESSION);
 
-        assertThat(catalog.options())
-                .containsEntry(
-                        Catalog.TABLE_RUNTIME_OPTION_PREFIX + FileFormatProvider.READ_FORMAT_PROVIDER,
-                        IDENTIFIER)
-                .containsEntry(
-                        Catalog.TABLE_RUNTIME_OPTION_PREFIX + FileFormatProvider.VALIDATION_FORMAT_PROVIDER,
-                        IDENTIFIER);
+        assertThat(catalog.options().keySet())
+                .noneMatch(key -> key.startsWith(Catalog.TABLE_RUNTIME_OPTION_PREFIX + "file.format."));
     }
 
     @Test

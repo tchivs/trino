@@ -63,7 +63,6 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.GenericVariant;
 import org.apache.paimon.deletionvectors.DeletionVector;
-import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.LeafPredicate;
@@ -821,11 +820,11 @@ public class PaimonPageSourceTest
     }
 
     @Test
-    void testPaimonReaderFallbackUsesTrinoReadProviderForUnsupportedProviderTypes()
+    void testPaimonReaderFallbackUsesTrinoFileFormatForUnsupportedTypes()
     {
         AtomicReference<Map<String, String>> copyOptions = new AtomicReference<>();
         UnsupportedOperationException readFailure = new UnsupportedOperationException(
-                "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
+                "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads");
         FileStoreTable table = readFailingFileStoreTable(copyOptions, DataTypes.ROW(
                 DataTypes.FIELD(0, "payload", DataTypes.BLOB())), readFailure);
         PaimonPageSourceProvider provider = new PaimonPageSourceProvider(
@@ -869,8 +868,7 @@ public class PaimonPageSourceTest
                             "Paimon page read uses features which are not supported by the Trino connector");
                     assertThat(exception.getCause()).isSameAs(readFailure);
                 });
-        assertThat(copyOptions.get()).containsExactly(
-                Map.entry(FileFormatProvider.READ_FORMAT_PROVIDER, "trino"));
+        assertThat(copyOptions.get()).isNull();
     }
 
     @Test

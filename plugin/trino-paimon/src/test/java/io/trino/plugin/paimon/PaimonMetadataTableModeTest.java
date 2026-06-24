@@ -50,7 +50,6 @@ import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
-import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataIncrement;
 import org.apache.paimon.manifest.PartitionEntry;
@@ -824,8 +823,7 @@ public class PaimonMetadataTableModeTest
         assertThat(metadata.getInsertLayout(session, tableHandle)).isPresent();
 
         assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(catalog.initialized).isTrue();
     }
@@ -932,8 +930,7 @@ public class PaimonMetadataTableModeTest
                 .isInstanceOf(PaimonMergeTableHandle.class);
 
         assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(catalog.initialized).isTrue();
     }
@@ -1008,8 +1005,7 @@ public class PaimonMetadataTableModeTest
                 .isEmpty();
 
         assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(committed).isTrue();
         assertThat(catalog.initialized).isTrue();
@@ -3241,8 +3237,7 @@ public class PaimonMetadataTableModeTest
             assertThat(writeColumns).extracting(column -> column.logicalType().getTypeRoot())
                     .containsExactly(DataTypeRoot.VECTOR, DataTypeRoot.BLOB);
         });
-        assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+        assertThat(copyWithoutTimeTravelOptions.get()).isNull();
         assertThat(catalog.createdSchema.fields()).extracting(field -> field.description())
                 .containsExactly("__VECTOR_FIELD;3; embedding", "__BLOB_FIELD; profile picture");
     }

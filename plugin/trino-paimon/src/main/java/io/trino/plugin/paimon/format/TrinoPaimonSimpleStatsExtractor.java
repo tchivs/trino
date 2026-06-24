@@ -49,7 +49,7 @@ class TrinoPaimonSimpleStatsExtractor
     public SimpleColStats[] extract(FileIO fileIO, Path path, long length)
     {
         throw new UnsupportedOperationException(
-                "Trino Paimon file format provider can extract column stats only from writer metadata");
+                "Trino Paimon file format can extract column stats only from writer metadata");
     }
 
     @Override
@@ -70,13 +70,13 @@ class TrinoPaimonSimpleStatsExtractor
             return result;
         }
         throw new UnsupportedOperationException(
-                "Trino Paimon file format provider can extract column stats only from writer metadata");
+                "Trino Paimon file format can extract column stats only from writer metadata");
     }
 
     @Override
     public Pair<SimpleColStats[], FileInfo> extractWithFileInfo(FileIO fileIO, Path path, long length)
     {
         throw new UnsupportedOperationException(
-                "Trino Paimon file format provider can extract column stats only from writer metadata");
+                "Trino Paimon file format can extract column stats only from writer metadata");
     }
 }

@@ -1269,11 +1269,11 @@ public class TrinoITCase
     }
 
     @Test
-    public void testSqlCreateInsertReadUsesTrinoProviderForParquetAndOrc()
+    public void testSqlCreateInsertReadUsesTrinoFileFormatForParquetAndOrc()
             throws Exception
     {
-        assertSqlCreateInsertReadUsesTrinoProvider("provider_sql_parquet_values", "PARQUET");
-        assertSqlCreateInsertReadUsesTrinoProvider("provider_sql_orc_values", "ORC");
+        assertSqlCreateInsertReadUsesTrinoFileFormat("format_sql_parquet_values", "PARQUET");
+        assertSqlCreateInsertReadUsesTrinoFileFormat("format_sql_orc_values", "ORC");
     }
 
     @Test
@@ -1503,7 +1503,7 @@ public class TrinoITCase
                 .isEqualTo("[[1]]");
     }
 
-    private void assertSqlCreateInsertReadUsesTrinoProvider(String tableName, String fileFormat)
+    private void assertSqlCreateInsertReadUsesTrinoFileFormat(String tableName, String fileFormat)
             throws Exception
     {
         sql("CREATE TABLE paimon.default." + tableName + " ("
