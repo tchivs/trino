@@ -32,6 +32,7 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.table.FileStoreTable;
@@ -518,7 +519,7 @@ public class TableChangesFunctionTest
         TableChangesFunction function = new TableChangesFunction(
                 new TestingMetadataFactory(new TestingPaimonCatalog(FullTextSearchTable.create(
                         innerTable(),
-                        new FullTextSearch("paimon", 1, "content")))));
+                        new FullTextSearch(FullTextQuery.match("paimon", "content"), 1)))));
 
         assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(INCREMENTAL_BETWEEN, "1,2")), new RecordingAccessControl()))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {

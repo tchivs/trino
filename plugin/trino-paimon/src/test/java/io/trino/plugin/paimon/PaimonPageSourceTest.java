@@ -64,6 +64,7 @@ import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.GenericVariant;
 import org.apache.paimon.deletionvectors.DeletionVector;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.LeafPredicate;
 import org.apache.paimon.predicate.VectorSearch;
@@ -1640,7 +1641,7 @@ public class PaimonPageSourceTest
 
         assertThatThrownBy(() -> PaimonPageSourceProvider.requireFileStoreTableForDirectRead(FullTextSearchTable.create(
                 innerTable(),
-                new FullTextSearch("paimon", 1, "content"))))
+                new FullTextSearch(FullTextQuery.match("paimon", "content"), 1))))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessage("Paimon full-text search tables are not supported by the Trino connector");

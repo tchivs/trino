@@ -27,6 +27,7 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.schema.Schema;
@@ -125,7 +126,7 @@ public class PaimonPageSinkProviderTest
 
         assertThatThrownBy(() -> PaimonPageSinkProvider.validateMergeBucketMode(FullTextSearchTable.create(
                 innerTable(),
-                new FullTextSearch("paimon", 1, "content"))))
+                new FullTextSearch(FullTextQuery.match("paimon", "content"), 1))))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessage("Paimon full-text search tables are not supported by the Trino connector");

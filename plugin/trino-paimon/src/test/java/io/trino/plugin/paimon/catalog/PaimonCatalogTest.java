@@ -91,7 +91,7 @@ public class PaimonCatalogTest
         catalog.initSession(TestingConnectorSession.SESSION);
 
         assertThat(catalog.options().keySet())
-                .noneMatch(key -> key.startsWith(Catalog.TABLE_RUNTIME_OPTION_PREFIX + "file.format."));
+                .noneMatch(key -> key.startsWith("table.runtime." + "file.format."));
     }
 
     @Test

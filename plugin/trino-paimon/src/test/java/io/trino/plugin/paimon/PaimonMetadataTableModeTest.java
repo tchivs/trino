@@ -54,6 +54,7 @@ import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataIncrement;
 import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.schema.Schema;
@@ -305,7 +306,7 @@ public class PaimonMetadataTableModeTest
 
         PaimonMetadata fullTextSearchMetadata = new PaimonMetadata(new TestingPaimonCatalog(FullTextSearchTable.create(
                 innerTable(),
-                new FullTextSearch("paimon", 1, "content"))), TESTING_TYPE_MANAGER);
+                new FullTextSearch(FullTextQuery.match("paimon", "content"), 1))), TESTING_TYPE_MANAGER);
         assertTrinoError(() -> fullTextSearchMetadata.getInsertLayout(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon full-text search tables are not supported by the Trino connector");
