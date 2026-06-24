@@ -73,7 +73,7 @@ public class PaimonRow
         InternalRow,
         Serializable
 {
-    private final RowKind rowKind;
+    private RowKind rowKind;
     private final Page singlePage;
     private final List<Type> types;
     private final List<DataType> logicalTypes;
@@ -165,7 +165,7 @@ public class PaimonRow
     @Override
     public void setRowKind(RowKind rowKind)
     {
-        throw new UnsupportedOperationException();
+        this.rowKind = requireNonNull(rowKind, "rowKind is null");
     }
 
     @Override
@@ -884,7 +884,7 @@ public class PaimonRow
             InternalRow
     {
         private final SqlRow sqlRow;
-        private final RowKind rowKind;
+        private RowKind rowKind;
         private final List<Type> types;
         private final List<DataType> logicalTypes;
 
@@ -915,7 +915,7 @@ public class PaimonRow
         @Override
         public void setRowKind(RowKind rowKind)
         {
-            throw new UnsupportedOperationException();
+            this.rowKind = requireNonNull(rowKind, "rowKind is null");
         }
 
         @Override

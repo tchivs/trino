@@ -286,6 +286,9 @@
                 <artifactId>trino-maven-plugin</artifactId>
                 <version>17</version>
                 <extensions>true</extensions>
+                <configuration>
+                    <servicesJar>${project.build.directory}/${project.artifactId}-${project.version}-services.jar</servicesJar>
+                </configuration>
             </plugin>
 
             <plugin>

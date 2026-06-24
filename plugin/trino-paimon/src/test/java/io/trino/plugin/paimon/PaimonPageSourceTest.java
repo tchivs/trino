@@ -79,6 +79,7 @@ import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.RowKind;
 import org.apache.parquet.schema.PrimitiveType;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Test;
@@ -121,6 +122,7 @@ import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
@@ -158,6 +160,28 @@ public class PaimonPageSourceTest
         assertThat(TypeUtils.readNativeValue(TIMESTAMP_TZ_MICROS, page.getBlock(2), 0))
                 .isEqualTo(LongTimestampWithTimeZone.fromEpochMillisAndFraction(1_695_645_403_123L,
                         456_000_000, UTC_KEY));
+        assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
+    void testPaimonRowKindCanBeUpdatedByPaimonReaderWrappers()
+    {
+        PaimonRow row = new PaimonRow(new Page(1, writeNativeValue(INTEGER, 7L)), RowKind.INSERT,
+                List.of(INTEGER), List.of(DataTypes.INT()));
+        row.setRowKind(RowKind.UPDATE_AFTER);
+
+        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(row), List.of(
+                PaimonColumnHandle.of("id", DataTypes.INT())),
+                OptionalLong.empty());
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(row.getRowKind()).isEqualTo(RowKind.UPDATE_AFTER);
+        assertThatThrownBy(() -> row.setRowKind(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("rowKind is null");
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(TypeUtils.readNativeValue(INTEGER, page.getBlock(0), 0)).isEqualTo(7L);
         assertThat(pageSource.getNextPage()).isNull();
     }
 
@@ -2415,12 +2439,12 @@ public class PaimonPageSourceTest
     private static class TestingRecordReader
             implements RecordReader<InternalRow>
     {
-        private final GenericRow row;
+        private final InternalRow row;
         private boolean returned;
 
-        private TestingRecordReader(GenericRow row)
+        private TestingRecordReader(InternalRow row)
         {
-            this.row = row;
+            this.row = requireNonNull(row, "row is null");
         }
 
         @Override
