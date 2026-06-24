@@ -38,6 +38,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarbinaryType;
@@ -73,8 +74,6 @@ import static io.trino.spi.type.TimeType.TIME_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -247,11 +246,15 @@ final class ParquetWriters
             }
         }
 
-        if (TIMESTAMP_TZ_MILLIS.equals(type)) {
-            return new TimestampTzMillisValueWriter(valuesWriter, parquetType);
-        }
-        if (TIMESTAMP_TZ_MICROS.equals(type)) {
-            return new TimestampTzMicrosValueWriter(valuesWriter, parquetType);
+        if (type instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
+            if (timestampWithTimeZoneType.getPrecision() <= 3) {
+                verifyParquetType(type, parquetType, TimestampLogicalTypeAnnotation.class, isInstant(LogicalTypeAnnotation.TimeUnit.MILLIS));
+                return new TimestampTzMillisValueWriter(valuesWriter, parquetType);
+            }
+            if (timestampWithTimeZoneType.getPrecision() <= 6) {
+                verifyParquetType(type, parquetType, TimestampLogicalTypeAnnotation.class, isInstant(LogicalTypeAnnotation.TimeUnit.MICROS));
+                return new TimestampTzMicrosValueWriter(valuesWriter, parquetType);
+            }
         }
         if (DOUBLE.equals(type)) {
             return new DoubleValueWriter(valuesWriter, parquetType);
@@ -291,5 +294,11 @@ final class ParquetWriters
         return annotation -> annotation.getUnit() == precision &&
                 // isAdjustedToUTC=false indicates Local semantics (timestamps not normalized to UTC)
                 !annotation.isAdjustedToUTC();
+    }
+
+    private static Predicate<TimestampLogicalTypeAnnotation> isInstant(LogicalTypeAnnotation.TimeUnit precision)
+    {
+        requireNonNull(precision, "precision is null");
+        return annotation -> annotation.getUnit() == precision && annotation.isAdjustedToUTC();
     }
 }
