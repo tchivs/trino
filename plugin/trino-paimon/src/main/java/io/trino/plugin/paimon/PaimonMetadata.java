@@ -1562,10 +1562,37 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         PaimonTableHandle tableHandle = getTableHandle(session, tableName, Collections.emptyMap());
         if (tableHandle == null) {
-            return Optional.empty();
+            return getViewColumnsMetadata(session, tableName);
         }
         Catalog sessionCatalog = catalog.forSession(session);
         return Optional.of(tableHandle.columnMetadatas(sessionCatalog, typeManager, session));
+    }
+
+    private Optional<List<ColumnMetadata>> getViewColumnsMetadata(ConnectorSession session, SchemaTableName viewName)
+    {
+        try {
+            Catalog sessionCatalog = catalog.forSession(session);
+            org.apache.paimon.view.View paimonView = sessionCatalog.getView(
+                    new Identifier(viewName.getSchemaName(), viewName.getTableName()));
+            return Optional.of(viewColumnsMetadata(paimonView));
+        }
+        catch (Catalog.ViewNotExistException | UnsupportedOperationException e) {
+            return Optional.empty();
+        }
+        catch (Exception e) {
+            throw paimonViewException(format("Failed to get view '%s'", viewName), e);
+        }
+    }
+
+    private List<ColumnMetadata> viewColumnsMetadata(org.apache.paimon.view.View view)
+    {
+        return view.rowType().getFields().stream()
+                .map(field -> ColumnMetadata.builder()
+                        .setName(field.name())
+                        .setType(PaimonTypeUtils.fromPaimonType(field.type(), typeManager))
+                        .setComment(Optional.ofNullable(field.description()).filter(comment -> !comment.isEmpty()))
+                        .build())
+                .collect(toList());
     }
 
     @Override
