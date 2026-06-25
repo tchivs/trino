@@ -1101,13 +1101,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
             PaimonTableHandle tableHandle)
     {
         try {
-            Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
+            Table table = sessionCatalog.getTable(Identifier.create(tableHandle.getSchemaName(),
+                    tableHandle.getTableName()));
             Map<String, String> options = table instanceof FileStoreTable fileStoreTable
                     ? fileStoreTable.schema().options()
                     : table.options();
             return Optional.of(Map.copyOf(options));
         }
-        catch (RuntimeException e) {
+        catch (Catalog.TableNotExistException | RuntimeException e) {
             return Optional.empty();
         }
     }
