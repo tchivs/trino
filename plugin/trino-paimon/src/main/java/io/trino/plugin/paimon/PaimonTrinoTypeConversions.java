@@ -18,6 +18,7 @@ import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import org.apache.paimon.data.LocalZoneTimestamp;
 import org.apache.paimon.data.Timestamp;
 
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
@@ -65,14 +66,24 @@ final class PaimonTrinoTypeConversions
         return Timestamp.fromEpochMillis(epochMillis, nanoOfMillisecond);
     }
 
-    static Object paimonTimestampToTrinoTimestampWithTimeZone(Type type, Timestamp timestamp)
+    static Object paimonTimestampToTrinoTimestampWithTimeZone(Type type, Object value)
     {
+        Timestamp timestamp = toPaimonTimestamp(value);
         TimestampWithTimeZoneType timestampWithTimeZoneType = (TimestampWithTimeZoneType) type;
         if (timestampWithTimeZoneType.isShort()) {
             return io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone(timestamp.getMillisecond(), UTC_KEY);
         }
         return fromEpochMillisAndFraction(timestamp.getMillisecond(),
                 timestamp.getNanoOfMillisecond() * PICOSECONDS_PER_NANOSECOND, UTC_KEY);
+    }
+
+    private static Timestamp toPaimonTimestamp(Object value)
+    {
+        if (value instanceof Timestamp timestamp) {
+            return timestamp;
+        }
+        LocalZoneTimestamp timestamp = (LocalZoneTimestamp) value;
+        return Timestamp.fromEpochMillis(timestamp.getMillisecond(), timestamp.getNanoOfMillisecond());
     }
 
     static Timestamp trinoTimestampWithTimeZoneToPaimon(Object trinoNativeValue)
