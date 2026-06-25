@@ -166,8 +166,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         requireNonNull(tableMetadata, "tableMetadata is null");
         rejectSystemSchemaWrite(tableMetadata.getTable().getSchemaName(), "create table");
-        TableSchema tableSchema = TableSchema.create(0, prepareSchema(tableMetadata));
+        TableSchema tableSchema = newTableSchema(tableMetadata);
         return writeLayout(tableSchema, "new table layout", tableMetadata.getTable().toString());
+    }
+
+    private TableSchema newTableSchema(ConnectorTableMetadata tableMetadata)
+    {
+        return TableSchema.create(0, prepareSchema(tableMetadata));
     }
 
     @Override
@@ -267,6 +272,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(layout, "layout is null");
         requireNonNull(retryMode, "retryMode is null");
         validateNoQueryRetries(retryMode);
+        writeLayout(newTableSchema(tableMetadata), "create table", tableMetadata.getTable().toString());
         createTable(session, tableMetadata,
                 replace ? io.trino.spi.connector.SaveMode.REPLACE : io.trino.spi.connector.SaveMode.FAIL);
         PaimonTableHandle tableHandle = requireNonNull(getTableHandle(session, tableMetadata.getTable(),

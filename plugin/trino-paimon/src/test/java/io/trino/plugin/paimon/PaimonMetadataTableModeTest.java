@@ -1107,6 +1107,38 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testBeginCreateTableRejectsUnsupportedBucketModesBeforeCreatingTable()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata keyDynamicTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(
+                        new ColumnMetadata("dt", INTEGER),
+                        new ColumnMetadata("id", INTEGER)),
+                Map.of(
+                        PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("id"),
+                        PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("dt"),
+                        "bucket", "-1"));
+        ConnectorTableMetadata postponeTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("id", INTEGER)),
+                Map.of("bucket", "-2"));
+
+        assertTrinoError(() -> metadata.beginCreateTable(SESSION, keyDynamicTable, Optional.empty(),
+                        RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported table bucket mode: KEY_DYNAMIC for Paimon create table. Key-dynamic tables require a global key-to-bucket index, which is not implemented by this Trino connector");
+        assertThat(catalog.createdSchema).isNull();
+
+        assertTrinoError(() -> metadata.beginCreateTable(SESSION, postponeTable, Optional.empty(),
+                        RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported table bucket mode: POSTPONE_MODE for Paimon create table");
+        assertThat(catalog.createdSchema).isNull();
+    }
+
+    @Test
     public void testInsertLayoutIgnoresSessionScanSnapshotAndHandleStartupSelections()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
