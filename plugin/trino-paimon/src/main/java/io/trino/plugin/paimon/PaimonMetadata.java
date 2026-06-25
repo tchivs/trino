@@ -1726,6 +1726,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
         if (exception instanceof TrinoException trinoException) {
             return trinoException;
         }
+        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+            return new TrinoException(NOT_SUPPORTED,
+                    unsupportedOperationException.getMessage() == null || unsupportedOperationException.getMessage().isBlank()
+                            ? message
+                            : unsupportedOperationException.getMessage(),
+                    unsupportedOperationException);
+        }
         if (exception instanceof IllegalArgumentException
                 || exception instanceof IllegalStateException
                 || exception instanceof NullPointerException) {

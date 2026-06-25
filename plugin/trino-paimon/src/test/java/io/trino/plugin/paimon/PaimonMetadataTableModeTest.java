@@ -2704,6 +2704,17 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testUnsupportedAlterFailureUsesNotSupported()
+    {
+        UnsupportedOperationException failure = new UnsupportedOperationException("Cannot change bucket when it is -1.");
+        PaimonMetadata metadata = new PaimonMetadata(new RuntimeFailingAlterCatalog(failure), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))),
+                NOT_SUPPORTED.toErrorCode(), "Cannot change bucket when it is -1.");
+    }
+
+    @Test
     public void testCheckedAlterFailureUsesPaimonMetadataError()
     {
         IOException failure = new IOException("metastore I/O failed");
