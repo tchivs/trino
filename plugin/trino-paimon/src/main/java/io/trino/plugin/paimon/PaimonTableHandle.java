@@ -40,8 +40,10 @@ import org.apache.paimon.table.Table;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -99,6 +101,7 @@ public class PaimonTableHandle
     private final Optional<List<PaimonColumnHandle>> projectedColumns;
     private final Optional<List<PaimonColumnHandle>> writeColumns;
     private final OptionalLong limit;
+    private final Optional<List<Map<String, String>>> deletePartitionSpecs;
     private final Map<String, String> dynamicOptions;
 
     private transient Map<Catalog, Table> tablesByCatalog;
@@ -106,7 +109,14 @@ public class PaimonTableHandle
     public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions)
     {
         this(schemaName, tableName, dynamicOptions, TupleDomain.all(), Optional.empty(), Optional.empty(),
-                OptionalLong.empty());
+                OptionalLong.empty(), Optional.empty());
+    }
+
+    public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions,
+            TupleDomain<PaimonColumnHandle> filter, Optional<List<PaimonColumnHandle>> projectedColumns,
+            Optional<List<PaimonColumnHandle>> writeColumns, OptionalLong limit)
+    {
+        this(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns, limit, Optional.empty());
     }
 
     @JsonCreator
@@ -116,7 +126,8 @@ public class PaimonTableHandle
             @JsonProperty(value = "filter", required = true) TupleDomain<PaimonColumnHandle> filter,
             @JsonProperty(value = "projectedColumns", required = true) Optional<List<PaimonColumnHandle>> projectedColumns,
             @JsonProperty(value = "writeColumns", required = true) Optional<List<PaimonColumnHandle>> writeColumns,
-            @JsonProperty(value = "limit", required = true) OptionalLong limit)
+            @JsonProperty(value = "limit", required = true) OptionalLong limit,
+            @JsonProperty("deletePartitionSpecs") Optional<List<Map<String, String>>> deletePartitionSpecs)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         checkArgument(!this.schemaName.isBlank(), "schemaName is blank");
@@ -128,6 +139,7 @@ public class PaimonTableHandle
         this.projectedColumns = copyColumnHandles(projectedColumns, "projectedColumns");
         this.writeColumns = copyColumnHandles(writeColumns, "writeColumns");
         this.limit = requireNonNull(limit, "limit is null");
+        this.deletePartitionSpecs = copyDeletePartitionSpecs(deletePartitionSpecs);
         checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
     }
 
@@ -207,6 +219,30 @@ public class PaimonTableHandle
                 });
     }
 
+    private static Optional<List<Map<String, String>>> copyDeletePartitionSpecs(
+            Optional<List<Map<String, String>>> deletePartitionSpecs)
+    {
+        Optional<List<Map<String, String>>> specs = deletePartitionSpecs == null ? Optional.empty() : deletePartitionSpecs;
+        return specs.map(partitionSpecs -> {
+            checkArgument(!partitionSpecs.isEmpty(), "deletePartitionSpecs is empty");
+            return partitionSpecs.stream()
+                    .map(PaimonTableHandle::copyDeletePartitionSpec)
+                    .toList();
+        });
+    }
+
+    private static Map<String, String> copyDeletePartitionSpec(Map<String, String> partitionSpec)
+    {
+        requireNonNull(partitionSpec, "deletePartitionSpecs contains null partitionSpec");
+        checkArgument(!partitionSpec.isEmpty(), "deletePartitionSpecs contains empty partitionSpec");
+        partitionSpec.forEach((key, value) -> {
+            requireNonNull(key, "deletePartitionSpecs contains null partition key");
+            checkArgument(!key.isBlank(), "deletePartitionSpecs contains blank partition key");
+            requireNonNull(value, "deletePartitionSpecs contains null value for key '%s'".formatted(key));
+        });
+        return Collections.unmodifiableMap(new LinkedHashMap<>(partitionSpec));
+    }
+
     private static List<PaimonColumnHandle> copyColumnHandlesList(List<?> columns, String fieldName)
     {
         requireNonNull(columns, fieldName + " is null");
@@ -271,6 +307,13 @@ public class PaimonTableHandle
     public OptionalLong getLimit()
     {
         return limit;
+    }
+
+    @JsonProperty
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    public Optional<List<Map<String, String>>> getDeletePartitionSpecs()
+    {
+        return deletePartitionSpecs;
     }
 
     public Table tableWithDynamicOptions(Catalog catalog, ConnectorSession session)
@@ -577,13 +620,13 @@ public class PaimonTableHandle
     public PaimonTableHandle copy(TupleDomain<PaimonColumnHandle> filter)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit);
+                limit, Optional.empty());
     }
 
     public PaimonTableHandle copy(Optional<List<ColumnHandle>> projectedColumns)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter,
-                toPaimonColumnHandles(projectedColumns), writeColumns, limit);
+                toPaimonColumnHandles(projectedColumns), writeColumns, limit, Optional.empty());
     }
 
     public PaimonTableHandle withWriteColumns(List<ColumnHandle> writeColumns)
@@ -591,7 +634,7 @@ public class PaimonTableHandle
         requireNonNull(writeColumns, "writeColumns is null");
         checkArgument(!writeColumns.isEmpty(), "writeColumns is empty");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns,
-                Optional.of(toPaimonColumnHandles(writeColumns)), limit);
+                Optional.of(toPaimonColumnHandles(writeColumns)), limit, Optional.empty());
     }
 
     private static Optional<List<PaimonColumnHandle>> toPaimonColumnHandles(Optional<List<ColumnHandle>> columns)
@@ -617,7 +660,14 @@ public class PaimonTableHandle
     public PaimonTableHandle copy(OptionalLong limit)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit);
+                limit, Optional.empty());
+    }
+
+    public PaimonTableHandle withDeletePartitionSpecs(List<Map<String, String>> deletePartitionSpecs)
+    {
+        requireNonNull(deletePartitionSpecs, "deletePartitionSpecs is null");
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
+                limit, Optional.of(deletePartitionSpecs));
     }
 
     @Override
@@ -634,12 +684,14 @@ public class PaimonTableHandle
                 && Objects.equals(tableName, that.tableName) && Objects.equals(filter, that.filter)
                 && Objects.equals(projectedColumns, that.projectedColumns)
                 && Objects.equals(writeColumns, that.writeColumns)
-                && Objects.equals(limit, that.limit);
+                && Objects.equals(limit, that.limit)
+                && Objects.equals(deletePartitionSpecs, that.deletePartitionSpecs);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(schemaName, tableName, filter, projectedColumns, writeColumns, limit, dynamicOptions);
+        return Objects.hash(schemaName, tableName, filter, projectedColumns, writeColumns, limit, deletePartitionSpecs,
+                dynamicOptions);
     }
 }
