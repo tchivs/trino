@@ -30,6 +30,7 @@ import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.ConfigOption;
@@ -102,6 +103,7 @@ public class PaimonTableHandle
     private final Optional<List<PaimonColumnHandle>> writeColumns;
     private final OptionalLong limit;
     private final Optional<List<Map<String, String>>> deletePartitionSpecs;
+    private final Optional<Snapshot.Operation> createTableOperation;
     private final Map<String, String> dynamicOptions;
 
     private transient Map<Catalog, Table> tablesByCatalog;
@@ -109,14 +111,24 @@ public class PaimonTableHandle
     public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions)
     {
         this(schemaName, tableName, dynamicOptions, TupleDomain.all(), Optional.empty(), Optional.empty(),
-                OptionalLong.empty(), Optional.empty());
+                OptionalLong.empty(), Optional.empty(), Optional.empty());
     }
 
     public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions,
             TupleDomain<PaimonColumnHandle> filter, Optional<List<PaimonColumnHandle>> projectedColumns,
             Optional<List<PaimonColumnHandle>> writeColumns, OptionalLong limit)
     {
-        this(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns, limit, Optional.empty());
+        this(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns, limit, Optional.empty(),
+                Optional.empty());
+    }
+
+    public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions,
+            TupleDomain<PaimonColumnHandle> filter, Optional<List<PaimonColumnHandle>> projectedColumns,
+            Optional<List<PaimonColumnHandle>> writeColumns, OptionalLong limit,
+            Optional<List<Map<String, String>>> deletePartitionSpecs)
+    {
+        this(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns, limit,
+                deletePartitionSpecs, Optional.empty());
     }
 
     @JsonCreator
@@ -127,7 +139,8 @@ public class PaimonTableHandle
             @JsonProperty(value = "projectedColumns", required = true) Optional<List<PaimonColumnHandle>> projectedColumns,
             @JsonProperty(value = "writeColumns", required = true) Optional<List<PaimonColumnHandle>> writeColumns,
             @JsonProperty(value = "limit", required = true) OptionalLong limit,
-            @JsonProperty("deletePartitionSpecs") Optional<List<Map<String, String>>> deletePartitionSpecs)
+            @JsonProperty("deletePartitionSpecs") Optional<List<Map<String, String>>> deletePartitionSpecs,
+            @JsonProperty("createTableOperation") Optional<Snapshot.Operation> createTableOperation)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         checkArgument(!this.schemaName.isBlank(), "schemaName is blank");
@@ -140,6 +153,7 @@ public class PaimonTableHandle
         this.writeColumns = copyColumnHandles(writeColumns, "writeColumns");
         this.limit = requireNonNull(limit, "limit is null");
         this.deletePartitionSpecs = copyDeletePartitionSpecs(deletePartitionSpecs);
+        this.createTableOperation = createTableOperation == null ? Optional.empty() : createTableOperation;
         checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
     }
 
@@ -314,6 +328,13 @@ public class PaimonTableHandle
     public Optional<List<Map<String, String>>> getDeletePartitionSpecs()
     {
         return deletePartitionSpecs;
+    }
+
+    @JsonProperty
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    public Optional<Snapshot.Operation> getCreateTableOperation()
+    {
+        return createTableOperation;
     }
 
     public Table tableWithDynamicOptions(Catalog catalog, ConnectorSession session)
@@ -620,13 +641,14 @@ public class PaimonTableHandle
     public PaimonTableHandle copy(TupleDomain<PaimonColumnHandle> filter)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit, Optional.empty());
+                limit, Optional.empty(), createTableOperation);
     }
 
     public PaimonTableHandle copy(Optional<List<ColumnHandle>> projectedColumns)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter,
-                toPaimonColumnHandles(projectedColumns), writeColumns, limit, Optional.empty());
+                toPaimonColumnHandles(projectedColumns), writeColumns, limit, Optional.empty(),
+                createTableOperation);
     }
 
     public PaimonTableHandle withWriteColumns(List<ColumnHandle> writeColumns)
@@ -634,7 +656,14 @@ public class PaimonTableHandle
         requireNonNull(writeColumns, "writeColumns is null");
         checkArgument(!writeColumns.isEmpty(), "writeColumns is empty");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns,
-                Optional.of(toPaimonColumnHandles(writeColumns)), limit, Optional.empty());
+                Optional.of(toPaimonColumnHandles(writeColumns)), limit, Optional.empty(), createTableOperation);
+    }
+
+    public PaimonTableHandle withCreateTableOperation(Snapshot.Operation createTableOperation)
+    {
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
+                limit, deletePartitionSpecs, Optional.of(requireNonNull(createTableOperation,
+                        "createTableOperation is null")));
     }
 
     private static Optional<List<PaimonColumnHandle>> toPaimonColumnHandles(Optional<List<ColumnHandle>> columns)
@@ -660,14 +689,14 @@ public class PaimonTableHandle
     public PaimonTableHandle copy(OptionalLong limit)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit, Optional.empty());
+                limit, Optional.empty(), createTableOperation);
     }
 
     public PaimonTableHandle withDeletePartitionSpecs(List<Map<String, String>> deletePartitionSpecs)
     {
         requireNonNull(deletePartitionSpecs, "deletePartitionSpecs is null");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit, Optional.of(deletePartitionSpecs));
+                limit, Optional.of(deletePartitionSpecs), createTableOperation);
     }
 
     @Override
@@ -685,13 +714,14 @@ public class PaimonTableHandle
                 && Objects.equals(projectedColumns, that.projectedColumns)
                 && Objects.equals(writeColumns, that.writeColumns)
                 && Objects.equals(limit, that.limit)
-                && Objects.equals(deletePartitionSpecs, that.deletePartitionSpecs);
+                && Objects.equals(deletePartitionSpecs, that.deletePartitionSpecs)
+                && Objects.equals(createTableOperation, that.createTableOperation);
     }
 
     @Override
     public int hashCode()
     {
         return Objects.hash(schemaName, tableName, filter, projectedColumns, writeColumns, limit, deletePartitionSpecs,
-                dynamicOptions);
+                createTableOperation, dynamicOptions);
     }
 }

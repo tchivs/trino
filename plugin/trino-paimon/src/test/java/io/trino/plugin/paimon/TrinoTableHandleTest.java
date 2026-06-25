@@ -28,6 +28,7 @@ import io.trino.spi.type.Type;
 import io.trino.testing.TestingConnectorSession;
 import io.trino.type.TypeDeserializer;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
@@ -90,6 +91,26 @@ public class TrinoTableHandleTest
         PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
                 Optional.empty(), Optional.empty(), OptionalLong.empty());
         testRoundTrip(expected);
+    }
+
+    @Test
+    public void testCreateTableOperationRoundTrip()
+    {
+        PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty())
+                .withCreateTableOperation(Snapshot.Operation.CREATE_TABLE_AS_SELECT);
+
+        testRoundTrip(expected);
+    }
+
+    @Test
+    public void testLegacyTableHandleJsonDefaultsCreateTableOperationToEmpty()
+    {
+        PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = removeJsonField(codec.toJson(expected), "createTableOperation");
+
+        assertThat(codec.fromJson(json).getCreateTableOperation()).isEmpty();
     }
 
     @Test
@@ -921,6 +942,8 @@ public class TrinoTableHandleTest
         assertThat(actual.getProjectedColumns()).isEqualTo(expected.getProjectedColumns());
         assertThat(actual.getWriteColumns()).isEqualTo(expected.getWriteColumns());
         assertThat(actual.getLimit()).isEqualTo(expected.getLimit());
+        assertThat(actual.getDeletePartitionSpecs()).isEqualTo(expected.getDeletePartitionSpecs());
+        assertThat(actual.getCreateTableOperation()).isEqualTo(expected.getCreateTableOperation());
     }
 
     private static String appendJsonField(String json, String field)
