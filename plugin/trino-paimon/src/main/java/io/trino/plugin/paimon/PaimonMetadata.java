@@ -383,6 +383,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 && insertBehavior != PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE) {
             return Optional.empty();
         }
+        Optional<Snapshot.Operation> commitOperation = commitOperation(insertBehavior, operation);
 
         List<CommitMessage> commitMessages = deserializeCommitMessages(fragmentsList);
         Catalog sessionCatalog = catalog.forSession(session);
@@ -400,7 +401,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
 
             try (BatchTableCommit commit = batchWriteBuilder.newCommit()) {
-                operation.ifPresent(commit::withOperation);
+                commitOperation.ifPresent(commit::withOperation);
                 commit.commit(commitMessages);
             }
         }
@@ -415,6 +416,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to commit Paimon write fragments", runtimeException);
             }
             throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to commit Paimon write fragments", e);
+        }
+        return Optional.empty();
+    }
+
+    private static Optional<Snapshot.Operation> commitOperation(
+            PaimonSessionProperties.InsertExistingPartitionsBehavior insertBehavior,
+            Optional<Snapshot.Operation> explicitOperation)
+    {
+        if (explicitOperation.isPresent()) {
+            return explicitOperation;
+        }
+        if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE) {
+            return Optional.of(Snapshot.Operation.OVERWRITE);
         }
         return Optional.empty();
     }
