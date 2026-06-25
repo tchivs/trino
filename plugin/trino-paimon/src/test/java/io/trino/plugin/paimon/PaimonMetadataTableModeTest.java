@@ -58,6 +58,7 @@ import io.trino.spi.type.VarbinaryType;
 import io.trino.testing.TestingConnectorSession;
 import io.trino.type.TypeDeserializer;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
@@ -1414,8 +1415,9 @@ public class PaimonMetadataTableModeTest
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
         AtomicBoolean committed = new AtomicBoolean();
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
         FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
-                overwriteEnabled);
+                overwriteEnabled, operation);
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
@@ -1429,6 +1431,7 @@ public class PaimonMetadataTableModeTest
         metadata.finishMerge(overwriteSession, new PaimonMergeTableHandle(tableHandle), List.of(commitFragment()), List.of());
 
         assertThat(overwriteEnabled).isFalse();
+        assertThat(operation).hasValue(Snapshot.Operation.MERGE);
         assertThat(committed).isTrue();
     }
 
@@ -5337,6 +5340,24 @@ public class PaimonMetadataTableModeTest
                 copyWithoutTimeTravelOptions,
                 commitFailure,
                 overwriteEnabled,
+                new AtomicReference<>());
+    }
+
+    private static FileStoreTable commitFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicBoolean committed,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            RuntimeException commitFailure,
+            AtomicBoolean overwriteEnabled,
+            AtomicReference<Snapshot.Operation> operation)
+    {
+        return commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                copyWithoutTimeTravelOptions,
+                commitFailure,
+                overwriteEnabled,
+                operation,
                 List.of(),
                 List.of(),
                 Map.of());
@@ -5348,6 +5369,29 @@ public class PaimonMetadataTableModeTest
             AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
             RuntimeException commitFailure,
             AtomicBoolean overwriteEnabled,
+            List<PartitionEntry> existingPartitions,
+            List<String> partitionKeys,
+            Map<String, String> options)
+    {
+        return commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                copyWithoutTimeTravelOptions,
+                commitFailure,
+                overwriteEnabled,
+                new AtomicReference<>(),
+                existingPartitions,
+                partitionKeys,
+                options);
+    }
+
+    private static FileStoreTable commitFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicBoolean committed,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            RuntimeException commitFailure,
+            AtomicBoolean overwriteEnabled,
+            AtomicReference<Snapshot.Operation> operation,
             List<PartitionEntry> existingPartitions,
             List<String> partitionKeys,
             Map<String, String> options)
@@ -5376,6 +5420,11 @@ public class PaimonMetadataTableModeTest
                         }
                         committed.set(true);
                         yield null;
+                    }
+                    case "withOperation" -> {
+                        assertThat(args).hasSize(1);
+                        operation.set((Snapshot.Operation) args[0]);
+                        yield proxy;
                     }
                     case "close", "abort", "withMetricRegistry" -> proxy;
                     case "toString" -> "testing-batch-table-commit";

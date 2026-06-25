@@ -131,6 +131,7 @@ import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
+import static org.apache.paimon.Snapshot.Operation.MERGE;
 import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
@@ -351,8 +352,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
             Collection<Slice> fragments,
             PaimonSessionProperties.InsertExistingPartitionsBehavior insertBehavior)
     {
+        return commit(session, tableHandle, fragments, insertBehavior, Optional.empty());
+    }
+
+    private Optional<ConnectorOutputMetadata> commit(
+            ConnectorSession session,
+            PaimonTableHandle tableHandle,
+            Collection<Slice> fragments,
+            PaimonSessionProperties.InsertExistingPartitionsBehavior insertBehavior,
+            Optional<org.apache.paimon.Snapshot.Operation> operation)
+    {
         requireNonNull(session, "session is null");
         requireNonNull(insertBehavior, "insertBehavior is null");
+        requireNonNull(operation, "operation is null");
         List<Slice> fragmentsList = copyFragments(fragments);
         if (fragmentsList.isEmpty()
                 && insertBehavior != PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE) {
@@ -375,6 +387,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
 
             try (BatchTableCommit commit = batchWriteBuilder.newCommit()) {
+                operation.ifPresent(commit::withOperation);
                 commit.commit(commitMessages);
             }
         }
@@ -586,7 +599,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
             Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         commit(session, getMergeTableHandle(mergeTableHandle), fragments,
-                PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND);
+                PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND,
+                Optional.of(MERGE));
     }
 
     static PaimonTableHandle getOutputTableHandle(ConnectorOutputTableHandle tableHandle)
