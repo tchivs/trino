@@ -242,9 +242,24 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> metadata.setTableProperties(SESSION, systemTableHandle, Map.of("bucket", Optional.of("4"))),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon set table properties is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.getInsertLayout(SESSION, systemTableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon insert layout is not supported for the system schema 'sys'");
         assertTrinoError(() -> metadata.beginInsert(SESSION, systemTableHandle, List.of(columnHandle), RetryMode.NO_RETRIES),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon begin insert is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, systemTableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon row change paradigm is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, systemTableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon merge row id is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.getUpdateLayout(SESSION, systemTableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon update layout is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.beginMerge(SESSION, systemTableHandle, RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon begin merge is not supported for the system schema 'sys'");
         assertTrinoError(() -> metadata.addColumn(SESSION, systemTableHandle, new ColumnMetadata("extra", INTEGER)),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon add column is not supported for the system schema 'sys'");

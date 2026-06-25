@@ -183,6 +183,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("insert layout", tableHandle);
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "insert layout");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "insert layout");
         return writeLayout(storeTable.schema(), storeTable.bucketMode(), "insert layout",
@@ -514,6 +515,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("row change paradigm", tableHandle);
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "row change paradigm");
         Catalog sessionCatalog = catalog.forSession(session);
         rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "row-level change");
         return DELETE_ROW_AND_INSERT_ROW;
@@ -524,6 +526,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("merge row id", tableHandle);
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "merge row id");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "merge row id");
         DataField[] row = storeTable.primaryKeys().stream()
@@ -544,6 +547,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("update layout", tableHandle);
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "update layout");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "update layout");
         try {
@@ -611,6 +615,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(retryMode, "retryMode is null");
         validateNoQueryRetries(retryMode);
         PaimonTableHandle paimonTableHandle = getTableHandle("begin merge", tableHandle);
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "begin merge");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "merge");
         List<ColumnHandle> writeColumns = storeTable.rowType().getFields().stream()
