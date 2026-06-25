@@ -1185,11 +1185,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
     private Schema prepareSchema(ConnectorTableMetadata tableMetadata)
     {
         Map<String, Object> properties = new HashMap<>(tableMetadata.getProperties());
-        Schema.Builder builder = Schema.newBuilder().primaryKey(PaimonTableOptions.getPrimaryKeys(properties))
-                .partitionKeys(PaimonTableOptions.getPartitionedKeys(properties))
+        List<String> primaryKeys = PaimonTableOptions.getPrimaryKeys(properties);
+        List<String> partitionKeys = PaimonTableOptions.getPartitionedKeys(properties);
+        primaryKeys.forEach(column -> rejectPaimonSystemColumnName("create table primary key", column));
+        partitionKeys.forEach(column -> rejectPaimonSystemColumnName("create table partition key", column));
+        Schema.Builder builder = Schema.newBuilder().primaryKey(primaryKeys)
+                .partitionKeys(partitionKeys)
                 .comment(tableMetadata.getComment().orElse(null));
 
         for (ColumnMetadata column : tableMetadata.getColumns()) {
+            rejectPaimonSystemColumnName("create table", column.getName());
             builder.column(column.getName(), toPaimonType(column), column.getComment());
         }
 
@@ -1378,7 +1383,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonTableHandle paimonTableHandle = getTableHandle("add column", tableHandle);
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "add column");
         requireNonNull(column, "column is null");
-        rejectHiddenColumnName("add column", column.getName());
+        rejectPaimonSystemColumnName("add column", column.getName());
         if (!column.isNullable()) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support adding not null columns");
         }
@@ -1404,9 +1409,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "rename column");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("rename column", source);
-        rejectHiddenColumn(paimonColumnHandle, "rename column");
+        rejectPaimonSystemColumn(paimonColumnHandle, "rename column");
         validateFieldName("target", target);
-        rejectHiddenColumnName("rename column", target);
+        rejectPaimonSystemColumnName("rename column", target);
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.renameColumn(paimonColumnHandle.getColumnName(), target));
         try {
@@ -1426,7 +1431,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "drop column");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop column", column);
-        rejectHiddenColumn(paimonColumnHandle, "drop column");
+        rejectPaimonSystemColumn(paimonColumnHandle, "drop column");
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.dropColumn(paimonColumnHandle.getColumnName()));
         try {
@@ -1466,7 +1471,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "set column comment");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("set column comment", column);
-        rejectHiddenColumn(paimonColumnHandle, "set column comment");
+        rejectPaimonSystemColumn(paimonColumnHandle, "set column comment");
         requireNonNull(comment, "comment is null");
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.updateColumnComment(paimonColumnHandle.getColumnName(), comment.orElse(null)));
@@ -1488,7 +1493,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "set column type");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("set column type", column);
-        rejectHiddenColumn(paimonColumnHandle, "set column type");
+        rejectPaimonSystemColumn(paimonColumnHandle, "set column type");
 
         DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"))
                 .copy(paimonColumnHandle.logicalType().isNullable());
@@ -1513,7 +1518,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "drop not null constraint");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop not null constraint", column);
-        rejectHiddenColumn(paimonColumnHandle, "drop not null constraint");
+        rejectPaimonSystemColumn(paimonColumnHandle, "drop not null constraint");
 
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.updateColumnNullability(paimonColumnHandle.getColumnName(), true));
@@ -1538,7 +1543,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         // Build field path: parentPath + fieldName
         String[] fieldNames = buildFieldNamesArray(parentPath, fieldName);
-        rejectHiddenRootField("add field", fieldNames[0]);
+        rejectPaimonSystemRootField("add field", fieldNames[0]);
 
         // Convert Trino Type to Paimon DataType
         DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"));
@@ -1567,7 +1572,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "drop field");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop field", column);
-        rejectHiddenColumn(paimonColumnHandle, "drop field");
+        rejectPaimonSystemColumn(paimonColumnHandle, "drop field");
         validateRelativeFieldPath("drop field", fieldPath);
 
         // Build full field path: columnName + fieldPath
@@ -1594,7 +1599,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "rename field");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         validateAbsoluteFieldPath("rename field", fieldPath);
-        rejectHiddenRootField("rename field", fieldPath.get(0));
+        rejectPaimonSystemRootField("rename field", fieldPath.get(0));
         validateFieldName("target", target);
 
         // fieldPath includes column name and nested path
@@ -1621,7 +1626,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "set field type");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         validateAbsoluteFieldPath("set field type", fieldPath);
-        rejectHiddenRootField("set field type", fieldPath.get(0));
+        rejectPaimonSystemRootField("set field type", fieldPath.get(0));
 
         // fieldPath includes column name and nested path
         String[] fieldNames = fieldPath.toArray(new String[0]);
@@ -1690,31 +1695,31 @@ public record PaimonMetadata(PaimonCatalog catalog,
         checkArgument(!StringUtils.isNullOrWhitespaceOnly(fieldName), label + " contains blank field");
     }
 
-    private static void rejectHiddenColumn(PaimonColumnHandle columnHandle, String operation)
+    private static void rejectPaimonSystemColumn(PaimonColumnHandle columnHandle, String operation)
     {
         requireNonNull(columnHandle, "columnHandle is null");
-        if (columnHandle.isHidden()) {
+        if (PaimonColumnHandle.isPaimonSystemColumnName(columnHandle.getColumnName())) {
             throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon " + operation + " is not supported for hidden column '"
+                    "Paimon " + operation + " is not supported for system column '"
                             + columnHandle.getColumnName() + "'");
         }
     }
 
-    private static void rejectHiddenColumnName(String operation, String columnName)
+    private static void rejectPaimonSystemColumnName(String operation, String columnName)
     {
         requireNonNull(columnName, "columnName is null");
-        if (PaimonColumnHandle.isHiddenColumnName(columnName)) {
+        if (PaimonColumnHandle.isPaimonSystemColumnName(columnName)) {
             throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon " + operation + " is not supported for hidden column '" + columnName + "'");
+                    "Paimon " + operation + " is not supported for system column '" + columnName + "'");
         }
     }
 
-    private static void rejectHiddenRootField(String operation, String rootField)
+    private static void rejectPaimonSystemRootField(String operation, String rootField)
     {
         requireNonNull(rootField, "rootField is null");
-        if (PaimonColumnHandle.isHiddenColumnName(rootField)) {
+        if (PaimonColumnHandle.isPaimonSystemColumnName(rootField)) {
             throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon " + operation + " is not supported for hidden column '" + rootField + "'");
+                    "Paimon " + operation + " is not supported for system column '" + rootField + "'");
         }
     }
 

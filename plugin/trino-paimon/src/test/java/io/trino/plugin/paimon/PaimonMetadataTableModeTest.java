@@ -3177,7 +3177,7 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testDdlRejectsHiddenColumnsBeforeCatalogAlter()
+    public void testDdlRejectsSystemColumnsBeforeCatalogAlter()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
@@ -3185,51 +3185,66 @@ public class PaimonMetadataTableModeTest
         PaimonColumnHandle rowId = PaimonColumnHandle.of(PaimonColumnHandle.TRINO_ROW_ID_NAME, DataTypes.BIGINT());
         PaimonColumnHandle sequenceNumber = PaimonColumnHandle.of(PaimonColumnHandle.PAIMON_SEQUENCE_NUMBER_NAME,
                 DataTypes.BIGINT());
+        PaimonColumnHandle valueKind = PaimonColumnHandle.of("_VALUE_KIND", DataTypes.TINYINT());
         PaimonColumnHandle visibleColumn = PaimonColumnHandle.of("payload", DataTypes.ROW(
                 DataTypes.FIELD(0, "zip", DataTypes.INT())));
 
         assertTrinoError(() -> metadata.addColumn(SESSION, tableHandle,
                         new ColumnMetadata(PaimonColumnHandle.PAIMON_ROW_ID_NAME, BIGINT)),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon add column is not supported for hidden column '_row_id'");
+                "Paimon add column is not supported for system column '_row_id'");
+        assertTrinoError(() -> metadata.addColumn(SESSION, tableHandle,
+                        new ColumnMetadata("_KEY_id", BIGINT)),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon add column is not supported for system column '_key_id'");
         assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, rowId, "renamed"),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon rename column is not supported for hidden column '$row_id'");
+                "Paimon rename column is not supported for system column '$row_id'");
         assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, visibleColumn,
                         PaimonColumnHandle.PAIMON_SEQUENCE_NUMBER_NAME),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon rename column is not supported for hidden column '_SEQUENCE_NUMBER'");
+                "Paimon rename column is not supported for system column '_SEQUENCE_NUMBER'");
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, visibleColumn, "rowkind"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported for system column 'rowkind'");
         assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, sequenceNumber),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon drop column is not supported for hidden column '_SEQUENCE_NUMBER'");
+                "Paimon drop column is not supported for system column '_SEQUENCE_NUMBER'");
+        assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, valueKind),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop column is not supported for system column '_VALUE_KIND'");
         assertTrinoError(() -> metadata.setColumnComment(SESSION, tableHandle, rowId, Optional.of("comment")),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon set column comment is not supported for hidden column '$row_id'");
+                "Paimon set column comment is not supported for system column '$row_id'");
         assertTrinoError(() -> metadata.setColumnType(SESSION, tableHandle, rowId, BIGINT),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon set column type is not supported for hidden column '$row_id'");
+                "Paimon set column type is not supported for system column '$row_id'");
         assertTrinoError(() -> metadata.dropNotNullConstraint(SESSION, tableHandle, rowId),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon drop not null constraint is not supported for hidden column '$row_id'");
+                "Paimon drop not null constraint is not supported for system column '$row_id'");
         assertTrinoError(() -> metadata.addField(SESSION, tableHandle, List.of(),
                         PaimonColumnHandle.PAIMON_ROW_ID_NAME, BIGINT, false),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon add field is not supported for hidden column '_ROW_ID'");
+                "Paimon add field is not supported for system column '_ROW_ID'");
         assertTrinoError(() -> metadata.addField(SESSION, tableHandle,
                         List.of(PaimonColumnHandle.PAIMON_ROW_ID_NAME), "nested", BIGINT, false),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon add field is not supported for hidden column '_ROW_ID'");
+                "Paimon add field is not supported for system column '_ROW_ID'");
+        assertTrinoError(() -> metadata.addField(SESSION, tableHandle, List.of("_KEY_payload"), "nested", BIGINT,
+                        false),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon add field is not supported for system column '_KEY_payload'");
         assertTrinoError(() -> metadata.dropField(SESSION, tableHandle, rowId, List.of("nested")),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon drop field is not supported for hidden column '$row_id'");
+                "Paimon drop field is not supported for system column '$row_id'");
         assertTrinoError(() -> metadata.renameField(SESSION, tableHandle,
                         List.of(PaimonColumnHandle.PAIMON_ROW_ID_NAME, "nested"), "renamed"),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon rename field is not supported for hidden column '_ROW_ID'");
+                "Paimon rename field is not supported for system column '_ROW_ID'");
         assertTrinoError(() -> metadata.setFieldType(SESSION, tableHandle,
                         List.of(PaimonColumnHandle.PAIMON_SEQUENCE_NUMBER_NAME, "nested"), BIGINT),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon set field type is not supported for hidden column '_SEQUENCE_NUMBER'");
+                "Paimon set field type is not supported for system column '_SEQUENCE_NUMBER'");
 
         assertThat(catalog.alterCalls).isEqualTo(0);
     }
@@ -3492,6 +3507,41 @@ public class PaimonMetadataTableModeTest
                 io.trino.spi.connector.SaveMode.FAIL))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("partitioned_by contains non-string value");
+
+        ConnectorTableMetadata systemColumn = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("_VALUE_KIND", INTEGER)));
+        assertTrinoError(() -> metadata.createTable(SESSION, systemColumn,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon create table is not supported for system column '_value_kind'");
+
+        ConnectorTableMetadata keyPrefixedColumn = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("_KEY_id", INTEGER)));
+        assertTrinoError(() -> metadata.createTable(SESSION, keyPrefixedColumn,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon create table is not supported for system column '_key_id'");
+
+        ConnectorTableMetadata systemPrimaryKey = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("id", INTEGER)),
+                Map.of(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("rowkind")));
+        assertTrinoError(() -> metadata.createTable(SESSION, systemPrimaryKey,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon create table primary key is not supported for system column 'rowkind'");
+
+        ConnectorTableMetadata systemPartitionKey = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("id", INTEGER)),
+                Map.of(PaimonTableOptions.PARTITIONED_BY_PROPERTY,
+                        List.of(PaimonColumnHandle.PAIMON_SEQUENCE_NUMBER_NAME)));
+        assertTrinoError(() -> metadata.createTable(SESSION, systemPartitionKey,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon create table partition key is not supported for system column '_SEQUENCE_NUMBER'");
 
         assertThat(catalog.initialized).isFalse();
         assertThat(catalog.createdSchema).isNull();
