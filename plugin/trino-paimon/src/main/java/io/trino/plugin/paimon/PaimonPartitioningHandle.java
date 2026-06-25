@@ -27,16 +27,24 @@ import java.util.Arrays;
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
-public record PaimonPartitioningHandle(byte[] schema) implements ConnectorPartitioningHandle
+public record PaimonPartitioningHandle(byte[] schema, boolean singleNode) implements ConnectorPartitioningHandle
 {
     @JsonCreator
-    public PaimonPartitioningHandle(@JsonProperty(value = "schema", required = true) byte[] schema)
+    public PaimonPartitioningHandle(
+            @JsonProperty(value = "schema", required = true) byte[] schema,
+            @JsonProperty("singleNode") boolean singleNode)
     {
         requireNonNull(schema, "schema is null");
         checkArgument(schema.length > 0, "schema is empty");
         byte[] schemaCopy = schema.clone();
         deserializeTableSchema(schemaCopy);
         this.schema = schemaCopy;
+        this.singleNode = singleNode;
+    }
+
+    public PaimonPartitioningHandle(byte[] schema)
+    {
+        this(schema, false);
     }
 
     @JsonAnySetter
@@ -50,6 +58,13 @@ public record PaimonPartitioningHandle(byte[] schema) implements ConnectorPartit
     public byte[] schema()
     {
         return schema.clone();
+    }
+
+    @Override
+    @JsonProperty
+    public boolean singleNode()
+    {
+        return singleNode;
     }
 
     @JsonIgnore
@@ -74,7 +89,7 @@ public record PaimonPartitioningHandle(byte[] schema) implements ConnectorPartit
     @JsonIgnore
     public boolean isSingleNode()
     {
-        return ConnectorPartitioningHandle.super.isSingleNode();
+        return singleNode;
     }
 
     @Override
@@ -94,12 +109,14 @@ public record PaimonPartitioningHandle(byte[] schema) implements ConnectorPartit
             return false;
         }
         PaimonPartitioningHandle that = (PaimonPartitioningHandle) o;
-        return Arrays.equals(schema, that.schema);
+        return singleNode == that.singleNode && Arrays.equals(schema, that.schema);
     }
 
     @Override
     public int hashCode()
     {
-        return Arrays.hashCode(schema);
+        int result = Arrays.hashCode(schema);
+        result = 31 * result + Boolean.hashCode(singleNode);
+        return result;
     }
 }

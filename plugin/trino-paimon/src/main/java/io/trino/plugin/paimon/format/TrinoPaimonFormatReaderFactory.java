@@ -225,7 +225,8 @@ class TrinoPaimonFormatReaderFactory
                     if (isSelected(filePosition)) {
                         returnedPosition = filePosition;
                         return new PaimonRow(
-                                page.getSingleValuePage(pagePosition),
+                                page,
+                                pagePosition,
                                 RowKind.INSERT,
                                 columnTypes,
                                 logicalTypes);

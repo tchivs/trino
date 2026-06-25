@@ -73,21 +73,30 @@ public class PaimonRow
         InternalRow,
         Serializable
 {
-    private final RowKind rowKind;
-    private final Page singlePage;
+    private RowKind rowKind;
+    private final Page page;
+    private final int position;
     private final List<Type> types;
     private final List<DataType> logicalTypes;
 
     public PaimonRow(Page singlePage, RowKind rowKind, List<Type> types, List<DataType> logicalTypes)
     {
-        requireNonNull(singlePage, "singlePage is null");
-        requireNonNull(rowKind, "rowKind is null");
+        this(requireNonNull(singlePage, "singlePage is null"), 0, rowKind, types, logicalTypes);
         verify(singlePage.getPositionCount() == 1, "singlePage must have only one row");
+    }
+
+    public PaimonRow(Page page, int position, RowKind rowKind, List<Type> types, List<DataType> logicalTypes)
+    {
+        requireNonNull(page, "page is null");
+        requireNonNull(rowKind, "rowKind is null");
+        verify(position >= 0 && position < page.getPositionCount(),
+                "position %s is not valid for page with %s positions", position, page.getPositionCount());
         requireNonNull(types, "types is null");
         requireNonNull(logicalTypes, "logicalTypes is null");
-        verify(types.size() == singlePage.getChannelCount(), "types size must match page channel count");
-        verify(logicalTypes.size() == singlePage.getChannelCount(), "logicalTypes size must match page channel count");
-        this.singlePage = singlePage;
+        verify(types.size() == page.getChannelCount(), "types size must match page channel count");
+        verify(logicalTypes.size() == page.getChannelCount(), "logicalTypes size must match page channel count");
+        this.page = page;
+        this.position = position;
         this.rowKind = rowKind;
         this.types = copyTypes(types);
         this.logicalTypes = copyLogicalTypes(logicalTypes);
@@ -153,7 +162,7 @@ public class PaimonRow
     @Override
     public int getFieldCount()
     {
-        return singlePage.getChannelCount();
+        return page.getChannelCount();
     }
 
     @Override
@@ -171,25 +180,25 @@ public class PaimonRow
     @Override
     public boolean isNullAt(int i)
     {
-        return singlePage.getBlock(i).isNull(0);
+        return page.getBlock(i).isNull(position);
     }
 
     @Override
     public boolean getBoolean(int i)
     {
-        return (boolean) TypeUtils.readNativeValue(BOOLEAN, singlePage.getBlock(i), 0);
+        return (boolean) TypeUtils.readNativeValue(BOOLEAN, page.getBlock(i), position);
     }
 
     @Override
     public byte getByte(int i)
     {
-        return readByte(singlePage.getBlock(i), 0);
+        return readByte(page.getBlock(i), position);
     }
 
     @Override
     public short getShort(int i)
     {
-        long value = (long) TypeUtils.readNativeValue(SMALLINT, singlePage.getBlock(i), 0);
+        long value = (long) TypeUtils.readNativeValue(SMALLINT, page.getBlock(i), position);
         if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
             throw new IllegalArgumentException("Value out of range for short: " + value);
         }
@@ -199,7 +208,7 @@ public class PaimonRow
     @Override
     public int getInt(int i)
     {
-        long value = readInt(singlePage.getBlock(i), 0, types.get(i));
+        long value = readInt(page.getBlock(i), position, types.get(i));
         if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("Value out of range for int: " + value);
         }
@@ -209,19 +218,19 @@ public class PaimonRow
     @Override
     public long getLong(int i)
     {
-        return (long) TypeUtils.readNativeValue(BIGINT, singlePage.getBlock(i), 0);
+        return (long) TypeUtils.readNativeValue(BIGINT, page.getBlock(i), position);
     }
 
     @Override
     public float getFloat(int i)
     {
-        return Float.intBitsToFloat(toIntExact((long) TypeUtils.readNativeValue(REAL, singlePage.getBlock(i), 0)));
+        return Float.intBitsToFloat(toIntExact((long) TypeUtils.readNativeValue(REAL, page.getBlock(i), position)));
     }
 
     @Override
     public double getDouble(int i)
     {
-        return (double) TypeUtils.readNativeValue(DOUBLE, singlePage.getBlock(i), 0);
+        return (double) TypeUtils.readNativeValue(DOUBLE, page.getBlock(i), position);
     }
 
     @Override
@@ -234,7 +243,7 @@ public class PaimonRow
     public Decimal getDecimal(int i, int decimalPrecision, int decimalScale)
     {
         Object value = TypeUtils.readNativeValue(DecimalType.createDecimalType(decimalPrecision, decimalScale),
-                singlePage.getBlock(i), 0);
+                page.getBlock(i), position);
         if (decimalPrecision <= MAX_SHORT_PRECISION) {
             return Decimal.fromUnscaledLong((Long) value, decimalPrecision, decimalScale);
         }
@@ -247,13 +256,13 @@ public class PaimonRow
     @Override
     public Timestamp getTimestamp(int i, int timestampPrecision)
     {
-        return readTimestamp(singlePage.getBlock(i), 0, types.get(i));
+        return readTimestamp(page.getBlock(i), position, types.get(i));
     }
 
     @Override
     public byte[] getBinary(int i)
     {
-        Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, singlePage.getBlock(i), 0);
+        Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, page.getBlock(i), position);
         return slice.getBytes();
     }
 
@@ -263,7 +272,7 @@ public class PaimonRow
         if (isNullAt(i)) {
             return null;
         }
-        return parseVariantFromBlock(singlePage.getBlock(i), 0, types.get(i));
+        return parseVariantFromBlock(page.getBlock(i), position, types.get(i));
     }
 
     @Override
@@ -283,7 +292,7 @@ public class PaimonRow
         }
         Type type = types.get(i);
         if (type instanceof ArrayType arrayType) {
-            return new TrinoArray(arrayType.getObject(singlePage.getBlock(i), 0), arrayType.getElementType(),
+            return new TrinoArray(arrayType.getObject(page.getBlock(i), position), arrayType.getElementType(),
                     nestedLogicalType(i, 0));
         }
         throw new UnsupportedOperationException("Array type metadata is required");
@@ -304,7 +313,7 @@ public class PaimonRow
         }
         Type type = types.get(i);
         if (type instanceof MapType mapType) {
-            SqlMap sqlMap = mapType.getObject(singlePage.getBlock(i), 0);
+            SqlMap sqlMap = mapType.getObject(page.getBlock(i), position);
             return new TrinoMap(sqlMap, mapType.getKeyType(), mapType.getValueType(),
                     mapKeyLogicalType(logicalType(i)), mapValueLogicalType(logicalType(i)),
                     isMultiset(logicalType(i)));
@@ -321,7 +330,7 @@ public class PaimonRow
         Type type = types.get(i);
         if (type instanceof io.trino.spi.type.RowType rowType) {
             validateRowFieldCount(numFields, rowType.getFields().size());
-            return new TrinoNestedRow(rowType.getObject(singlePage.getBlock(i), 0), rowKind,
+            return new TrinoNestedRow(rowType.getObject(page.getBlock(i), position), rowKind,
                     rowType.getTypeParameters(), nestedLogicalTypes(i));
         }
         throw new UnsupportedOperationException("Row type metadata is required");

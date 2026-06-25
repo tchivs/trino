@@ -67,8 +67,8 @@ public final class PaimonTableSupport
         return switch (mode) {
             case HASH_DYNAMIC -> new TrinoException(NOT_SUPPORTED,
                     "Unsupported table bucket mode: HASH_DYNAMIC for Paimon " + operation
-                            + ". Dynamic-bucket tables require assigning a Paimon bucket before writing each row; "
-                            + "this Trino connector write path does not implement TableWrite.write(row, bucket)");
+                            + ". Dynamic-bucket row-level writes require Flink-style two-stage bucket assignment "
+                            + "and dynamic bucket index coordination; this Trino connector currently supports HASH_DYNAMIC INSERT only");
             case KEY_DYNAMIC -> new TrinoException(NOT_SUPPORTED,
                     "Unsupported table bucket mode: KEY_DYNAMIC for Paimon " + operation
                             + ". Key-dynamic tables require a global key-to-bucket index, which is not implemented by this Trino connector");

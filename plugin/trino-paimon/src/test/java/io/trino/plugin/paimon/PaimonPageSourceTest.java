@@ -2292,6 +2292,7 @@ public class PaimonPageSourceTest
                         yield proxy;
                     }
                     case "rowType" -> rowType;
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(new Options());
                     case "toString" -> "testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });

@@ -139,6 +139,24 @@ public class TrinoRowTest
     }
 
     @Test
+    void testReadsSelectedPositionFromMultiPositionPage()
+    {
+        BlockBuilder idBuilder = INTEGER.createFixedSizeBlockBuilder(2);
+        writeNativeValue(INTEGER, idBuilder, 11L);
+        writeNativeValue(INTEGER, idBuilder, 22L);
+        BlockBuilder nameBuilder = VARCHAR.createBlockBuilder(null, 2);
+        writeNativeValue(VARCHAR, nameBuilder, Slices.utf8Slice("first"));
+        writeNativeValue(VARCHAR, nameBuilder, Slices.utf8Slice("second"));
+        Page page = new Page(2, idBuilder.build(), nameBuilder.build());
+
+        PaimonRow trinoRow = new PaimonRow(page, 1, RowKind.INSERT, List.of(INTEGER, VARCHAR),
+                logicalTypes(List.of(INTEGER, VARCHAR)));
+
+        assertThat(trinoRow.getInt(0)).isEqualTo(22);
+        assertThat(trinoRow.getString(1)).isEqualTo(BinaryString.fromString("second"));
+    }
+
+    @Test
     void testTimeAndHighPrecisionTimestampConversions()
     {
         LongTimestamp timestamp = new LongTimestamp(1_695_645_403_123_456L, 789_000);

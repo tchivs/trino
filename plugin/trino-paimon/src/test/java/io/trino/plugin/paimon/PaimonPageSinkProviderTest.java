@@ -73,6 +73,8 @@ public class PaimonPageSinkProviderTest
     {
         assertThatCode(() -> PaimonPageSinkProvider.validateWriteBucketMode(fileStoreTable(BucketMode.HASH_FIXED)))
                 .doesNotThrowAnyException();
+        assertThatCode(() -> PaimonPageSinkProvider.validateWriteBucketMode(fileStoreTable(BucketMode.HASH_DYNAMIC)))
+                .doesNotThrowAnyException();
         assertThatCode(() -> PaimonPageSinkProvider.validateWriteBucketMode(fileStoreTable(BucketMode.BUCKET_UNAWARE)))
                 .doesNotThrowAnyException();
     }
@@ -80,13 +82,12 @@ public class PaimonPageSinkProviderTest
     @Test
     public void testUnsupportedWriteBucketModesFailFast()
     {
-        assertUnsupportedWriteBucketMode(BucketMode.HASH_DYNAMIC);
         assertUnsupportedWriteBucketMode(BucketMode.KEY_DYNAMIC);
         assertUnsupportedWriteBucketMode(BucketMode.POSTPONE_MODE);
     }
 
     @Test
-    public void testMergeRequiresHashFixedBucketMode()
+    public void testMergeRequiresFixedBucketMode()
     {
         assertThatCode(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(BucketMode.HASH_FIXED)))
                 .doesNotThrowAnyException();
@@ -636,12 +637,55 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testDynamicBucketPageSinkWritesWithAssignedBucket()
+    {
+        AtomicReference<Object[]> writeArguments = new AtomicReference<>();
+        AtomicBoolean assignerPrepared = new AtomicBoolean();
+        org.apache.paimon.table.sink.BatchTableWrite writer = writer(List.of(), writeArguments);
+        PaimonPageSink.DynamicBucketWriter dynamicBucketWriter = new PaimonPageSink.DynamicBucketWriter(
+                new org.apache.paimon.table.sink.RowPartitionKeyExtractor(TableSchema.create(1, new Schema(
+                        DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())).getFields(),
+                        List.of(),
+                        List.of("id"),
+                        Map.of(CoreOptions.BUCKET.key(), "-1"),
+                        ""))),
+                new org.apache.paimon.index.BucketAssigner()
+                {
+                    @Override
+                    public int assign(org.apache.paimon.data.BinaryRow partition, int keyHash)
+                    {
+                        assertThat(partition).isNotNull();
+                        assertThat(keyHash).isNotZero();
+                        return 3;
+                    }
+
+                    @Override
+                    public void prepareCommit(long commitIdentifier)
+                    {
+                        assertThat(commitIdentifier).isEqualTo(org.apache.paimon.table.sink.BatchWriteBuilder.COMMIT_IDENTIFIER);
+                        assignerPrepared.set(true);
+                    }
+                });
+        PaimonPageSink pageSink = new PaimonPageSink(writer, List.of(INTEGER), List.of(DataTypes.INT()),
+                dynamicBucketWriter);
+
+        pageSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 11L)));
+        assertThat(writeArguments.get()).hasSize(2);
+        assertThat(writeArguments.get()[0]).isInstanceOf(PaimonRow.class);
+        assertThat(writeArguments.get()[1]).isEqualTo(3);
+
+        assertThat(pageSink.finish().join()).isEmpty();
+        assertThat(assignerPrepared).isTrue();
+    }
+
+    @Test
     public void testPageSinkWriteExceptionsUsePaimonErrorCodes()
     {
         IllegalArgumentException contractViolation = new IllegalArgumentException("metadata mismatch");
         IOException writeFailure = new IOException("write failed");
         TrinoException alreadyMapped = new TrinoException(PAIMON_WRITER_DATA_ERROR, "already mapped");
         UnsupportedOperationException unsupported = new UnsupportedOperationException("unsupported nested type");
+        UnsupportedOperationException unsupportedWithoutMessage = new UnsupportedOperationException();
         RuntimeException runtimeFailure = new RuntimeException("runtime write failed");
 
         assertThat(PaimonPageSink.wrapWriteException(contractViolation)).isSameAs(contractViolation);
@@ -649,8 +693,14 @@ public class PaimonPageSinkProviderTest
         assertThat(PaimonPageSink.wrapWriteException(unsupported))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector");
+                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector: unsupported nested type");
                     assertThat(exception.getCause()).isSameAs(unsupported);
+                });
+        assertThat(PaimonPageSink.wrapWriteException(unsupportedWithoutMessage))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(unsupportedWithoutMessage);
                 });
         assertThat(PaimonPageSink.wrapWriteException(runtimeFailure))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
@@ -758,7 +808,8 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> provider.createPageSink(null, session, (ConnectorInsertTableHandle) tableHandle, null))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector");
+                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector: "
+                            + "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
                     assertThat(exception.getCause()).isSameAs(writerFailure);
                 });
     }
@@ -783,7 +834,8 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> unsupportedVariantSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 1L))))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector");
+                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector: "
+                            + "Paimon VARIANT requires Trino JSON type metadata");
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
                             .hasMessage("Paimon VARIANT requires Trino JSON type metadata");
                 });
@@ -813,9 +865,6 @@ public class PaimonPageSinkProviderTest
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessageContaining(
                             "Unsupported table bucket mode: " + bucketMode + " for Paimon writes");
-                    if (bucketMode == BucketMode.HASH_DYNAMIC) {
-                        assertThat(exception).hasMessageContaining("TableWrite.write(row, bucket)");
-                    }
                 });
     }
 
@@ -827,7 +876,7 @@ public class PaimonPageSinkProviderTest
                     assertThat(exception).hasMessageContaining(
                             "Unsupported table bucket mode: " + bucketMode + " for Paimon merge writes");
                     if (bucketMode == BucketMode.HASH_DYNAMIC) {
-                        assertThat(exception).hasMessageContaining("TableWrite.write(row, bucket)");
+                        assertThat(exception).hasMessageContaining("HASH_DYNAMIC INSERT only");
                     }
                 });
     }
@@ -1197,6 +1246,12 @@ public class PaimonPageSinkProviderTest
     }
 
     private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages,
+            AtomicReference<Object[]> writeArguments)
+    {
+        return writer(commitMessages, null, null, null, writeArguments);
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages,
             RuntimeException closeFailure)
     {
         return writer(commitMessages, null, null, closeFailure);
@@ -1204,6 +1259,13 @@ public class PaimonPageSinkProviderTest
 
     private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages,
             Exception writeFailure, Exception prepareFailure, Exception closeFailure)
+    {
+        return writer(commitMessages, writeFailure, prepareFailure, closeFailure, new AtomicReference<>());
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages,
+            Exception writeFailure, Exception prepareFailure, Exception closeFailure,
+            AtomicReference<Object[]> writeArguments)
     {
         return (org.apache.paimon.table.sink.BatchTableWrite) Proxy.newProxyInstance(
                 PaimonPageSinkProviderTest.class.getClassLoader(),
@@ -1213,6 +1275,7 @@ public class PaimonPageSinkProviderTest
                         if (writeFailure != null) {
                             throw writeFailure;
                         }
+                        writeArguments.set(args);
                         yield null;
                     }
                     case "prepareCommit" -> {

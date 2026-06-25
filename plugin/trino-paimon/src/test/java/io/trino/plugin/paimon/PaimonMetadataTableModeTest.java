@@ -285,6 +285,9 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata vectorSearchMetadata = new PaimonMetadata(new TestingPaimonCatalog(VectorSearchTable.create(
                 innerTable(),
                 new VectorSearch(new float[] {1.0f}, 1, "embedding"))), TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> vectorSearchMetadata.getRowChangeParadigm(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon vector search tables are not supported by the Trino connector");
         assertTrinoError(() -> vectorSearchMetadata.getInsertLayout(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon vector search tables are not supported by the Trino connector");
@@ -306,7 +309,10 @@ public class PaimonMetadataTableModeTest
 
         PaimonMetadata fullTextSearchMetadata = new PaimonMetadata(new TestingPaimonCatalog(FullTextSearchTable.create(
                 innerTable(),
-                new FullTextSearch("paimon", 1, "content"))), TESTING_TYPE_MANAGER);
+                new FullTextSearch(FullTextQuery.match("paimon", "content"), 1))), TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> fullTextSearchMetadata.getRowChangeParadigm(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon full-text search tables are not supported by the Trino connector");
         assertTrinoError(() -> fullTextSearchMetadata.getInsertLayout(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon full-text search tables are not supported by the Trino connector");
@@ -334,6 +340,8 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
+        assertUnsupportedFileStoreTable(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
+                "Paimon row-level change requires FileStoreTable");
         assertUnsupportedFileStoreTable(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
                 "Paimon merge row id requires FileStoreTable");
         assertThat(catalog.initialized).isTrue();
@@ -352,6 +360,8 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
+        assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(), "Paimon row-level change requires primary keys");
         assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(), "Paimon merge row id requires primary keys");
         assertTrinoError(() -> metadata.getUpdateLayout(SESSION, tableHandle),
@@ -377,6 +387,9 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
+        assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon row-level change is not supported for this table: Merge engine first-row can not support batch delete.");
         assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon merge row id is not supported for this table: Merge engine first-row can not support batch delete.");
@@ -863,24 +876,36 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testDynamicBucketWritePlanningFailsWithActionableMessage()
+    public void testDynamicBucketWritePlanningUsesSingleNodeLayoutAndRejectsRowLevelChanges()
     {
-        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_DYNAMIC)),
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(
+                BucketMode.HASH_DYNAMIC,
+                new AtomicBoolean(),
+                rowType,
+                rowType,
+                List.of(),
+                List.of("id"))),
                 TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
-        assertTrinoError(() -> metadata.getInsertLayout(SESSION, tableHandle),
+        ConnectorTableLayout insertLayout = metadata.getInsertLayout(SESSION, tableHandle).orElseThrow();
+        assertThat(insertLayout.getPartitionColumns()).isEmpty();
+        assertThat(insertLayout.getPartitioning().orElseThrow())
+                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> assertThat(handle.isSingleNode()).isTrue());
+
+        assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon insert layout. Dynamic-bucket tables require assigning a Paimon bucket before writing each row; this Trino connector write path does not implement TableWrite.write(row, bucket)");
+                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon row-level change. Dynamic-bucket row-level writes require Flink-style two-stage bucket assignment and dynamic bucket index coordination; this Trino connector currently supports HASH_DYNAMIC INSERT only");
         assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon merge row id. Dynamic-bucket tables require assigning a Paimon bucket before writing each row; this Trino connector write path does not implement TableWrite.write(row, bucket)");
+                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon merge row id. Dynamic-bucket row-level writes require Flink-style two-stage bucket assignment and dynamic bucket index coordination; this Trino connector currently supports HASH_DYNAMIC INSERT only");
         assertTrinoError(() -> metadata.getUpdateLayout(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon update layout. Dynamic-bucket tables require assigning a Paimon bucket before writing each row; this Trino connector write path does not implement TableWrite.write(row, bucket)");
+                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon update layout. Dynamic-bucket row-level writes require Flink-style two-stage bucket assignment and dynamic bucket index coordination; this Trino connector currently supports HASH_DYNAMIC INSERT only");
         assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
                 NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon merge. Dynamic-bucket tables require assigning a Paimon bucket before writing each row; this Trino connector write path does not implement TableWrite.write(row, bucket)");
+                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon merge. Dynamic-bucket row-level writes require Flink-style two-stage bucket assignment and dynamic bucket index coordination; this Trino connector currently supports HASH_DYNAMIC INSERT only");
     }
 
     @Test
@@ -928,7 +953,7 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testBeginMergeRequiresHashFixedBucketMode()
+    public void testBeginMergeRequiresPrimaryKeyBucketMode()
     {
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(BucketMode.BUCKET_UNAWARE)),
                 TESTING_TYPE_MANAGER);

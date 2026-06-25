@@ -19,9 +19,14 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.type.Type;
 import jakarta.annotation.Nullable;
+import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.index.BucketAssigner;
 import org.apache.paimon.table.sink.BatchTableWrite;
+import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
+import org.apache.paimon.table.sink.RowPartitionKeyExtractor;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
 
@@ -46,12 +51,21 @@ public class PaimonPageSink
     private final BatchTableWrite writer;
     private final List<Type> columnTypes;
     private final List<DataType> logicalTypes;
+    @Nullable
+    private final DynamicBucketWriter dynamicBucketWriter;
 
     public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes)
+    {
+        this(writer, columnTypes, logicalTypes, null);
+    }
+
+    public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes,
+            @Nullable DynamicBucketWriter dynamicBucketWriter)
     {
         this.writer = requireNonNull(writer, "writer is null");
         this.columnTypes = copyColumnTypes(columnTypes);
         this.logicalTypes = copyLogicalTypes(logicalTypes);
+        this.dynamicBucketWriter = dynamicBucketWriter;
         checkArgument(this.columnTypes.size() == this.logicalTypes.size(),
                 "columnTypes and logicalTypes size mismatch: %s != %s",
                 this.columnTypes.size(), this.logicalTypes.size());
@@ -92,7 +106,13 @@ public class PaimonPageSink
                 page.getChannelCount(), columnTypes.size());
         try {
             for (int i = 0; i < page.getPositionCount(); i++) {
-                writer.write(new PaimonRow(page.getSingleValuePage(i), rowKind, columnTypes, logicalTypes));
+                PaimonRow row = new PaimonRow(page, i, rowKind, columnTypes, logicalTypes);
+                if (dynamicBucketWriter == null) {
+                    writer.write(row);
+                }
+                else {
+                    dynamicBucketWriter.write(writer, row);
+                }
             }
         }
         catch (Exception e) {
@@ -106,6 +126,9 @@ public class PaimonPageSink
         Collection<Slice> commitTasks = new ArrayList<>();
         RuntimeException failure = null;
         try {
+            if (dynamicBucketWriter != null) {
+                dynamicBucketWriter.prepareCommit();
+            }
             List<CommitMessage> commitMessages = requireNonNull(writer.prepareCommit(), "Paimon writer returned null commit messages");
             CommitMessageSerializer serializer = new CommitMessageSerializer();
             for (CommitMessage commitMessage : commitMessages) {
@@ -164,8 +187,11 @@ public class PaimonPageSink
             return trinoException;
         }
         if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+            String detail = unsupportedOperationException.getMessage();
             return new TrinoException(NOT_SUPPORTED,
-                    "Paimon write uses features which are not supported by the Trino connector",
+                    detail == null || detail.isBlank()
+                            ? "Paimon write uses features which are not supported by the Trino connector"
+                            : "Paimon write uses features which are not supported by the Trino connector: " + detail,
                     unsupportedOperationException);
         }
         if (exception instanceof IllegalArgumentException
@@ -189,5 +215,30 @@ public class PaimonPageSink
             return runtimeException;
         }
         return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer", exception);
+    }
+
+    static class DynamicBucketWriter
+    {
+        private final RowPartitionKeyExtractor keyExtractor;
+        private final BucketAssigner bucketAssigner;
+
+        DynamicBucketWriter(RowPartitionKeyExtractor keyExtractor, BucketAssigner bucketAssigner)
+        {
+            this.keyExtractor = requireNonNull(keyExtractor, "keyExtractor is null");
+            this.bucketAssigner = requireNonNull(bucketAssigner, "bucketAssigner is null");
+        }
+
+        void write(BatchTableWrite writer, InternalRow row)
+                throws Exception
+        {
+            BinaryRow partition = keyExtractor.partition(row);
+            int bucket = bucketAssigner.assign(partition, keyExtractor.trimmedPrimaryKey(row).hashCode());
+            writer.write(row, bucket);
+        }
+
+        void prepareCommit()
+        {
+            bucketAssigner.prepareCommit(BatchWriteBuilder.COMMIT_IDENTIFIER);
+        }
     }
 }

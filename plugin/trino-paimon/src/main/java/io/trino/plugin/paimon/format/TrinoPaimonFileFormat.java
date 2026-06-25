@@ -22,8 +22,14 @@ import org.apache.paimon.format.FileFormatFactory.FormatContext;
 import org.apache.paimon.format.FormatReaderFactory;
 import org.apache.paimon.format.FormatWriterFactory;
 import org.apache.paimon.format.SimpleStatsExtractor;
+import org.apache.paimon.format.orc.OrcFileFormatFactory;
+import org.apache.paimon.format.parquet.ParquetFileFormatFactory;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.statistics.SimpleColStatsCollector;
+import org.apache.paimon.table.SpecialFields;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeChecks;
+import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.RowType;
 
 import javax.annotation.Nullable;
@@ -58,6 +64,9 @@ public class TrinoPaimonFileFormat
     public FormatReaderFactory createReaderFactory(RowType dataSchemaRowType, RowType projectedRowType,
             @Nullable List<Predicate> filters)
     {
+        if (isRowTrackingRead(dataSchemaRowType, projectedRowType)) {
+            return nativeFileFormat().createReaderFactory(dataSchemaRowType, projectedRowType, filters);
+        }
         validateSupportedReadType(projectedRowType);
         return new TrinoPaimonFormatReaderFactory(formatIdentifier, projectedRowType);
     }
@@ -66,6 +75,10 @@ public class TrinoPaimonFileFormat
     public FormatWriterFactory createWriterFactory(RowType type)
     {
         validateSupportedWriteType(type);
+        if (ORC.equals(formatIdentifier) && containsTimeType(type)) {
+            throw new UnsupportedOperationException(
+                    "Trino Paimon ORC writer does not support Paimon TIME columns; use Parquet or Paimon's native writer for ORC TIME data");
+        }
         return new TrinoPaimonFormatWriterFactory(
                 formatIdentifier,
                 type,
@@ -156,6 +169,33 @@ public class TrinoPaimonFileFormat
         return Optional.of(value);
     }
 
+    private FileFormat nativeFileFormat()
+    {
+        return switch (formatIdentifier) {
+            case PARQUET -> new ParquetFileFormatFactory().create(context);
+            case ORC -> new OrcFileFormatFactory().create(context);
+            default -> throw new UnsupportedOperationException("Unsupported Trino Paimon file format: " + formatIdentifier);
+        };
+    }
+
+    private static boolean isRowTrackingRead(RowType dataSchemaRowType, RowType projectedRowType)
+    {
+        requireNonNull(dataSchemaRowType, "dataSchemaRowType is null");
+        requireNonNull(projectedRowType, "projectedRowType is null");
+        return containsField(dataSchemaRowType, SpecialFields.ROW_ID.name())
+                && projectedRowType.getFieldNames().stream()
+                        .anyMatch(field -> SpecialFields.ROW_ID.name().equalsIgnoreCase(field)
+                                || SpecialFields.SEQUENCE_NUMBER.name().equalsIgnoreCase(field));
+    }
+
+    private static boolean containsField(RowType rowType, String fieldName)
+    {
+        requireNonNull(rowType, "rowType is null");
+        requireNonNull(fieldName, "fieldName is null");
+        return rowType.getFieldNames().stream()
+                .anyMatch(field -> fieldName.equalsIgnoreCase(field));
+    }
+
     private static void validateSupportedWriteType(RowType rowType)
     {
         if (rowType.getFields().stream()
@@ -164,6 +204,26 @@ public class TrinoPaimonFileFormat
             throw new UnsupportedOperationException(
                     "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
         }
+    }
+
+    private static boolean containsTimeType(RowType rowType)
+    {
+        return rowType.getFields().stream()
+                .map(field -> field.type())
+                .anyMatch(TrinoPaimonFileFormat::containsTimeType);
+    }
+
+    private static boolean containsTimeType(DataType type)
+    {
+        requireNonNull(type, "type is null");
+        if (type.getTypeRoot() == DataTypeRoot.TIME_WITHOUT_TIME_ZONE) {
+            return true;
+        }
+        return switch (type.getTypeRoot()) {
+            case ARRAY, MAP, MULTISET, ROW, VECTOR -> DataTypeChecks.getNestedTypes(type).stream()
+                    .anyMatch(TrinoPaimonFileFormat::containsTimeType);
+            default -> false;
+        };
     }
 
     private static void validateSupportedReadType(RowType rowType)

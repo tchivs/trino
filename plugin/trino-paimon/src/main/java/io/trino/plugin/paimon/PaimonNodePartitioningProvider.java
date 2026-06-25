@@ -15,6 +15,7 @@ package io.trino.plugin.paimon;
 
 import com.google.inject.Inject;
 import io.trino.spi.connector.BucketFunction;
+import io.trino.spi.connector.ConnectorBucketNodeMap;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
 import io.trino.spi.connector.ConnectorPartitioningHandle;
 import io.trino.spi.connector.ConnectorSession;
@@ -22,6 +23,7 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.type.Type;
 
 import java.util.List;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
@@ -36,6 +38,16 @@ public class PaimonNodePartitioningProvider
     }
 
     @Override
+    public Optional<ConnectorBucketNodeMap> getBucketNodeMapping(ConnectorTransactionHandle transactionHandle,
+            ConnectorSession session, ConnectorPartitioningHandle partitioningHandle)
+    {
+        if (getPartitioningHandle(partitioningHandle).isSingleNode()) {
+            return Optional.of(ConnectorBucketNodeMap.createBucketNodeMap(1));
+        }
+        return Optional.empty();
+    }
+
+    @Override
     public BucketFunction getBucketFunction(ConnectorTransactionHandle transactionHandle, ConnectorSession session,
             ConnectorPartitioningHandle partitioningHandle, List<Type> partitionChannelTypes, int workerCount)
     {
@@ -43,6 +55,9 @@ public class PaimonNodePartitioningProvider
         requireNonNull(partitionChannelTypes, "partitionChannelTypes is null");
         partitionChannelTypes.forEach(type -> requireNonNull(type, "partitionChannelTypes contains null type"));
         checkArgument(workerCount > 0, "workerCount must be positive: %s", workerCount);
+        if (paimonPartitioningHandle.isSingleNode()) {
+            return (page, position) -> 0;
+        }
         return new FixedBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, workerCount);
     }
 

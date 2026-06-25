@@ -40,6 +40,18 @@ public class TrinoPartitioningHandleTest
         byte[] schemaData = serializedTestSchema();
         PaimonPartitioningHandle expected = new PaimonPartitioningHandle(schemaData);
         testRoundTrip(expected);
+        assertThat(expected.isSingleNode()).isFalse();
+    }
+
+    @Test
+    public void testSingleNodePartitioningHandle()
+            throws Exception
+    {
+        byte[] schemaData = serializedTestSchema();
+        PaimonPartitioningHandle expected = new PaimonPartitioningHandle(schemaData, true);
+
+        testRoundTrip(expected);
+        assertThat(expected.isSingleNode()).isTrue();
     }
 
     @Test
