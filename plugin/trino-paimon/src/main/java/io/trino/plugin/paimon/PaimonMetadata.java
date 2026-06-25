@@ -143,7 +143,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             case BUCKET_UNAWARE :
                 return Optional.empty();
             default :
-                throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
+                throw PaimonTableSupport.unsupportedBucketMode("insert layout", bucketMode);
         }
     }
 
@@ -252,7 +252,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         requireNonNull(insertBehavior, "insertBehavior is null");
         List<Slice> fragmentsList = copyFragments(fragments);
-        if (fragmentsList.isEmpty()) {
+        if (fragmentsList.isEmpty()
+                && insertBehavior != PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE) {
             return Optional.empty();
         }
 
@@ -353,11 +354,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge row id");
         BucketMode bucketMode = storeTable.bucketMode();
         if (bucketMode != BucketMode.HASH_FIXED) {
-            throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
+            throw PaimonTableSupport.unsupportedBucketMode("merge row id", bucketMode);
         }
-        if (storeTable.primaryKeys().isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Paimon merge row id requires primary keys");
-        }
+        PaimonTableSupport.validateRowLevelDelete(storeTable, "merge row id");
         DataField[] row = storeTable.primaryKeys().stream()
                 .map(primaryKey -> {
                     if (!storeTable.rowType().containsField(primaryKey)) {
@@ -380,8 +379,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "update layout");
         BucketMode bucketMode = storeTable.bucketMode();
         if (bucketMode != BucketMode.HASH_FIXED) {
-            throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
+            throw PaimonTableSupport.unsupportedBucketMode("update layout", bucketMode);
         }
+        PaimonTableSupport.validateRowLevelDelete(storeTable, "update layout");
         try {
             return Optional.of(new PaimonPartitioningHandle(InstantiationUtil.serializeObject(storeTable.schema())));
         }
@@ -435,8 +435,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge");
         BucketMode bucketMode = storeTable.bucketMode();
         if (bucketMode != BucketMode.HASH_FIXED) {
-            throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + bucketMode);
+            throw PaimonTableSupport.unsupportedBucketMode("merge", bucketMode);
         }
+        PaimonTableSupport.validateRowLevelDelete(storeTable, "merge");
         List<ColumnHandle> writeColumns = storeTable.rowType().getFields().stream()
                 .map(column -> PaimonColumnHandle.of(column.name(), column.type(), typeManager))
                 .collect(toList());

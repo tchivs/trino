@@ -277,6 +277,22 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testMergePageSinkRequiresPrimaryKeys()
+    {
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
+                writeReadyFileStoreTable(new AtomicBoolean(), new AtomicReference<>(), new AtomicBoolean(),
+                        List.of(), Map.of(), List.of())));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())));
+
+        assertThatThrownBy(() -> provider.createMergeSink(null, SESSION, new PaimonMergeTableHandle(tableHandle), null))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon merge writes requires primary keys");
+                });
+    }
+
+    @Test
     public void testInsertOverwriteRejectsPartitionedTableWithoutDynamicPartitionOverwrite()
     {
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
@@ -794,7 +810,11 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> PaimonPageSinkProvider.validateWriteBucketMode(fileStoreTable(bucketMode)))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("Unsupported table bucket mode: " + bucketMode);
+                    assertThat(exception).hasMessageContaining(
+                            "Unsupported table bucket mode: " + bucketMode + " for Paimon writes");
+                    if (bucketMode == BucketMode.HASH_DYNAMIC) {
+                        assertThat(exception).hasMessageContaining("TableWrite.write(row, bucket)");
+                    }
                 });
     }
 
@@ -803,7 +823,11 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(bucketMode)))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("Unsupported table bucket mode: " + bucketMode);
+                    assertThat(exception).hasMessageContaining(
+                            "Unsupported table bucket mode: " + bucketMode + " for Paimon merge writes");
+                    if (bucketMode == BucketMode.HASH_DYNAMIC) {
+                        assertThat(exception).hasMessageContaining("TableWrite.write(row, bucket)");
+                    }
                 });
     }
 
@@ -826,12 +850,28 @@ public class PaimonPageSinkProviderTest
     private static FileStoreTable fileStoreTable(BucketMode bucketMode, AtomicBoolean copiedWithLatestSchema,
             RowType rowType)
     {
+        return fileStoreTable(bucketMode, copiedWithLatestSchema, rowType, List.of("id"), Map.of());
+    }
+
+    private static FileStoreTable fileStoreTable(BucketMode bucketMode, AtomicBoolean copiedWithLatestSchema,
+            RowType rowType, List<String> primaryKeys, Map<String, String> options)
+    {
         return (FileStoreTable) Proxy.newProxyInstance(
                 PaimonPageSinkProviderTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "bucketMode" -> bucketMode;
                     case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of();
+                    case "primaryKeys" -> primaryKeys;
+                    case "options" -> options;
+                    case "coreOptions" -> new CoreOptions(new Options(options));
+                    case "schema" -> TableSchema.create(1, new Schema(
+                            rowType.getFields(),
+                            List.of(),
+                            primaryKeys,
+                            mergeOptions(options, Map.of(CoreOptions.BUCKET.key(), "7")),
+                            ""));
                     case "copyWithLatestSchema" -> {
                         copiedWithLatestSchema.set(true);
                         yield proxy;
@@ -934,6 +974,18 @@ public class PaimonPageSinkProviderTest
             List<String> partitionKeys,
             Map<String, String> options)
     {
+        return writeReadyFileStoreTable(copiedWithLatestSchema, copyWithoutTimeTravelOptions, overwriteEnabled,
+                partitionKeys, options, List.of("id"));
+    }
+
+    private static FileStoreTable writeReadyFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            AtomicBoolean overwriteEnabled,
+            List<String> partitionKeys,
+            Map<String, String> options,
+            List<String> primaryKeys)
+    {
         org.apache.paimon.table.sink.BatchTableWrite writer = writer();
         org.apache.paimon.table.sink.BatchWriteBuilder batchWriteBuilder = (org.apache.paimon.table.sink.BatchWriteBuilder) Proxy
                 .newProxyInstance(
@@ -959,12 +1011,14 @@ public class PaimonPageSinkProviderTest
                     case "bucketMode" -> BucketMode.HASH_FIXED;
                     case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
                     case "partitionKeys" -> partitionKeys;
+                    case "primaryKeys" -> primaryKeys;
+                    case "options" -> options;
                     case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> TableSchema.create(1, new Schema(
                             DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())).getFields(),
                             partitionKeys,
-                            List.of(),
-                            options,
+                            primaryKeys,
+                            mergeOptions(options, Map.of(CoreOptions.BUCKET.key(), "7")),
                             ""));
                     case "newBatchWriteBuilder" -> batchWriteBuilder;
                     case "copyWithLatestSchema" -> {
@@ -987,12 +1041,14 @@ public class PaimonPageSinkProviderTest
                     case "bucketMode" -> BucketMode.HASH_FIXED;
                     case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
                     case "partitionKeys" -> partitionKeys;
+                    case "primaryKeys" -> primaryKeys;
+                    case "options" -> options;
                     case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> TableSchema.create(1, new Schema(
                             DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())).getFields(),
                             partitionKeys,
-                            List.of(),
-                            options,
+                            primaryKeys,
+                            mergeOptions(options, Map.of(CoreOptions.BUCKET.key(), "7")),
                             ""));
                     case "copyWithoutTimeTravel" -> {
                         copyWithoutTimeTravelOptions.set(Map.copyOf((Map<String, String>) args[0]));
@@ -1008,6 +1064,14 @@ public class PaimonPageSinkProviderTest
                     case "toString" -> "stale-testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    private static Map<String, String> mergeOptions(Map<String, String> first, Map<String, String> second)
+    {
+        java.util.HashMap<String, String> result = new java.util.HashMap<>();
+        result.putAll(first);
+        result.putAll(second);
+        return Map.copyOf(result);
     }
 
     private static FileStoreTable writerInitializationFailingFileStoreTable(

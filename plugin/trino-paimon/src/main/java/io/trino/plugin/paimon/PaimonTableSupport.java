@@ -14,6 +14,7 @@
 package io.trino.plugin.paimon;
 
 import io.trino.spi.TrinoException;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FullTextSearchTable;
 import org.apache.paimon.table.Table;
@@ -21,6 +22,7 @@ import org.apache.paimon.table.VectorSearchTable;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
+import static org.apache.paimon.table.PrimaryKeyTableUtils.validatePKUpsertDeletable;
 
 public final class PaimonTableSupport
 {
@@ -55,6 +57,39 @@ public final class PaimonTableSupport
         if (!table.partitionKeys().isEmpty() && !table.coreOptions().dynamicPartitionOverwrite()) {
             throw new TrinoException(NOT_SUPPORTED,
                     "Paimon insert overwrite requires dynamic-partition-overwrite=true for partitioned tables");
+        }
+    }
+
+    public static TrinoException unsupportedBucketMode(String operation, BucketMode mode)
+    {
+        requireNonNull(operation, "operation is null");
+        requireNonNull(mode, "mode is null");
+        return switch (mode) {
+            case HASH_DYNAMIC -> new TrinoException(NOT_SUPPORTED,
+                    "Unsupported table bucket mode: HASH_DYNAMIC for Paimon " + operation
+                            + ". Dynamic-bucket tables require assigning a Paimon bucket before writing each row; "
+                            + "this Trino connector write path does not implement TableWrite.write(row, bucket)");
+            case KEY_DYNAMIC -> new TrinoException(NOT_SUPPORTED,
+                    "Unsupported table bucket mode: KEY_DYNAMIC for Paimon " + operation
+                            + ". Key-dynamic tables require a global key-to-bucket index, which is not implemented by this Trino connector");
+            default -> new TrinoException(NOT_SUPPORTED,
+                    "Unsupported table bucket mode: " + mode + " for Paimon " + operation);
+        };
+    }
+
+    public static void validateRowLevelDelete(FileStoreTable table, String operation)
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(operation, "operation is null");
+        if (table.primaryKeys().isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Paimon " + operation + " requires primary keys");
+        }
+        try {
+            validatePKUpsertDeletable(table);
+        }
+        catch (UnsupportedOperationException e) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon " + operation + " is not supported for this table: " + e.getMessage(), e);
         }
     }
 }

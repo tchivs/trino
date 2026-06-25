@@ -354,6 +354,38 @@ public class PaimonMetadataTableModeTest
 
         assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(), "Paimon merge row id requires primary keys");
+        assertTrinoError(() -> metadata.getUpdateLayout(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(), "Paimon update layout requires primary keys");
+        assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(), "Paimon merge requires primary keys");
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testRowLevelDeleteRequiresSupportedMergeEngine()
+    {
+        FileStoreTable table = fileStoreTable(
+                BucketMode.HASH_FIXED,
+                new AtomicBoolean(),
+                DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())),
+                DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())),
+                List.of("id"),
+                List.of("id"),
+                "id",
+                Map.of(CoreOptions.MERGE_ENGINE.key(), CoreOptions.MergeEngine.FIRST_ROW.toString()));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon merge row id is not supported for this table: Merge engine first-row can not support batch delete.");
+        assertTrinoError(() -> metadata.getUpdateLayout(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon update layout is not supported for this table: Merge engine first-row can not support batch delete.");
+        assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon merge is not supported for this table: Merge engine first-row can not support batch delete.");
         assertThat(catalog.initialized).isTrue();
     }
 
@@ -830,6 +862,27 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDynamicBucketWritePlanningFailsWithActionableMessage()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_DYNAMIC)),
+                TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.getInsertLayout(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon insert layout. Dynamic-bucket tables require assigning a Paimon bucket before writing each row; this Trino connector write path does not implement TableWrite.write(row, bucket)");
+        assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon merge row id. Dynamic-bucket tables require assigning a Paimon bucket before writing each row; this Trino connector write path does not implement TableWrite.write(row, bucket)");
+        assertTrinoError(() -> metadata.getUpdateLayout(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon update layout. Dynamic-bucket tables require assigning a Paimon bucket before writing each row; this Trino connector write path does not implement TableWrite.write(row, bucket)");
+        assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon merge. Dynamic-bucket tables require assigning a Paimon bucket before writing each row; this Trino connector write path does not implement TableWrite.write(row, bucket)");
+    }
+
+    @Test
     public void testLayoutSerializationFailuresUsePaimonMetadataError()
     {
         IOException failure = new IOException("schema serialization failed");
@@ -881,7 +934,7 @@ public class PaimonMetadataTableModeTest
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
         assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
-                NOT_SUPPORTED.toErrorCode(), "Unsupported table bucket mode: BUCKET_UNAWARE");
+                NOT_SUPPORTED.toErrorCode(), "Unsupported table bucket mode: BUCKET_UNAWARE for Paimon merge");
     }
 
     @Test
@@ -1036,6 +1089,33 @@ public class PaimonMetadataTableModeTest
 
         assertThat(overwriteEnabled).isTrue();
         assertThat(committed).isTrue();
+    }
+
+    @Test
+    public void testInsertOverwriteCommitsEmptyFragments()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
+                overwriteEnabled);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        ConnectorSession overwriteSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE.name()))
+                .build();
+
+        assertThat(metadata.finishInsert(overwriteSession, tableHandle, List.of(), List.of()))
+                .isEmpty();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(overwriteEnabled).isTrue();
+        assertThat(committed).isTrue();
+        assertThat(catalog.initialized).isTrue();
     }
 
     @Test
@@ -3645,6 +3725,14 @@ public class PaimonMetadataTableModeTest
             org.apache.paimon.types.RowType rowType, org.apache.paimon.types.RowType latestRowType,
             List<String> partitionKeys, List<String> primaryKeys, String bucketKey)
     {
+        return fileStoreTable(bucketMode, copiedWithLatestSchema, rowType, latestRowType, partitionKeys, primaryKeys,
+                bucketKey, Map.of());
+    }
+
+    private static FileStoreTable fileStoreTable(BucketMode bucketMode, AtomicBoolean copiedWithLatestSchema,
+            org.apache.paimon.types.RowType rowType, org.apache.paimon.types.RowType latestRowType,
+            List<String> partitionKeys, List<String> primaryKeys, String bucketKey, Map<String, String> options)
+    {
         return (FileStoreTable) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
@@ -3655,24 +3743,33 @@ public class PaimonMetadataTableModeTest
                     case "partitionKeys" -> partitionKeys;
                     case "primaryKeys" -> primaryKeys;
                     case "comment" -> Optional.empty();
-                    case "coreOptions" -> new CoreOptions(new Options(Map.of()));
+                    case "options" -> options;
+                    case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> TableSchema.create(1, new Schema(
                             rowType.getFields(),
                             partitionKeys,
                             primaryKeys,
-                            Map.of(
+                            mergeOptions(options, Map.of(
                                     CoreOptions.BUCKET.key(), "7",
-                                    CoreOptions.BUCKET_KEY.key(), bucketKey),
+                                    CoreOptions.BUCKET_KEY.key(), bucketKey)),
                             ""));
                     case "copyWithLatestSchema" -> {
                         copiedWithLatestSchema.set(true);
                         yield fileStoreTable(bucketMode, copiedWithLatestSchema, latestRowType, latestRowType,
-                                partitionKeys, primaryKeys, bucketKey);
+                                partitionKeys, primaryKeys, bucketKey, options);
                     }
                     case "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    private static Map<String, String> mergeOptions(Map<String, String> first, Map<String, String> second)
+    {
+        Map<String, String> result = new HashMap<>();
+        result.putAll(first);
+        result.putAll(second);
+        return Map.copyOf(result);
     }
 
     private static FileStoreTable nonSerializableSchemaFileStoreTable(IOException failure)
@@ -3687,6 +3784,7 @@ public class PaimonMetadataTableModeTest
                     case "partitionKeys" -> List.of();
                     case "primaryKeys" -> List.of("id");
                     case "comment" -> Optional.empty();
+                    case "options" -> Map.of();
                     case "coreOptions" -> new CoreOptions(new Options(Map.of()));
                     case "schema" -> {
                         TableSchema schema = TableSchema.create(1, new Schema(
@@ -3802,6 +3900,7 @@ public class PaimonMetadataTableModeTest
                     case "partitionKeys" -> List.of("pt");
                     case "primaryKeys" -> List.of("id");
                     case "comment" -> Optional.empty();
+                    case "options" -> Map.of();
                     case "coreOptions" -> new CoreOptions(new Options(Map.of()));
                     case "schema" -> TableSchema.create(1, new Schema(
                             rowType.getFields(),
@@ -3843,6 +3942,7 @@ public class PaimonMetadataTableModeTest
                     case "partitionKeys" -> List.of("pt");
                     case "primaryKeys" -> List.of("id");
                     case "comment" -> Optional.empty();
+                    case "options" -> Map.of();
                     case "coreOptions" -> new CoreOptions(new Options(Map.of()));
                     case "schema" -> TableSchema.create(1, new Schema(
                             rowType.getFields(),
@@ -3919,7 +4019,6 @@ public class PaimonMetadataTableModeTest
                     case "commit" -> {
                         assertThat(args).hasSize(1);
                         assertThat(args[0]).isInstanceOf(List.class);
-                        assertThat((List<?>) args[0]).hasSize(1);
                         if (commitFailure != null) {
                             throw commitFailure;
                         }
