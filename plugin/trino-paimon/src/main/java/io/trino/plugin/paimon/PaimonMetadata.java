@@ -329,7 +329,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
             ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments,
             Collection<ComputedStatistics> computedStatistics)
     {
+        requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getOutputTableHandle(tableHandle);
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "finish create table");
         return commit(session, paimonTableHandle, fragments,
                 PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND,
                 paimonTableHandle.getCreateTableOperation());
@@ -361,7 +363,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
             Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         requireNonNull(session, "session is null");
-        return commit(session, getInsertTableHandle(insertHandle), fragments,
+        PaimonTableHandle paimonTableHandle = getInsertTableHandle(insertHandle);
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "finish insert");
+        return commit(session, paimonTableHandle, fragments,
                 PaimonSessionProperties.getInsertExistingPartitionsBehavior(session));
     }
 
@@ -635,7 +639,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public void finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle,
             Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
-        commit(session, getMergeTableHandle(mergeTableHandle), fragments,
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getMergeTableHandle(mergeTableHandle);
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "finish merge");
+        commit(session, paimonTableHandle, fragments,
                 PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND,
                 Optional.of(MERGE));
     }
