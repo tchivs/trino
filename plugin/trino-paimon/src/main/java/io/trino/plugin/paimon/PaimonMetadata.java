@@ -1064,6 +1064,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
                         "properties contains blank property name"))
                 .filter(property -> PaimonTableOptions.PRIMARY_KEY_IDENTIFIER.equals(property)
                         || PaimonTableOptions.PARTITIONED_BY_PROPERTY.equals(property)
+                        || CoreOptions.PRIMARY_KEY.key().equals(property)
+                        || CoreOptions.PARTITION.key().equals(property)
                         || PaimonTableOptionUtils.isRuntimeOnlyTableProperty(property))
                 .sorted()
                 .toList();

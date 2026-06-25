@@ -3934,9 +3934,11 @@ public class PaimonMetadataTableModeTest
 
         assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of(
                 PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, Optional.of(List.of("id")),
-                PaimonTableOptions.PARTITIONED_BY_PROPERTY, Optional.of(List.of("dt")))),
+                PaimonTableOptions.PARTITIONED_BY_PROPERTY, Optional.of(List.of("dt")),
+                CoreOptions.PRIMARY_KEY.key(), Optional.of("id"),
+                CoreOptions.PARTITION.key(), Optional.of("dt"))),
                 NOT_SUPPORTED.toErrorCode(),
-                "The following properties cannot be updated: partitioned_by, primary_key");
+                "The following properties cannot be updated: partition, partitioned_by, primary-key, primary_key");
         assertThat(catalog.alterCalls).isEqualTo(0);
     }
 
