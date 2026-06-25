@@ -80,9 +80,11 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
+import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.InstantiationUtil;
 import org.apache.paimon.utils.InternalRowPartitionComputer;
@@ -91,6 +93,7 @@ import org.apache.paimon.view.ViewChange;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -1726,10 +1729,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
         DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"));
 
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.addColumn(fieldNames, paimonType, null, null));
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
+            if (fieldNames.length > 1) {
+                fieldNames = canonicalNestedFieldNames(sessionCatalog, paimonTableHandle, fieldNames, false);
+            }
+            changes.add(SchemaChange.addColumn(fieldNames, paimonType, null, null));
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1756,10 +1762,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         String[] fieldNames = buildFieldNamesArray(List.of(paimonColumnHandle.getColumnName()), fieldPath);
 
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.dropColumn(fieldNames));
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
+            fieldNames = canonicalNestedFieldNames(sessionCatalog, paimonTableHandle, fieldNames, true);
+            changes.add(SchemaChange.dropColumn(fieldNames));
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1783,10 +1790,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         String[] fieldNames = fieldPath.toArray(new String[0]);
 
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.renameColumn(fieldNames, target));
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
+            fieldNames = canonicalNestedFieldNames(sessionCatalog, paimonTableHandle, fieldNames, true);
+            changes.add(SchemaChange.renameColumn(fieldNames, target));
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1812,10 +1820,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"));
 
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.updateColumnType(fieldNames, paimonType, true));
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
+            fieldNames = canonicalNestedFieldNames(sessionCatalog, paimonTableHandle, fieldNames, true);
+            changes.add(SchemaChange.updateColumnType(fieldNames, paimonType, true));
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1828,6 +1837,67 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Catalog sessionCatalog = catalog.forSession(session);
         Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
         return new PaimonSchemaEvolutionKeys(table.partitionKeys(), table.primaryKeys());
+    }
+
+    private static String[] canonicalNestedFieldNames(
+            Catalog sessionCatalog,
+            PaimonTableHandle tableHandle,
+            String[] fieldNames,
+            boolean includeLeaf)
+            throws Catalog.TableNotExistException, Catalog.ColumnNotExistException
+    {
+        FileStoreTable table = latestWriteFileStoreTable(tableHandle, sessionCatalog, "nested field schema change");
+        String[] canonicalFieldNames = fieldNames.clone();
+        DataType currentType = table.rowType();
+        int limit = includeLeaf ? canonicalFieldNames.length : canonicalFieldNames.length - 1;
+        for (int index = 0; index < limit; index++) {
+            DataField field = canonicalNestedField(tableHandle, currentType, canonicalFieldNames, index);
+            canonicalFieldNames[index] = field.name();
+            currentType = nestedType(field.type());
+        }
+        return canonicalFieldNames;
+    }
+
+    private static DataField canonicalNestedField(
+            PaimonTableHandle tableHandle,
+            DataType currentType,
+            String[] fieldNames,
+            int index)
+            throws Catalog.ColumnNotExistException
+    {
+        if (!(currentType instanceof RowType rowType)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon nested field schema change is not supported for non-row field path '"
+                            + String.join(".", fieldNames) + "'");
+        }
+
+        String requestedFieldName = fieldNames[index];
+        DataField matchedField = null;
+        for (DataField field : rowType.getFields()) {
+            if (field.name().equalsIgnoreCase(requestedFieldName)) {
+                if (matchedField != null) {
+                    throw new TrinoException(NOT_SUPPORTED,
+                            "Paimon nested field schema change is ambiguous for field path '"
+                                    + String.join(".", fieldNames) + "'");
+                }
+                matchedField = field;
+            }
+        }
+        if (matchedField == null) {
+            throw new Catalog.ColumnNotExistException(
+                    new Identifier(tableHandle.getSchemaName(), tableHandle.getTableName()),
+                    String.join(".", Arrays.asList(fieldNames).subList(0, index + 1)));
+        }
+        return matchedField;
+    }
+
+    private static DataType nestedType(DataType type)
+    {
+        return switch (type.getTypeRoot()) {
+            case ARRAY -> ((ArrayType) type).getElementType();
+            case MAP -> ((MapType) type).getValueType();
+            default -> type;
+        };
     }
 
     private static void rejectPartitionOrPrimaryKeyDrop(
