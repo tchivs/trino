@@ -141,6 +141,7 @@ import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.TimestampType.createTimestampType;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -3289,6 +3290,66 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDdlRejectsUnsupportedPaimonKeyColumnEvolutionBeforeCatalogAlter()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT().notNull()),
+                DataTypes.FIELD(1, "dt", DataTypes.STRING()),
+                DataTypes.FIELD(2, "payload", DataTypes.STRING()));
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType,
+                List.of("dt"), List.of("id"), "id");
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle primaryKey = PaimonColumnHandle.of("id", DataTypes.INT().notNull());
+        PaimonColumnHandle partitionKey = PaimonColumnHandle.of("dt", DataTypes.STRING());
+
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, partitionKey, "event_date"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported: Cannot rename partition column: [dt]");
+        assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, partitionKey),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot drop partition key or primary key: [dt]");
+        assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, primaryKey),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot drop partition key or primary key: [id]");
+        assertTrinoError(() -> metadata.setColumnType(SESSION, tableHandle, partitionKey, VARCHAR),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set column type is not supported: Cannot update partition column: [dt]");
+        assertTrinoError(() -> metadata.setColumnType(SESSION, tableHandle, primaryKey, VARCHAR),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set column type is not supported: Cannot update primary key");
+        assertTrinoError(() -> metadata.dropNotNullConstraint(SESSION, tableHandle, primaryKey),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop not null constraint is not supported: Cannot change nullability of primary key");
+
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
+    public void testRenamePrimaryKeyColumnFollowsPaimonSchemaEvolution()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT().notNull()),
+                DataTypes.FIELD(1, "payload", DataTypes.STRING()));
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType,
+                List.of(), List.of("id"), "id");
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        metadata.renameColumn(SESSION, tableHandle, PaimonColumnHandle.of("id", DataTypes.INT().notNull()), "new_id");
+
+        assertThat(catalog.alterCalls).isEqualTo(1);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.RenameColumn.class, change -> {
+                    assertThat(change.fieldNames()).containsExactly("id");
+                    assertThat(change.newName()).isEqualTo("new_id");
+                });
+    }
+
+    @Test
     public void testSetColumnCommentUsesPaimonCommentSchemaChange()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
@@ -3625,9 +3686,11 @@ public class PaimonMetadataTableModeTest
                 .doesNotThrowAnyException();
         assertTrinoError(() -> metadata.addField(SESSION, tableHandle, List.of(), "missing_table", INTEGER, true),
                 TABLE_NOT_FOUND.toErrorCode(), "Table 'schema.table' does not exist");
-        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, columnHandle, "renamed"),
+        PaimonMetadata existingTableMetadata = new PaimonMetadata(new ExistingTableFailingDdlCatalog(),
+                TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> existingTableMetadata.renameColumn(SESSION, tableHandle, columnHandle, "renamed"),
                 COLUMN_NOT_FOUND.toErrorCode(), "Column 'missing' does not exist in table 'schema.table'");
-        assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, columnHandle),
+        assertTrinoError(() -> existingTableMetadata.dropColumn(SESSION, tableHandle, columnHandle),
                 COLUMN_NOT_FOUND.toErrorCode(), "Column 'missing' does not exist in table 'schema.table'");
         assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))),
                 TABLE_NOT_FOUND.toErrorCode(), "Table 'schema.table' does not exist");
@@ -4879,6 +4942,12 @@ public class PaimonMetadataTableModeTest
         return fileStoreTable(bucketMode, new AtomicBoolean(), rowType, rowType, List.of("id"));
     }
 
+    private static FileStoreTable unkeyedFileStoreTable(BucketMode bucketMode)
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        return fileStoreTable(bucketMode, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), "id");
+    }
+
     private static FileStoreTable fileStoreTable(BucketMode bucketMode, AtomicBoolean copiedWithLatestSchema,
             org.apache.paimon.types.RowType rowType, org.apache.paimon.types.RowType latestRowType)
     {
@@ -5786,6 +5855,17 @@ public class PaimonMetadataTableModeTest
         }
     }
 
+    private static class ExistingTableFailingDdlCatalog
+            extends FailingDdlCatalog
+    {
+        @Override
+        public Table getTable(Identifier identifier)
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            return unkeyedFileStoreTable(BucketMode.HASH_FIXED);
+        }
+    }
+
     private static class CreatedSchemaCatalog
             extends PaimonCatalog
     {
@@ -5825,6 +5905,7 @@ public class PaimonMetadataTableModeTest
     private static class CapturingDdlCatalog
             extends PaimonCatalog
     {
+        private final Optional<Table> table;
         private String createdDatabase;
         private Boolean createDatabaseIgnoreIfExists;
         private Map<String, String> createdDatabaseProperties;
@@ -5846,7 +5927,18 @@ public class PaimonMetadataTableModeTest
 
         private CapturingDdlCatalog()
         {
+            this(unkeyedFileStoreTable(BucketMode.HASH_FIXED));
+        }
+
+        private CapturingDdlCatalog(Table table)
+        {
+            this(Optional.of(table));
+        }
+
+        private CapturingDdlCatalog(Optional<Table> table)
+        {
             super(new Options(), unsupportedFileSystemFactory());
+            this.table = requireNonNull(table, "table is null");
         }
 
         @Override
@@ -5899,6 +5991,14 @@ public class PaimonMetadataTableModeTest
         {
             assertThat(identifier.getFullName()).isEqualTo("schema.table");
             this.createdSchema = schema;
+        }
+
+        @Override
+        public Table getTable(Identifier identifier)
+                throws TableNotExistException
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            return table.orElseThrow(() -> new TableNotExistException(identifier));
         }
 
         @Override

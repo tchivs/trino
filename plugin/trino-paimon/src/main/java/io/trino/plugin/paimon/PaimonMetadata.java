@@ -1455,6 +1455,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectPaimonSystemColumn(paimonColumnHandle, "rename column");
         validateFieldName("target", target);
         rejectPaimonSystemColumnName("rename column", target);
+        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(session, paimonTableHandle);
+        rejectPartitionKeyChange("rename column", "rename", paimonColumnHandle, schemaEvolutionKeys);
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.renameColumn(paimonColumnHandle.getColumnName(), target));
         try {
@@ -1475,6 +1477,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop column", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "drop column");
+        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(session, paimonTableHandle);
+        rejectPartitionOrPrimaryKeyDrop(paimonColumnHandle, schemaEvolutionKeys);
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.dropColumn(paimonColumnHandle.getColumnName()));
         try {
@@ -1537,8 +1541,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("set column type", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "set column type");
+        requireNonNull(type, "type is null");
+        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(session, paimonTableHandle);
+        rejectPartitionKeyChange("set column type", "update", paimonColumnHandle, schemaEvolutionKeys);
+        rejectPrimaryKeyChange("set column type", "update", paimonColumnHandle, schemaEvolutionKeys);
 
-        DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"))
+        DataType paimonType = PaimonTypeUtils.toPaimonType(type)
                 .copy(paimonColumnHandle.logicalType().isNullable());
 
         List<SchemaChange> changes = new ArrayList<>();
@@ -1562,6 +1570,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop not null constraint", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "drop not null constraint");
+        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(session, paimonTableHandle);
+        rejectPrimaryKeyChange("drop not null constraint", "change nullability of", paimonColumnHandle,
+                schemaEvolutionKeys);
 
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.updateColumnNullability(paimonColumnHandle.getColumnName(), true));
@@ -1686,6 +1697,67 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         catch (Exception e) {
             throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
+        }
+    }
+
+    private PaimonSchemaEvolutionKeys schemaEvolutionKeys(ConnectorSession session, PaimonTableHandle tableHandle)
+    {
+        Catalog sessionCatalog = catalog.forSession(session);
+        Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
+        return new PaimonSchemaEvolutionKeys(table.partitionKeys(), table.primaryKeys());
+    }
+
+    private static void rejectPartitionOrPrimaryKeyDrop(
+            PaimonColumnHandle columnHandle,
+            PaimonSchemaEvolutionKeys schemaEvolutionKeys)
+    {
+        if (schemaEvolutionKeys.isPartitionKey(columnHandle) || schemaEvolutionKeys.isPrimaryKey(columnHandle)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Cannot drop partition key or primary key: [" + columnHandle.getColumnName() + "]");
+        }
+    }
+
+    private static void rejectPartitionKeyChange(
+            String trinoOperation,
+            String paimonOperation,
+            PaimonColumnHandle columnHandle,
+            PaimonSchemaEvolutionKeys schemaEvolutionKeys)
+    {
+        if (schemaEvolutionKeys.isPartitionKey(columnHandle)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon " + trinoOperation + " is not supported: Cannot " + paimonOperation
+                            + " partition column: [" + columnHandle.getColumnName() + "]");
+        }
+    }
+
+    private static void rejectPrimaryKeyChange(
+            String trinoOperation,
+            String paimonOperation,
+            PaimonColumnHandle columnHandle,
+            PaimonSchemaEvolutionKeys schemaEvolutionKeys)
+    {
+        if (schemaEvolutionKeys.isPrimaryKey(columnHandle)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon " + trinoOperation + " is not supported: Cannot " + paimonOperation
+                            + " primary key");
+        }
+    }
+
+    private record PaimonSchemaEvolutionKeys(Set<String> partitionKeys, Set<String> primaryKeys)
+    {
+        private PaimonSchemaEvolutionKeys(List<String> partitionKeys, List<String> primaryKeys)
+        {
+            this(Set.copyOf(partitionKeys), Set.copyOf(primaryKeys));
+        }
+
+        private boolean isPartitionKey(PaimonColumnHandle columnHandle)
+        {
+            return partitionKeys.contains(columnHandle.getColumnName());
+        }
+
+        private boolean isPrimaryKey(PaimonColumnHandle columnHandle)
+        {
+            return primaryKeys.contains(columnHandle.getColumnName());
         }
     }
 
