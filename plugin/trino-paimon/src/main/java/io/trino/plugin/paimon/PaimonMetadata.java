@@ -58,6 +58,7 @@ import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -132,7 +133,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 try {
                     return Optional.of(new ConnectorTableLayout(
                             new PaimonPartitioningHandle(InstantiationUtil.serializeObject(storeTable.schema())),
-                            storeTable.schema().bucketKeys(), false));
+                            fixedBucketWritePartitionColumns(storeTable.schema()), false));
                 }
                 catch (IOException e) {
                     throw new TrinoException(PAIMON_METADATA_ERROR,
@@ -159,6 +160,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
             default :
                 throw PaimonTableSupport.unsupportedBucketMode("insert layout", bucketMode);
         }
+    }
+
+    private static List<String> fixedBucketWritePartitionColumns(TableSchema schema)
+    {
+        List<String> partitionColumns = new ArrayList<>(schema.partitionKeys());
+        partitionColumns.addAll(schema.bucketKeys());
+        return List.copyOf(partitionColumns);
     }
 
     @Override

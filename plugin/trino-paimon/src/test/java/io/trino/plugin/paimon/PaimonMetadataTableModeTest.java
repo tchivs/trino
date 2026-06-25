@@ -836,13 +836,37 @@ public class PaimonMetadataTableModeTest
         TableSchema insertSchema = partitioningSchema(insertLayout.getPartitioning().orElseThrow());
 
         assertThat(copiedWithLatestSchema).isTrue();
-        assertThat(insertLayout.getPartitionColumns()).containsExactly("new_bucket");
+        assertThat(insertLayout.getPartitionColumns()).containsExactly("id", "new_bucket");
         assertThat(insertSchema.fieldNames()).containsExactly("id", "new_bucket");
         assertThat(insertSchema.bucketKeys()).containsExactly("new_bucket");
 
         TableSchema updateSchema = partitioningSchema(metadata.getUpdateLayout(SESSION, tableHandle).orElseThrow());
         assertThat(updateSchema.fieldNames()).containsExactly("id", "new_bucket");
         assertThat(updateSchema.bucketKeys()).containsExactly("new_bucket");
+    }
+
+    @Test
+    public void testFixedBucketInsertLayoutUsesPartitionAndBucketKeys()
+            throws IOException
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.INT()),
+                DataTypes.FIELD(1, "id", DataTypes.INT()),
+                DataTypes.FIELD(2, "bucket_key", DataTypes.INT()));
+        FileStoreTable table = fileStoreTable(
+                BucketMode.HASH_FIXED,
+                new AtomicBoolean(),
+                rowType,
+                rowType,
+                List.of("dt"),
+                List.of("dt", "id", "bucket_key"),
+                "bucket_key");
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        ConnectorTableLayout insertLayout = metadata.getInsertLayout(SESSION, tableHandle).orElseThrow();
+
+        assertThat(insertLayout.getPartitionColumns()).containsExactly("dt", "bucket_key");
     }
 
     @Test

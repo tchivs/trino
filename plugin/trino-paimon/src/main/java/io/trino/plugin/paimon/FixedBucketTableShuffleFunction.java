@@ -24,12 +24,13 @@ import org.apache.paimon.codegen.CodeGenUtils;
 import org.apache.paimon.codegen.Projection;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.table.sink.ChannelComputer;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
 
+import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
@@ -42,7 +43,8 @@ public class FixedBucketTableShuffleFunction
     private final int workerCount;
     private final int bucketCount;
     private final boolean isRowId;
-    private final ThreadLocal<Projection> projectionContext;
+    private final ThreadLocal<Projection> partitionProjectionContext;
+    private final ThreadLocal<Projection> bucketKeyProjectionContext;
     private final BucketFunction bucketFunction;
     private final List<Type> paimonRowTypes;
     private final List<DataType> paimonLogicalTypes;
@@ -59,14 +61,16 @@ public class FixedBucketTableShuffleFunction
         if (isRowId) {
             validateRowIdType((RowType) partitionChannelTypes.get(0), schema);
         }
+        List<String> inputFields = isRowId ? schema.primaryKeys() : fixedBucketWritePartitionColumns(schema);
         this.paimonRowTypes = isRowId ? partitionChannelTypes.get(0).getTypeParameters()
                 : List.copyOf(partitionChannelTypes);
-        this.paimonLogicalTypes = isRowId ? primaryKeyTypes(schema) : schema.logicalBucketKeyType().getFieldTypes();
+        this.paimonLogicalTypes = projectedTypes(schema, inputFields);
         verify(paimonLogicalTypes.size() == paimonRowTypes.size(), "Paimon row type metadata size mismatch");
-        this.projectionContext = ThreadLocal.withInitial(() -> isRowId
-                ? CodeGenUtils.newProjection(schema.logicalPrimaryKeysType(), primaryKeyProjection(schema))
-                : CodeGenUtils.newProjection(schema.logicalBucketKeyType(),
-                        IntStream.range(0, schema.bucketKeys().size()).toArray()));
+        org.apache.paimon.types.RowType inputType = schema.projectedLogicalRowType(inputFields);
+        this.partitionProjectionContext = ThreadLocal.withInitial(() ->
+                CodeGenUtils.newProjection(inputType, projection(inputFields, schema.partitionKeys(), "partition key")));
+        this.bucketKeyProjectionContext = ThreadLocal.withInitial(() ->
+                CodeGenUtils.newProjection(inputType, projection(inputFields, schema.bucketKeys(), "bucket key")));
         this.bucketFunction = BucketFunction.create(new CoreOptions(schema.options()), schema.logicalBucketKeyType());
         this.bucketCount = new CoreOptions(schema.options()).bucket();
         this.workerCount = workerCount;
@@ -82,9 +86,10 @@ public class FixedBucketTableShuffleFunction
 
         PaimonRow paimonRow = new PaimonRow(page, position, RowKind.INSERT, paimonRowTypes,
                 paimonLogicalTypes);
-        BinaryRow bucketKey = projectionContext.get().apply(paimonRow);
+        BinaryRow partition = partitionProjectionContext.get().apply(paimonRow);
+        BinaryRow bucketKey = bucketKeyProjectionContext.get().apply(paimonRow);
         int bucket = bucketFunction.bucket(bucketKey, bucketCount);
-        return bucket % workerCount;
+        return ChannelComputer.select(partition, bucket, workerCount);
     }
 
     private static void validateRowIdType(RowType rowIdType, TableSchema schema)
@@ -108,13 +113,6 @@ public class FixedBucketTableShuffleFunction
         }
     }
 
-    private static List<DataType> primaryKeyTypes(TableSchema schema)
-    {
-        return primaryKeyFields(schema).stream()
-                .map(DataField::type)
-                .toList();
-    }
-
     private static List<DataField> primaryKeyFields(TableSchema schema)
     {
         return schema.primaryKeys().stream()
@@ -126,13 +124,31 @@ public class FixedBucketTableShuffleFunction
                 .toList();
     }
 
-    private static int[] primaryKeyProjection(TableSchema schema)
+    private static List<String> fixedBucketWritePartitionColumns(TableSchema schema)
     {
-        List<String> primaryKeys = schema.primaryKeys();
-        return schema.bucketKeys().stream()
-                .mapToInt(bucketKey -> {
-                    int index = primaryKeys.indexOf(bucketKey);
-                    verify(index >= 0, "Paimon bucket key '%s' is not present in primary keys", bucketKey);
+        List<String> partitionColumns = new ArrayList<>(schema.partitionKeys());
+        partitionColumns.addAll(schema.bucketKeys());
+        return List.copyOf(partitionColumns);
+    }
+
+    private static List<DataType> projectedTypes(TableSchema schema, List<String> fieldNames)
+    {
+        return fieldNames.stream()
+                .map(fieldName -> {
+                    verify(schema.logicalRowType().containsField(fieldName),
+                            "Paimon field '%s' is not present in table schema", fieldName);
+                    return schema.logicalRowType().getField(fieldName).type();
+                })
+                .toList();
+    }
+
+    private static int[] projection(List<String> inputFields, List<String> projectedFields, String fieldDescription)
+    {
+        return projectedFields.stream()
+                .mapToInt(projectedField -> {
+                    int index = inputFields.indexOf(projectedField);
+                    verify(index >= 0, "Paimon %s '%s' is not present in shuffle input fields %s",
+                            fieldDescription, projectedField, inputFields);
                     return index;
                 })
                 .toArray();
