@@ -148,6 +148,32 @@ public class PaimonMetadataViewTest
     }
 
     @Test
+    public void testListViewsDoesNotRequireViewDefinitions()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(Map.of("spark", "SELECT id FROM spark_table"))),
+                TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.listViews(SESSION, Optional.of(VIEW_NAME.getSchemaName())))
+                .containsExactly(VIEW_NAME);
+    }
+
+    @Test
+    public void testListViewsWithoutSchemaListsAllSchemas()
+    {
+        MultiSchemaViewCatalog catalog = new MultiSchemaViewCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        List<SchemaTableName> views = metadata.listViews(SESSION, Optional.empty());
+
+        assertThat(catalog.listDatabasesCalls).isEqualTo(1);
+        assertThat(catalog.listedSchemas).containsExactly("schema_a", "schema_b");
+        assertThat(views).containsExactlyInAnyOrder(
+                new SchemaTableName("schema_a", "view_a"),
+                new SchemaTableName("schema_b", "view_b"));
+    }
+
+    @Test
     public void testGetViewsWithoutSchemaListsAllSchemas()
     {
         MultiSchemaViewCatalog catalog = new MultiSchemaViewCatalog();
@@ -317,6 +343,21 @@ public class PaimonMetadataViewTest
         assertThat(catalog.initialized).isFalse();
 
         assertThatThrownBy(() -> metadata.getViews(SESSION, Optional.of(" ")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("schemaName cannot be null or empty");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.listViews(null, Optional.of(VIEW_NAME.getSchemaName())))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.listViews(SESSION, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("schemaName is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.listViews(SESSION, Optional.of(" ")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("schemaName cannot be null or empty");
         assertThat(catalog.initialized).isFalse();

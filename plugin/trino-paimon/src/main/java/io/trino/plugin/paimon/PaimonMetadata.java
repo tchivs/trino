@@ -2554,6 +2554,43 @@ public record PaimonMetadata(PaimonCatalog catalog,
     }
 
     @Override
+    public List<SchemaTableName> listViews(ConnectorSession session, Optional<String> schemaName)
+    {
+        requireNonNull(session, "session is null");
+        requireNonNull(schemaName, "schemaName is null");
+        schemaName.ifPresent(schema -> checkArgument(!StringUtils.isNullOrWhitespaceOnly(schema),
+                "schemaName cannot be null or empty"));
+        Catalog sessionCatalog = catalog.forSession(session);
+
+        return schemaName.map(Collections::singletonList)
+                .orElseGet(sessionCatalog::listDatabases).stream()
+                .flatMap(schema -> listViews(sessionCatalog, schema).stream())
+                .collect(toList());
+    }
+
+    private List<SchemaTableName> listViews(Catalog sessionCatalog, String schemaName)
+    {
+        if (SYSTEM_DATABASE_NAME.equals(schemaName)) {
+            return List.of();
+        }
+        try {
+            return sessionCatalog.listViews(schemaName).stream()
+                    .map(viewName -> new SchemaTableName(schemaName, viewName))
+                    .collect(toList());
+        }
+        catch (Catalog.DatabaseNotExistException e) {
+            throw new TrinoException(io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND,
+                    format("Schema '%s' does not exist", schemaName));
+        }
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("list", e);
+        }
+        catch (Exception e) {
+            throw paimonViewException(format("Failed to list views in schema '%s'", schemaName), e);
+        }
+    }
+
+    @Override
     public Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session, Optional<String> schemaName)
     {
         requireNonNull(session, "session is null");
