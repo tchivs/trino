@@ -3177,6 +3177,64 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDdlRejectsHiddenColumnsBeforeCatalogAlter()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle rowId = PaimonColumnHandle.of(PaimonColumnHandle.TRINO_ROW_ID_NAME, DataTypes.BIGINT());
+        PaimonColumnHandle sequenceNumber = PaimonColumnHandle.of(PaimonColumnHandle.PAIMON_SEQUENCE_NUMBER_NAME,
+                DataTypes.BIGINT());
+        PaimonColumnHandle visibleColumn = PaimonColumnHandle.of("payload", DataTypes.ROW(
+                DataTypes.FIELD(0, "zip", DataTypes.INT())));
+
+        assertTrinoError(() -> metadata.addColumn(SESSION, tableHandle,
+                        new ColumnMetadata(PaimonColumnHandle.PAIMON_ROW_ID_NAME, BIGINT)),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon add column is not supported for hidden column '_row_id'");
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, rowId, "renamed"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported for hidden column '$row_id'");
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, visibleColumn,
+                        PaimonColumnHandle.PAIMON_SEQUENCE_NUMBER_NAME),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported for hidden column '_SEQUENCE_NUMBER'");
+        assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, sequenceNumber),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop column is not supported for hidden column '_SEQUENCE_NUMBER'");
+        assertTrinoError(() -> metadata.setColumnComment(SESSION, tableHandle, rowId, Optional.of("comment")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set column comment is not supported for hidden column '$row_id'");
+        assertTrinoError(() -> metadata.setColumnType(SESSION, tableHandle, rowId, BIGINT),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set column type is not supported for hidden column '$row_id'");
+        assertTrinoError(() -> metadata.dropNotNullConstraint(SESSION, tableHandle, rowId),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop not null constraint is not supported for hidden column '$row_id'");
+        assertTrinoError(() -> metadata.addField(SESSION, tableHandle, List.of(),
+                        PaimonColumnHandle.PAIMON_ROW_ID_NAME, BIGINT, false),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon add field is not supported for hidden column '_ROW_ID'");
+        assertTrinoError(() -> metadata.addField(SESSION, tableHandle,
+                        List.of(PaimonColumnHandle.PAIMON_ROW_ID_NAME), "nested", BIGINT, false),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon add field is not supported for hidden column '_ROW_ID'");
+        assertTrinoError(() -> metadata.dropField(SESSION, tableHandle, rowId, List.of("nested")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop field is not supported for hidden column '$row_id'");
+        assertTrinoError(() -> metadata.renameField(SESSION, tableHandle,
+                        List.of(PaimonColumnHandle.PAIMON_ROW_ID_NAME, "nested"), "renamed"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename field is not supported for hidden column '_ROW_ID'");
+        assertTrinoError(() -> metadata.setFieldType(SESSION, tableHandle,
+                        List.of(PaimonColumnHandle.PAIMON_SEQUENCE_NUMBER_NAME, "nested"), BIGINT),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set field type is not supported for hidden column '_SEQUENCE_NUMBER'");
+
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testNestedFieldDdlUsesExplicitFieldPaths()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
