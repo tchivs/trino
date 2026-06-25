@@ -151,6 +151,7 @@ public class PaimonConnectorFactory
             PaimonNodePartitioningProvider paimonNodePartitioningProvider = injector
                     .getInstance(PaimonNodePartitioningProvider.class);
             PaimonSessionProperties paimonSessionProperties = injector.getInstance(PaimonSessionProperties.class);
+            PaimonSchemaProperties paimonSchemaProperties = injector.getInstance(PaimonSchemaProperties.class);
             PaimonTableOptions paimonTableOptions = injector.getInstance(PaimonTableOptions.class);
             Set<ConnectorTableFunction> connectorTableFunctions = injector.getInstance(new Key<>() {
             });
@@ -160,8 +161,8 @@ public class PaimonConnectorFactory
                     new ClassLoaderSafeConnectorSplitManager(paimonSplitManager, classLoader),
                     new ClassLoaderSafeConnectorPageSourceProvider(paimonPageSourceProvider, classLoader),
                     new ClassLoaderSafeConnectorPageSinkProvider(paimonPageSinkProvider, classLoader),
-                    paimonNodePartitioningProvider, paimonTableOptions, paimonSessionProperties, connectorTableFunctions,
-                    functionProvider);
+                    paimonNodePartitioningProvider, paimonSchemaProperties, paimonTableOptions,
+                    paimonSessionProperties, connectorTableFunctions, functionProvider);
         }
     }
 

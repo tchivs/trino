@@ -41,6 +41,8 @@ import io.trino.spi.expression.Call;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.PrincipalType;
+import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.testing.TestingConnectorSession;
@@ -94,6 +96,9 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
+import static io.trino.plugin.paimon.PaimonSchemaProperties.COMMENT_PROPERTY;
+import static io.trino.plugin.paimon.PaimonSchemaProperties.LOCATION_PROPERTY;
+import static io.trino.plugin.paimon.PaimonSchemaProperties.OWNER_PROPERTY;
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_SNAPSHOT;
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
@@ -2946,10 +2951,56 @@ public class PaimonMetadataTableModeTest
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
 
-        metadata.createSchema(SESSION, "schema", Map.of(), null);
+        metadata.createSchema(SESSION, "schema", Map.of(
+                        LOCATION_PROPERTY, "s3://warehouse/schema",
+                        COMMENT_PROPERTY, "schema comment"),
+                new TrinoPrincipal(PrincipalType.USER, "schema_owner"));
 
         assertThat(catalog.createdDatabase).isEqualTo("schema");
         assertThat(catalog.createDatabaseIgnoreIfExists).isFalse();
+        assertThat(catalog.createdDatabaseProperties).containsExactlyInAnyOrderEntriesOf(Map.of(
+                LOCATION_PROPERTY, "s3://warehouse/schema",
+                COMMENT_PROPERTY, "schema comment",
+                OWNER_PROPERTY, "schema_owner"));
+    }
+
+    @Test
+    public void testCreateSchemaRejectsMalformedPropertiesBeforeCatalogInitialization()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.createSchema(SESSION, "schema", Map.of(" ", "value"), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("properties contains blank property name");
+        assertThatThrownBy(() -> metadata.createSchema(SESSION, "schema", Map.of("location", List.of("s3://warehouse")), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("properties value for property 'location' must be a string");
+        assertThatThrownBy(() -> metadata.createSchema(SESSION, "schema", Map.of("location", " "), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("properties value for property 'location' is blank");
+
+        assertThat(catalog.initialized).isFalse();
+        assertThat(catalog.createdDatabase).isNull();
+    }
+
+    @Test
+    public void testGetSchemaPropertiesAndOwner()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new SchemaPropertiesCatalog(), TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.getSchemaProperties(SESSION, "schema")).containsExactlyInAnyOrderEntriesOf(Map.of(
+                LOCATION_PROPERTY, "s3://warehouse/schema",
+                COMMENT_PROPERTY, "schema comment",
+                OWNER_PROPERTY, "schema_owner"));
+        assertThat(metadata.getSchemaOwner(SESSION, "schema"))
+                .isEmpty();
+
+        assertTrinoError(() -> metadata.getSchemaProperties(SESSION, SYSTEM_DATABASE_NAME),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon schema properties are not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.getSchemaProperties(SESSION, "missing"),
+                SCHEMA_NOT_FOUND.toErrorCode(), "Schema 'missing' does not exist");
     }
 
     @Test
@@ -4494,6 +4545,14 @@ public class PaimonMetadataTableModeTest
         }
 
         @Override
+        public void createDatabase(String name, boolean ignoreIfExists, Map<String, String> properties)
+                throws Catalog.DatabaseAlreadyExistException
+        {
+            assertThat(properties).isEmpty();
+            createDatabase(name, ignoreIfExists);
+        }
+
+        @Override
         public void dropDatabase(String name, boolean ignoreIfNotExists, boolean cascade)
                 throws Catalog.DatabaseNotEmptyException
         {
@@ -4626,6 +4685,7 @@ public class PaimonMetadataTableModeTest
     {
         private String createdDatabase;
         private Boolean createDatabaseIgnoreIfExists;
+        private Map<String, String> createdDatabaseProperties;
         private String droppedDatabase;
         private Boolean dropDatabaseIgnoreIfNotExists;
         private Boolean dropDatabaseCascade;
@@ -4662,6 +4722,15 @@ public class PaimonMetadataTableModeTest
         {
             this.createdDatabase = name;
             this.createDatabaseIgnoreIfExists = ignoreIfExists;
+            this.createdDatabaseProperties = Map.of();
+        }
+
+        @Override
+        public void createDatabase(String name, boolean ignoreIfExists, Map<String, String> properties)
+        {
+            this.createdDatabase = name;
+            this.createDatabaseIgnoreIfExists = ignoreIfExists;
+            this.createdDatabaseProperties = Map.copyOf(properties);
         }
 
         @Override
@@ -4785,6 +4854,13 @@ public class PaimonMetadataTableModeTest
         {
             assertThat(name).isEqualTo("schema");
             throw new RuntimeException(failure);
+        }
+
+        @Override
+        public void createDatabase(String name, boolean ignoreIfExists, Map<String, String> properties)
+        {
+            assertThat(properties).isEmpty();
+            createDatabase(name, ignoreIfExists);
         }
     }
 
@@ -4952,6 +5028,38 @@ public class PaimonMetadataTableModeTest
                 case SYSTEM_DATABASE_NAME -> SystemTableLoader.loadGlobalTableNames();
                 default -> List.of();
             };
+        }
+    }
+
+    private static class SchemaPropertiesCatalog
+            extends PaimonCatalog
+    {
+        private SchemaPropertiesCatalog()
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public Database getDatabase(String name)
+                throws Catalog.DatabaseNotExistException
+        {
+            if (name.equals("schema")) {
+                return Database.of(name, Map.of(
+                        LOCATION_PROPERTY, "s3://warehouse/schema",
+                        COMMENT_PROPERTY, "schema comment",
+                        OWNER_PROPERTY, "schema_owner",
+                        "unregistered-paimon-property", "hidden"), "schema comment");
+            }
+            throw new Catalog.DatabaseNotExistException(name);
         }
     }
 

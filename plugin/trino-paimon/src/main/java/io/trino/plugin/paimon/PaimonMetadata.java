@@ -91,6 +91,9 @@ import java.util.stream.IntStream;
 import static io.trino.plugin.paimon.PaimonColumnHandle.TRINO_ROW_ID_NAME;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
+import static io.trino.plugin.paimon.PaimonSchemaProperties.COMMENT_PROPERTY;
+import static io.trino.plugin.paimon.PaimonSchemaProperties.LOCATION_PROPERTY;
+import static io.trino.plugin.paimon.PaimonSchemaProperties.OWNER_PROPERTY;
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
@@ -568,10 +571,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(properties, "properties is null");
         checkArgument(!StringUtils.isNullOrWhitespaceOnly(schemaName), "schemaName cannot be null or empty");
         rejectSystemSchemaWrite(schemaName, "create schema");
+        Map<String, String> paimonProperties = schemaProperties(properties, owner);
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            sessionCatalog.createDatabase(schemaName, false);
+            sessionCatalog.createDatabase(schemaName, false, paimonProperties);
         }
         catch (Catalog.DatabaseAlreadyExistException e) {
             throw new TrinoException(SCHEMA_ALREADY_EXISTS, format("Schema '%s' already exists", schemaName), e);
@@ -579,6 +583,74 @@ public record PaimonMetadata(PaimonCatalog catalog,
         catch (Exception e) {
             throw paimonMetadataException(format("Failed to create Paimon schema '%s'", schemaName), e);
         }
+    }
+
+    @Override
+    public Map<String, Object> getSchemaProperties(ConnectorSession session, String schemaName)
+    {
+        requireNonNull(session, "session is null");
+        checkArgument(!StringUtils.isNullOrWhitespaceOnly(schemaName), "schemaName cannot be null or empty");
+        if (SYSTEM_DATABASE_NAME.equals(schemaName)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon schema properties are not supported for the system schema '" + SYSTEM_DATABASE_NAME + "'");
+        }
+        try {
+            Catalog sessionCatalog = catalog.forSession(session);
+            return supportedSchemaProperties(sessionCatalog.getDatabase(schemaName).options());
+        }
+        catch (Catalog.DatabaseNotExistException e) {
+            throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schemaName), e);
+        }
+        catch (Exception e) {
+            throw paimonMetadataException(format("Failed to get Paimon schema properties for '%s'", schemaName), e);
+        }
+    }
+
+    @Override
+    public Optional<TrinoPrincipal> getSchemaOwner(ConnectorSession session, String schemaName)
+    {
+        return Optional.empty();
+    }
+
+    private static Map<String, Object> supportedSchemaProperties(Map<String, String> properties)
+    {
+        Map<String, Object> result = new HashMap<>();
+        copySchemaProperty(properties, result, LOCATION_PROPERTY);
+        copySchemaProperty(properties, result, COMMENT_PROPERTY);
+        copySchemaProperty(properties, result, OWNER_PROPERTY);
+        return Map.copyOf(result);
+    }
+
+    private static void copySchemaProperty(Map<String, String> properties, Map<String, Object> result, String property)
+    {
+        String value = properties.get(property);
+        if (value != null && !value.isBlank()) {
+            result.put(property, value);
+        }
+    }
+
+    private static Map<String, String> schemaProperties(Map<String, Object> properties, TrinoPrincipal owner)
+    {
+        Map<String, String> result = new HashMap<>();
+        for (Map.Entry<String, Object> entry : properties.entrySet()) {
+            String propertyName = requireNonNull(entry.getKey(), "properties contains null property name");
+            checkArgument(!StringUtils.isNullOrWhitespaceOnly(propertyName), "properties contains blank property name");
+            Object value = entry.getValue();
+            if (value == null) {
+                continue;
+            }
+            if (!(value instanceof String stringValue)) {
+                throw new IllegalArgumentException("properties value for property '%s' must be a string".formatted(propertyName));
+            }
+            if (stringValue.isBlank()) {
+                throw new IllegalArgumentException("properties value for property '%s' is blank".formatted(propertyName));
+            }
+            result.put(propertyName, stringValue);
+        }
+        if (owner != null) {
+            result.putIfAbsent(OWNER_PROPERTY, owner.getName());
+        }
+        return Map.copyOf(result);
     }
 
     @Override
