@@ -181,10 +181,7 @@ public class PaimonPageSourceProvider
     {
         requireNonNull(tableHandle, "tableHandle is null");
         requireNonNull(dynamicFilter, "dynamicFilter is null");
-        if (!PaimonSplitManager.canApplyDynamicFilter(tableHandle)) {
-            return tableHandle.getFilter();
-        }
-        return DynamicFilteringTrinoSplitSource.combinePredicates(tableHandle.getFilter(), dynamicFilter);
+        return PaimonSplitManager.effectivePredicate(tableHandle, dynamicFilter);
     }
 
     static Optional<PaimonColumnHandle> rowIdColumn(List<PaimonColumnHandle> columns)
