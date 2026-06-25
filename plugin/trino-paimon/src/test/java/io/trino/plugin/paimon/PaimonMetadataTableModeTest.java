@@ -98,6 +98,8 @@ import org.apache.paimon.table.system.SystemTableLoader;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.view.View;
+import org.apache.paimon.view.ViewImpl;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -942,6 +944,13 @@ public class PaimonMetadataTableModeTest
                 }
                 return fileStoreTable(BucketMode.HASH_FIXED);
             }
+
+            @Override
+            public View getView(Identifier identifier)
+                    throws Catalog.ViewNotExistException
+            {
+                throw new Catalog.ViewNotExistException(identifier);
+            }
         };
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
 
@@ -992,6 +1001,81 @@ public class PaimonMetadataTableModeTest
         assertThat(tableColumns.getColumns()).hasValueSatisfying(list ->
                 assertThat(list).extracting(ColumnMetadata::getName).containsExactly("id"));
         assertThat(columns.hasNext()).isFalse();
+    }
+
+    @Test
+    public void testListTableColumnsIncludesPaimonViewColumns()
+    {
+        PaimonCatalog catalog = new PaimonCatalog(new Options(), unsupportedFileSystemFactory()) {
+            @Override
+            public void initSession(ConnectorSession connectorSession) {}
+
+            @Override
+            public Catalog forSession(ConnectorSession connectorSession)
+            {
+                return this;
+            }
+
+            @Override
+            public List<String> listTables(String databaseName)
+            {
+                return List.of("table");
+            }
+
+            @Override
+            public List<String> listViews(String databaseName)
+            {
+                return List.of("view");
+            }
+
+            @Override
+            public Table getTable(Identifier identifier)
+                    throws Catalog.TableNotExistException
+            {
+                if (identifier.getObjectName().equals("view")) {
+                    throw new Catalog.TableNotExistException(identifier);
+                }
+                return fileStoreTable(BucketMode.HASH_FIXED);
+            }
+
+            @Override
+            public View getView(Identifier identifier)
+            {
+                return paimonView(identifier, List.of(
+                        DataTypes.FIELD(0, "value", DataTypes.BIGINT(), "value comment"),
+                        DataTypes.FIELD(1, "label", DataTypes.STRING())));
+            }
+        };
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        SchemaTableName viewName = new SchemaTableName("schema", "view");
+        Map<SchemaTableName, List<ColumnMetadata>> columns = metadata.listTableColumns(
+                SESSION,
+                new SchemaTablePrefix("schema"));
+
+        assertThat(columns).containsKey(viewName);
+        assertThat(columns.get(viewName))
+                .satisfiesExactly(
+                        column -> {
+                            assertThat(column.getName()).isEqualTo("value");
+                            assertThat(column.getType()).isEqualTo(BIGINT);
+                            assertThat(column.getComment()).isEqualTo("value comment");
+                        },
+                        column -> {
+                            assertThat(column.getName()).isEqualTo("label");
+                            assertThat(column.getType()).isEqualTo(VARCHAR);
+                            assertThat(column.getComment()).isNull();
+                        });
+
+        Iterator<TableColumnsMetadata> streamedColumns = metadata.streamTableColumns(
+                SESSION,
+                new SchemaTablePrefix("schema", "view"));
+        assertThat(streamedColumns.hasNext()).isTrue();
+        TableColumnsMetadata viewColumns = streamedColumns.next();
+        assertThat(viewColumns.getTable()).isEqualTo(viewName);
+        assertThat(viewColumns.getColumns()).hasValueSatisfying(list ->
+                assertThat(list).extracting(ColumnMetadata::getName).containsExactly("value", "label"));
+        assertThat(streamedColumns.hasNext()).isFalse();
     }
 
     @Test
@@ -5344,6 +5428,17 @@ public class PaimonMetadataTableModeTest
         return assignments;
     }
 
+    private static View paimonView(Identifier identifier, List<DataField> fields)
+    {
+        return new ViewImpl(
+                identifier,
+                fields,
+                "SELECT value, label FROM table",
+                Map.of("trino", "SELECT value, label FROM table"),
+                null,
+                Map.of());
+    }
+
     private static FileStoreTable fileStoreTable(BucketMode bucketMode)
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
@@ -6300,6 +6395,14 @@ public class PaimonMetadataTableModeTest
         {
             assertThat(identifier.getFullName()).isEqualTo("schema.table");
             throw new Catalog.TableNotExistException(identifier);
+        }
+
+        @Override
+        public View getView(Identifier identifier)
+                throws Catalog.ViewNotExistException
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            throw new Catalog.ViewNotExistException(identifier);
         }
 
         @Override
