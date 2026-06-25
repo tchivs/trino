@@ -134,17 +134,25 @@ public class PaimonMetadataViewTest
     }
 
     @Test
-    public void testGetViewsPreservesViewDialectFailure()
+    public void testGetViewsSkipsViewsWithoutTrinoDialect()
     {
         PaimonMetadata metadata = new PaimonMetadata(
                 new TestingPaimonCatalog(view(Map.of("spark", "SELECT id FROM spark_table"))),
                 TESTING_TYPE_MANAGER);
 
-        assertThatThrownBy(() -> metadata.getViews(SESSION, Optional.of(VIEW_NAME.getSchemaName())))
-                .isInstanceOfSatisfying(TrinoException.class, exception -> {
-                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon view 'test_schema.test_view' does not contain a Trino SQL dialect");
-                });
+        assertThat(metadata.getViews(SESSION, Optional.of(VIEW_NAME.getSchemaName()))).isEmpty();
+    }
+
+    @Test
+    public void testGetViewsKeepsTrinoViewsWhenSkippingOtherDialects()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new MixedDialectViewCatalog(), TESTING_TYPE_MANAGER);
+
+        Map<SchemaTableName, ConnectorViewDefinition> views = metadata.getViews(SESSION, Optional.of("test_schema"));
+
+        assertThat(views).containsOnlyKeys(new SchemaTableName("test_schema", "trino_view"));
+        assertThat(views.get(new SchemaTableName("test_schema", "trino_view")).getOriginalSql())
+                .isEqualTo("SELECT id FROM trino_table");
     }
 
     @Test
@@ -860,6 +868,43 @@ public class PaimonMetadataViewTest
         public List<String> listViews(String databaseName)
         {
             throw new UnsupportedOperationException("views are not supported");
+        }
+    }
+
+    private static class MixedDialectViewCatalog
+            extends PaimonCatalog
+    {
+        private MixedDialectViewCatalog()
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public List<String> listViews(String databaseName)
+        {
+            assertThat(databaseName).isEqualTo(VIEW_NAME.getSchemaName());
+            return List.of("spark_view", "trino_view");
+        }
+
+        @Override
+        public View getView(Identifier identifier)
+        {
+            if (identifier.getObjectName().equals("spark_view")) {
+                return view(Map.of("spark", "SELECT id FROM spark_table"));
+            }
+            if (identifier.getObjectName().equals("trino_view")) {
+                return view(Map.of("trino", "SELECT id FROM trino_table"));
+            }
+            throw new AssertionError("Unexpected view: " + identifier.getFullName());
         }
     }
 
