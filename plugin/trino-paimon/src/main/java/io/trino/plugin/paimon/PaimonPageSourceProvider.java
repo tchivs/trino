@@ -179,8 +179,12 @@ public class PaimonPageSourceProvider
 
     static TupleDomain<PaimonColumnHandle> effectiveFilter(PaimonTableHandle tableHandle, DynamicFilter dynamicFilter)
     {
+        requireNonNull(tableHandle, "tableHandle is null");
         requireNonNull(dynamicFilter, "dynamicFilter is null");
-        return PaimonSplitManager.effectivePredicate(requireNonNull(tableHandle, "tableHandle is null"), dynamicFilter);
+        if (!PaimonSplitManager.canApplyDynamicFilter(tableHandle)) {
+            return tableHandle.getFilter();
+        }
+        return DynamicFilteringTrinoSplitSource.combinePredicates(tableHandle.getFilter(), dynamicFilter);
     }
 
     static Optional<PaimonColumnHandle> rowIdColumn(List<PaimonColumnHandle> columns)

@@ -15,7 +15,6 @@ package io.trino.plugin.paimon;
 
 import com.google.inject.Inject;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
-import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeSink;
@@ -43,7 +42,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 
 public class PaimonPageSinkProvider
@@ -66,7 +64,7 @@ public class PaimonPageSinkProvider
             case BUCKET_UNAWARE :
                 break;
             default :
-                throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + mode);
+                throw PaimonTableSupport.unsupportedBucketMode("writes", mode);
         }
     }
 
@@ -74,7 +72,7 @@ public class PaimonPageSinkProvider
     {
         BucketMode mode = requireFileStoreTable(table, "merge writes").bucketMode();
         if (mode != BucketMode.HASH_FIXED) {
-            throw new TrinoException(NOT_SUPPORTED, "Unsupported table bucket mode: " + mode);
+            throw PaimonTableSupport.unsupportedBucketMode("merge writes", mode);
         }
     }
 
@@ -147,6 +145,7 @@ public class PaimonPageSinkProvider
             FileStoreTable table = latestFileStoreTable(tableHandle.tableWithWriteDynamicOptions(catalog),
                     "merge writes");
             validateMergeBucketMode(table);
+            PaimonTableSupport.validateRowLevelDelete(table, "merge writes");
             validateMergeWriteColumns(table, writeColumns);
             return createPageSink(table, false, getWriteColumnTypes(writeColumns),
                     getWriteLogicalTypes(writeColumns));

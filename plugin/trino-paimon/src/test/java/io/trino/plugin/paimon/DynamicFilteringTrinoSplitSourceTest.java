@@ -556,6 +556,35 @@ public class DynamicFilteringTrinoSplitSourceTest
     }
 
     @Test
+    public void testUnblockedAwaitableDynamicFilterPlansSplitsImmediately()
+            throws Exception
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false);
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Collections.emptyMap(),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.empty()),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                dynamicFilter(TupleDomain.all(), true),
+                new Duration(1, SECONDS));
+
+        ConnectorSplitSource.ConnectorSplitBatch batch = splitSource.getNextBatch(100).get();
+
+        assertThat(catalog.initialized()).isTrue();
+        assertThat(catalog.tableLoaded()).isTrue();
+        assertThat(batch.getSplits()).isEmpty();
+        assertThat(batch.isNoMoreSplits()).isTrue();
+    }
+
+    @Test
     public void testCloseWhileAwaitingDynamicFilterReturnsFinishedBatch()
             throws Exception
     {

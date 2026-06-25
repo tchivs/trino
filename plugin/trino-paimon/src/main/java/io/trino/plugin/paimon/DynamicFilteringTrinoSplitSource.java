@@ -85,9 +85,12 @@ public class DynamicFilteringTrinoSplitSource
 
             // Wait for dynamic filters if not yet started planning
             if (!splitsPlanningStarted && PaimonSplitManager.canApplyDynamicFilter(tableHandle) && dynamicFilter.isAwaitable() && timeLeft > 0) {
-                LOG.debug("Waiting for dynamic filters, time left: %sms", timeLeft);
-                return closeAware(dynamicFilter.isBlocked().thenApply(ignored -> EMPTY_BATCH)
-                        .completeOnTimeout(EMPTY_BATCH, timeLeft, MILLISECONDS));
+                CompletableFuture<?> blocked = dynamicFilter.isBlocked();
+                if (!blocked.isDone()) {
+                    LOG.debug("Waiting for dynamic filters, time left: %sms", timeLeft);
+                    return closeAware(blocked.thenApply(ignored -> EMPTY_BATCH)
+                            .completeOnTimeout(EMPTY_BATCH, timeLeft, MILLISECONDS));
+                }
             }
 
             // Start split planning if not yet started

@@ -923,6 +923,46 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPageSourceEffectiveFilterShortCircuitsLateDynamicFilterNone()
+    {
+        PaimonColumnHandle regionColumn = PaimonColumnHandle.of("region", DataTypes.BIGINT());
+        TupleDomain<PaimonColumnHandle> staticFilter = TupleDomain.withColumnDomains(Map.of(
+                regionColumn, Domain.singleValue(BIGINT, 7L)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                staticFilter,
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThat(PaimonPageSourceProvider.effectiveFilter(tableHandle, dynamicFilter(TupleDomain.none())))
+                .isEqualTo(TupleDomain.none());
+    }
+
+    @Test
+    void testPageSourceEffectiveFilterRequiresPaimonDynamicFilterColumns()
+    {
+        ColumnHandle wrongColumn = new ColumnHandle() {};
+        TupleDomain<ColumnHandle> dynamicFilter = TupleDomain.withColumnDomains(Map.of(
+                wrongColumn, Domain.singleValue(BIGINT, 11L)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThatThrownBy(() -> PaimonPageSourceProvider.effectiveFilter(tableHandle, dynamicFilter(dynamicFilter)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon dynamic filter requires PaimonColumnHandle, got: %s",
+                        wrongColumn.getClass().getName());
+    }
+
+    @Test
     void testPageSourceEffectiveFilterIgnoresLateDynamicFilterAfterAcceptedLimit()
     {
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
