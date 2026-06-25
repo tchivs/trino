@@ -50,6 +50,7 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.io.CompactIncrement;
@@ -196,6 +197,10 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> metadata.dropSchema(SESSION, SYSTEM_DATABASE_NAME, false),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon drop schema is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.setSchemaAuthorization(SESSION, SYSTEM_DATABASE_NAME,
+                        new TrinoPrincipal(PrincipalType.USER, "schema_owner")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set schema authorization is not supported for the system schema 'sys'");
         assertTrinoError(() -> metadata.setTableProperties(SESSION, systemTableHandle, Map.of("bucket", Optional.of("4"))),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon set table properties is not supported for the system schema 'sys'");
@@ -2677,10 +2682,21 @@ public class PaimonMetadataTableModeTest
         assertThatThrownBy(() -> metadata.createSchema(null, "schema", Map.of(), null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("session is null");
+        assertThatThrownBy(() -> metadata.setSchemaAuthorization(null, "schema",
+                        new TrinoPrincipal(PrincipalType.USER, "schema_owner")))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
         assertThatThrownBy(() -> metadata.createSchema(SESSION, "schema", null, null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("properties is null");
         assertThatThrownBy(() -> metadata.createSchema(SESSION, " ", Map.of(), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("schemaName cannot be null or empty");
+        assertThatThrownBy(() -> metadata.setSchemaAuthorization(SESSION, "schema", null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("principal is null");
+        assertThatThrownBy(() -> metadata.setSchemaAuthorization(SESSION, " ",
+                        new TrinoPrincipal(PrincipalType.USER, "schema_owner")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("schemaName cannot be null or empty");
         assertThatThrownBy(() -> metadata.dropSchema(null, "schema", false))
@@ -2936,6 +2952,22 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testCheckedSetSchemaAuthorizationFailureUsesPaimonMetadataError()
+    {
+        IOException failure = new IOException("schema authorization metastore I/O failed");
+        PaimonMetadata metadata = new PaimonMetadata(new CheckedFailingSchemaAuthorizationCatalog(failure),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.setSchemaAuthorization(SESSION, "schema",
+                        new TrinoPrincipal(PrincipalType.USER, "schema_owner")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to set authorization on Paimon schema 'schema'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+    }
+
+    @Test
     public void testCheckedCreateTableFailureUsesPaimonMetadataError()
     {
         IOException failure = new IOException("table create metastore I/O failed");
@@ -3136,6 +3168,25 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetSchemaAuthorizationStoresOwnerProperty()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        metadata.setSchemaAuthorization(SESSION, "schema", new TrinoPrincipal(PrincipalType.USER, "new_owner"));
+
+        assertThat(catalog.alteredDatabase).isEqualTo("schema");
+        assertThat(catalog.alterDatabaseIgnoreIfNotExists).isFalse();
+        assertThat(catalog.lastDatabasePropertyChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(PropertyChange.SetProperty.class, change -> {
+                    assertThat(change.property()).isEqualTo(OWNER_PROPERTY);
+                    assertThat(change.value()).isEqualTo("new_owner");
+                });
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
     public void testDropSchemaPreservesCascadeFlag()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
@@ -3195,6 +3246,19 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata metadata2 = new PaimonMetadata(notEmptyCatalog, TESTING_TYPE_MANAGER);
         assertTrinoError(() -> metadata2.dropSchema(SESSION, "nonempty", false),
                 SCHEMA_NOT_EMPTY.toErrorCode(), "Schema 'nonempty' is not empty");
+
+        SchemaQueryCatalog alterMissingCatalog = new SchemaQueryCatalog() {
+            @Override
+            public void alterDatabase(String name, List<PropertyChange> changes, boolean ignoreIfNotExists)
+                    throws Catalog.DatabaseNotExistException
+            {
+                throw new Catalog.DatabaseNotExistException(name);
+            }
+        };
+        PaimonMetadata metadata3 = new PaimonMetadata(alterMissingCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> metadata3.setSchemaAuthorization(SESSION, "missing",
+                        new TrinoPrincipal(PrincipalType.USER, "schema_owner")),
+                SCHEMA_NOT_FOUND.toErrorCode(), "Schema 'missing' does not exist");
     }
 
     @Test
@@ -4821,6 +4885,9 @@ public class PaimonMetadataTableModeTest
         private String droppedDatabase;
         private Boolean dropDatabaseIgnoreIfNotExists;
         private Boolean dropDatabaseCascade;
+        private String alteredDatabase;
+        private Boolean alterDatabaseIgnoreIfNotExists;
+        private List<PropertyChange> lastDatabasePropertyChanges = List.of();
         private Schema createdSchema;
         private boolean initialized;
         private int alterCalls;
@@ -4871,6 +4938,14 @@ public class PaimonMetadataTableModeTest
             this.droppedDatabase = name;
             this.dropDatabaseIgnoreIfNotExists = ignoreIfNotExists;
             this.dropDatabaseCascade = cascade;
+        }
+
+        @Override
+        public void alterDatabase(String name, List<PropertyChange> changes, boolean ignoreIfNotExists)
+        {
+            this.alteredDatabase = name;
+            this.alterDatabaseIgnoreIfNotExists = ignoreIfNotExists;
+            this.lastDatabasePropertyChanges = List.copyOf(changes);
         }
 
         @Override
@@ -5022,6 +5097,36 @@ public class PaimonMetadataTableModeTest
             assertThat(name).isEqualTo("schema");
             assertThat(ignoreIfNotExists).isFalse();
             assertThat(cascade).isFalse();
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private static class CheckedFailingSchemaAuthorizationCatalog
+            extends PaimonCatalog
+    {
+        private final IOException failure;
+
+        private CheckedFailingSchemaAuthorizationCatalog(IOException failure)
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+            this.failure = failure;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public void alterDatabase(String name, List<PropertyChange> changes, boolean ignoreIfNotExists)
+        {
+            assertThat(name).isEqualTo("schema");
+            assertThat(ignoreIfNotExists).isFalse();
+            assertThat(changes).singleElement().isInstanceOf(PropertyChange.SetProperty.class);
             throw new RuntimeException(failure);
         }
     }

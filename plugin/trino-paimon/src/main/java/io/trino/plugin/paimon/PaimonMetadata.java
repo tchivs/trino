@@ -53,6 +53,7 @@ import io.trino.spi.type.VarcharType;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.manifest.PartitionEntry;
@@ -610,6 +611,27 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public Optional<TrinoPrincipal> getSchemaOwner(ConnectorSession session, String schemaName)
     {
         return Optional.empty();
+    }
+
+    @Override
+    public void setSchemaAuthorization(ConnectorSession session, String schemaName, TrinoPrincipal principal)
+    {
+        requireNonNull(session, "session is null");
+        requireNonNull(principal, "principal is null");
+        checkArgument(!StringUtils.isNullOrWhitespaceOnly(schemaName), "schemaName cannot be null or empty");
+        rejectSystemSchemaWrite(schemaName, "set schema authorization");
+
+        try {
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterDatabase(schemaName, List.of(PropertyChange.setProperty(OWNER_PROPERTY,
+                    principal.getName())), false);
+        }
+        catch (Catalog.DatabaseNotExistException e) {
+            throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schemaName), e);
+        }
+        catch (Exception e) {
+            throw paimonMetadataException(format("Failed to set authorization on Paimon schema '%s'", schemaName), e);
+        }
     }
 
     private static Map<String, Object> supportedSchemaProperties(Map<String, String> properties)
