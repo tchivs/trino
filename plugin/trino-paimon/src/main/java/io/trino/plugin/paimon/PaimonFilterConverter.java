@@ -284,7 +284,7 @@ public class PaimonFilterConverter
         return and(conjuncts);
     }
 
-    private Object getLiteralValue(Type type, Object trinoNativeValue)
+    static Object getLiteralValue(Type type, Object trinoNativeValue)
     {
         requireNonNull(trinoNativeValue, "trinoNativeValue is null");
 
