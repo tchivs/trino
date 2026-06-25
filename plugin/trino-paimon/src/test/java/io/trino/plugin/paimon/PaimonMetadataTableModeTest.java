@@ -2207,6 +2207,30 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSystemSchemaFinishWritesAreRejectedBeforeCatalogInitialization()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle systemTableHandle = new PaimonTableHandle(SYSTEM_DATABASE_NAME, "all_tables", Map.of());
+
+        assertTrinoError(() -> metadata.finishInsert(SESSION, systemTableHandle, List.of(), List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon finish insert is not supported for the system schema 'sys'");
+        assertThat(catalog.initialized).isFalse();
+
+        assertTrinoError(() -> metadata.finishCreateTable(SESSION, systemTableHandle, List.of(), List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon finish create table is not supported for the system schema 'sys'");
+        assertThat(catalog.initialized).isFalse();
+
+        assertTrinoError(() -> metadata.finishMerge(SESSION, new PaimonMergeTableHandle(systemTableHandle),
+                        List.of(), List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon finish merge is not supported for the system schema 'sys'");
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
     public void testCommitFragmentsAreValidatedBeforeCatalogInitialization()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
