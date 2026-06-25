@@ -36,6 +36,7 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.ProjectionApplicationResult;
+import io.trino.spi.connector.RelationType;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SchemaTableName;
@@ -1255,7 +1256,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .orElseGet(() -> listSchemaNames(session))
                 .forEach(schema -> {
                     tables.addAll(listTables(sessionCatalog, schema));
-                    tables.addAll(listViews(sessionCatalog, schema));
+                    tables.addAll(listViewsIfSupported(sessionCatalog, schema));
                 });
         return tables;
     }
@@ -1274,6 +1275,37 @@ public record PaimonMetadata(PaimonCatalog catalog,
         catch (Catalog.DatabaseNotExistException e) {
             throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schema), e);
         }
+    }
+
+    private List<SchemaTableName> listViewsIfSupported(Catalog sessionCatalog, String schemaName)
+    {
+        try {
+            return listViews(sessionCatalog, schemaName);
+        }
+        catch (TrinoException e) {
+            if (e.getErrorCode().equals(NOT_SUPPORTED.toErrorCode())) {
+                return List.of();
+            }
+            throw e;
+        }
+    }
+
+    @Override
+    public Map<SchemaTableName, RelationType> getRelationTypes(ConnectorSession session, Optional<String> schemaName)
+    {
+        requireNonNull(session, "session is null");
+        requireNonNull(schemaName, "schemaName is null");
+        schemaName.ifPresent(schema -> checkArgument(!StringUtils.isNullOrWhitespaceOnly(schema),
+                "schemaName cannot be null or empty"));
+        Catalog sessionCatalog = catalog.forSession(session);
+        Map<SchemaTableName, RelationType> relationTypes = new LinkedHashMap<>();
+        schemaName.map(Collections::singletonList)
+                .orElseGet(() -> listSchemaNames(session))
+                .forEach(schema -> {
+                    listTables(sessionCatalog, schema).forEach(tableName -> relationTypes.put(tableName, RelationType.TABLE));
+                    listViewsIfSupported(sessionCatalog, schema).forEach(viewName -> relationTypes.put(viewName, RelationType.VIEW));
+                });
+        return Collections.unmodifiableMap(new LinkedHashMap<>(relationTypes));
     }
 
     @Override

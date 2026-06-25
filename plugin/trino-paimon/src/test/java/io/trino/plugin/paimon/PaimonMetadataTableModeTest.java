@@ -4720,6 +4720,27 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testListTablesToleratesCatalogWithoutViewListing()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new SchemaQueryCatalog() {
+            @Override
+            public List<String> listViews(String databaseName)
+            {
+                throw new UnsupportedOperationException("view listing unavailable");
+            }
+        }, TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.listTables(SESSION, Optional.of("alpha")))
+                .containsExactly(
+                        new SchemaTableName("alpha", "t1"),
+                        new SchemaTableName("alpha", "t2"));
+        assertThat(metadata.getRelationTypes(SESSION, Optional.of("alpha")))
+                .containsExactlyInAnyOrderEntriesOf(Map.of(
+                        new SchemaTableName("alpha", "t1"), RelationType.TABLE,
+                        new SchemaTableName("alpha", "t2"), RelationType.TABLE));
+    }
+
+    @Test
     public void testListTablesSchemaNotFound()
     {
         SchemaQueryCatalog catalog = new SchemaQueryCatalog() {
