@@ -2130,7 +2130,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "delete");
-        if (paimonTableHandle.getFilter().isAll()) {
+        if (isSafeFullTableDeleteHandle(paimonTableHandle)) {
             return Optional.of(paimonTableHandle);
         }
         return partitionDeleteSpecs(paimonTableHandle, fileStoreTable)
@@ -2151,6 +2151,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
         truncatePaimonTable(session, paimonTableHandle, "delete", "delete rows from",
                 paimonTableHandle.getDeletePartitionSpecs());
         return OptionalLong.empty();
+    }
+
+    private static boolean isSafeFullTableDeleteHandle(PaimonTableHandle tableHandle)
+    {
+        return tableHandle.getFilter().isAll()
+                && tableHandle.getLimit().isEmpty()
+                && tableHandle.getProjectedColumns().isEmpty()
+                && tableHandle.getDeletePartitionSpecs().isEmpty();
     }
 
     private static Optional<List<Map<String, String>>> partitionDeleteSpecs(
