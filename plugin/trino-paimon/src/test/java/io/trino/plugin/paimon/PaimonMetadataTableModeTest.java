@@ -56,6 +56,7 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.LocalZoneTimestamp;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.io.CompactIncrement;
@@ -268,7 +269,8 @@ public class PaimonMetadataTableModeTest
                 DataTypes.FIELD(1, "name", DataTypes.STRING()),
                 DataTypes.FIELD(2, "extra", DataTypes.INT()),
                 DataTypes.FIELD(3, "event_date", DataTypes.DATE()),
-                DataTypes.FIELD(4, "event_time", DataTypes.TIMESTAMP(6)));
+                DataTypes.FIELD(4, "event_time", DataTypes.TIMESTAMP(6)),
+                DataTypes.FIELD(5, "event_time_tz", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6)));
         Statistics statistics = new Statistics(7, 3, 100L, 4096L, Map.of(
                 "id", ColStats.newColStats(0, 20L, 1L, 99L, 5L, 8L, 8L),
                 "missing", ColStats.newColStats(9, 1L, null, null, 0L, 4L, 4L),
@@ -276,7 +278,9 @@ public class PaimonMetadataTableModeTest
                         25L, 12L, 64L),
                 "event_date", ColStats.newColStats(3, null, 10, 20, 0L, 4L, 4L),
                 "event_time", ColStats.newColStats(4, null, Timestamp.fromMicros(1_000_000L),
-                        Timestamp.fromMicros(2_500_000L), 0L, 8L, 8L)));
+                        Timestamp.fromMicros(2_500_000L), 0L, 8L, 8L),
+                "event_time_tz", ColStats.newColStats(5, null, LocalZoneTimestamp.fromMicros(1_000_000L),
+                        LocalZoneTimestamp.fromMicros(2_500_000L), 0L, 8L, 8L)));
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(statisticsTable(rowType, Optional.of(statistics))),
                 TESTING_TYPE_MANAGER);
 
@@ -284,7 +288,7 @@ public class PaimonMetadataTableModeTest
                 new PaimonTableHandle("schema", "table", Map.of()));
 
         assertThat(tableStatistics.getRowCount().getValue()).isEqualTo(100);
-        assertThat(tableStatistics.getColumnStatistics()).hasSize(4);
+        assertThat(tableStatistics.getColumnStatistics()).hasSize(5);
 
         ColumnStatistics idStats = tableStatistics.getColumnStatistics()
                 .get(PaimonColumnHandle.of("id", DataTypes.BIGINT()));
@@ -307,6 +311,10 @@ public class PaimonMetadataTableModeTest
         ColumnStatistics timestampStats = tableStatistics.getColumnStatistics()
                 .get(PaimonColumnHandle.of("event_time", DataTypes.TIMESTAMP(6)));
         assertThat(timestampStats.getRange()).contains(new DoubleRange(1_000_000, 2_500_000));
+
+        ColumnStatistics timestampWithTimeZoneStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("event_time_tz", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6)));
+        assertThat(timestampWithTimeZoneStats.getRange()).contains(new DoubleRange(1_000, 2_500));
 
         assertThat(tableStatistics.getColumnStatistics())
                 .doesNotContainKey(PaimonColumnHandle.of("missing", DataTypes.INT()));
