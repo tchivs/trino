@@ -25,6 +25,7 @@ import org.apache.paimon.codegen.CodeGenUtils;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.table.sink.ChannelComputer;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.InstantiationUtil;
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -60,6 +62,29 @@ public class FixedBucketTableShuffleFunctionTest
                 .isEqualTo(expectedPartition(schema, bucketKeyPage, 0, 3));
         assertThat(function.getBucket(bucketKeyPage, 1))
                 .isEqualTo(expectedPartition(schema, bucketKeyPage, 1, 3));
+    }
+
+    @Test
+    public void testPartitionedBucketKeyPageUsesPaimonPartitionAndBucketChannelSelection()
+            throws Exception
+    {
+        TableSchema schema = partitionedSchemaWithNonPrefixBucketKey();
+        FixedBucketTableShuffleFunction function = new FixedBucketTableShuffleFunction(
+                List.of(INTEGER, BIGINT, INTEGER),
+                new PaimonPartitioningHandle(InstantiationUtil.serializeObject(schema)),
+                8);
+
+        Page partitionAndBucketKeyPage = new Page(2,
+                new IntArrayBlock(2, Optional.empty(), new int[] {20250624, 20250625}),
+                new LongArrayBlock(2, Optional.empty(), new long[] {10, 10}),
+                new IntArrayBlock(2, Optional.empty(), new int[] {4, 4}));
+
+        assertThat(function.getBucket(partitionAndBucketKeyPage, 0))
+                .isEqualTo(expectedPartition(schema, partitionAndBucketKeyPage, 0, 8));
+        assertThat(function.getBucket(partitionAndBucketKeyPage, 1))
+                .isEqualTo(expectedPartition(schema, partitionAndBucketKeyPage, 1, 8));
+        assertThat(function.getBucket(partitionAndBucketKeyPage, 0))
+                .isNotEqualTo(function.getBucket(partitionAndBucketKeyPage, 1));
     }
 
     @Test
@@ -106,6 +131,36 @@ public class FixedBucketTableShuffleFunctionTest
 
         assertThat(function.getBucket(rowIdPage, 0))
                 .isEqualTo(expectedPartition(schema, primaryKeyPage.getColumns(1, 0), 0, 3));
+    }
+
+    @Test
+    public void testPartitionedRowIdPageUsesPaimonPartitionAndBucketChannelSelection()
+            throws Exception
+    {
+        TableSchema schema = partitionedSchemaWithNonPrefixBucketKey();
+        RowType rowIdType = RowType.from(List.of(
+                RowType.field("dt", INTEGER),
+                RowType.field("orderkey", BIGINT),
+                RowType.field("linenumber", INTEGER)));
+        FixedBucketTableShuffleFunction function = new FixedBucketTableShuffleFunction(
+                List.of(rowIdType),
+                new PaimonPartitioningHandle(InstantiationUtil.serializeObject(schema)),
+                8);
+        Page primaryKeyPage = new Page(2,
+                new IntArrayBlock(2, Optional.empty(), new int[] {20250624, 20250625}),
+                new LongArrayBlock(2, Optional.empty(), new long[] {10, 10}),
+                new IntArrayBlock(2, Optional.empty(), new int[] {4, 4}));
+        Page rowIdPage = new Page(RowBlock.fromFieldBlocks(2, new Block[] {
+                primaryKeyPage.getBlock(0),
+                primaryKeyPage.getBlock(1),
+                primaryKeyPage.getBlock(2)}));
+
+        assertThat(function.getBucket(rowIdPage, 0))
+                .isEqualTo(expectedPartition(schema, primaryKeyPage, 0, 8));
+        assertThat(function.getBucket(rowIdPage, 1))
+                .isEqualTo(expectedPartition(schema, primaryKeyPage, 1, 8));
+        assertThat(function.getBucket(rowIdPage, 0))
+                .isNotEqualTo(function.getBucket(rowIdPage, 1));
     }
 
     @Test
@@ -158,17 +213,40 @@ public class FixedBucketTableShuffleFunctionTest
                 .hasMessage("workerCount must be positive: 0");
     }
 
-    private static int expectedPartition(TableSchema schema, Page bucketKeyPage, int position, int workerCount)
+    private static int expectedPartition(TableSchema schema, Page partitionAndBucketKeyPage, int position, int workerCount)
     {
         PaimonRow row = new PaimonRow(
-                bucketKeyPage.getSingleValuePage(position),
+                partitionAndBucketKeyPage.getSingleValuePage(position),
                 RowKind.INSERT,
-                List.of(BIGINT, INTEGER),
-                schema.logicalBucketKeyType().getFieldTypes());
-        BinaryRow bucketKey = CodeGenUtils.newProjection(schema.logicalBucketKeyType(), new int[] {0, 1}).apply(row);
+                partitionAndBucketKeyTypes(schema),
+                partitionAndBucketLogicalTypes(schema));
+        org.apache.paimon.types.RowType inputType = schema.projectedLogicalRowType(partitionAndBucketKeys(schema));
+        BinaryRow partition = CodeGenUtils.newProjection(inputType, schema.partitionKeys()).apply(row);
+        BinaryRow bucketKey = CodeGenUtils.newProjection(inputType, schema.bucketKeys()).apply(row);
         int bucket = BucketFunction.create(new CoreOptions(schema.options()), schema.logicalBucketKeyType())
                 .bucket(bucketKey, new CoreOptions(schema.options()).bucket());
-        return bucket % workerCount;
+        return ChannelComputer.select(partition, bucket, workerCount);
+    }
+
+    private static List<io.trino.spi.type.Type> partitionAndBucketKeyTypes(TableSchema schema)
+    {
+        return partitionAndBucketKeys(schema).stream()
+                .map(fieldName -> schema.logicalRowType().getField(fieldName).type())
+                .map(PaimonTypeUtils::fromPaimonType)
+                .toList();
+    }
+
+    private static List<org.apache.paimon.types.DataType> partitionAndBucketLogicalTypes(TableSchema schema)
+    {
+        return partitionAndBucketKeys(schema).stream()
+                .map(fieldName -> schema.logicalRowType().getField(fieldName).type())
+                .toList();
+    }
+
+    private static List<String> partitionAndBucketKeys(TableSchema schema)
+    {
+        return Stream.concat(schema.partitionKeys().stream(), schema.bucketKeys().stream())
+                .toList();
     }
 
     private static TableSchema schemaWithNonPrefixBucketKey()
@@ -197,6 +275,23 @@ public class FixedBucketTableShuffleFunctionTest
                         .getFields(),
                 List.of(),
                 List.of("linenumber", "orderkey"),
+                Map.of(
+                        CoreOptions.BUCKET.key(), "7",
+                        CoreOptions.BUCKET_KEY.key(), "orderkey,linenumber"),
+                ""));
+    }
+
+    private static TableSchema partitionedSchemaWithNonPrefixBucketKey()
+    {
+        return TableSchema.create(1, new Schema(
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.INT()),
+                        DataTypes.FIELD(1, "orderkey", DataTypes.BIGINT()),
+                        DataTypes.FIELD(2, "partkey", DataTypes.BIGINT()),
+                        DataTypes.FIELD(3, "linenumber", DataTypes.INT()))
+                        .getFields(),
+                List.of("dt"),
+                List.of("dt", "orderkey", "linenumber"),
                 Map.of(
                         CoreOptions.BUCKET.key(), "7",
                         CoreOptions.BUCKET_KEY.key(), "orderkey,linenumber"),
