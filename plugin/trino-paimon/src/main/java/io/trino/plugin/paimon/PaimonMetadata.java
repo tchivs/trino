@@ -115,6 +115,7 @@ import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampT
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
+import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.READ_ONLY_VIOLATION;
 import static io.trino.spi.StandardErrorCode.SCHEMA_ALREADY_EXISTS;
@@ -1189,6 +1190,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         List<String> partitionKeys = PaimonTableOptions.getPartitionedKeys(properties);
         primaryKeys.forEach(column -> rejectPaimonSystemColumnName("create table primary key", column));
         partitionKeys.forEach(column -> rejectPaimonSystemColumnName("create table partition key", column));
+        List<String> columnNames = tableMetadata.getColumns().stream()
+                .map(ColumnMetadata::getName)
+                .collect(toList());
+        validateKeyColumns(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, primaryKeys, columnNames);
+        validateKeyColumns(PaimonTableOptions.PARTITIONED_BY_PROPERTY, partitionKeys, columnNames);
         Schema.Builder builder = Schema.newBuilder().primaryKey(primaryKeys)
                 .partitionKeys(partitionKeys)
                 .comment(tableMetadata.getComment().orElse(null));
@@ -1201,6 +1207,43 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonTableOptionUtils.buildOptions(builder, properties);
 
         return builder.build();
+    }
+
+    private static void validateKeyColumns(String propertyName, List<String> keyColumns, List<String> columnNames)
+    {
+        requireNonNull(propertyName, "propertyName is null");
+        requireNonNull(keyColumns, "keyColumns is null");
+        requireNonNull(columnNames, "columnNames is null");
+        if (keyColumns.isEmpty()) {
+            return;
+        }
+
+        Set<String> duplicateColumns = duplicates(keyColumns);
+        if (!duplicateColumns.isEmpty()) {
+            throw new TrinoException(INVALID_TABLE_PROPERTY,
+                    "Paimon " + propertyName + " must not contain duplicate columns: " + duplicateColumns);
+        }
+
+        Set<String> tableColumns = new LinkedHashSet<>(columnNames);
+        List<String> missingColumns = keyColumns.stream()
+                .filter(column -> !tableColumns.contains(column))
+                .toList();
+        if (!missingColumns.isEmpty()) {
+            throw new TrinoException(INVALID_TABLE_PROPERTY,
+                    "Paimon " + propertyName + " columns not present in schema: " + missingColumns);
+        }
+    }
+
+    private static Set<String> duplicates(List<String> values)
+    {
+        Set<String> seen = new HashSet<>();
+        Set<String> duplicates = new LinkedHashSet<>();
+        for (String value : values) {
+            if (!seen.add(value)) {
+                duplicates.add(value);
+            }
+        }
+        return duplicates;
     }
 
     private static DataType toPaimonType(ColumnMetadata column)
