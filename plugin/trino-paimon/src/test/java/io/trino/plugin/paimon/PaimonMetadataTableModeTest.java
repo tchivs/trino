@@ -123,6 +123,7 @@ import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_SNAPSHOT;
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
+import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.READ_ONLY_VIOLATION;
 import static io.trino.spi.StandardErrorCode.SCHEMA_ALREADY_EXISTS;
@@ -3507,6 +3508,42 @@ public class PaimonMetadataTableModeTest
                 io.trino.spi.connector.SaveMode.FAIL))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("partitioned_by contains non-string value");
+
+        ConnectorTableMetadata duplicatePrimaryKey = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("id", INTEGER)),
+                Map.of(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("id", "id")));
+        assertTrinoError(() -> metadata.createTable(SESSION, duplicatePrimaryKey,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Paimon primary_key must not contain duplicate columns: [id]");
+
+        ConnectorTableMetadata missingPrimaryKey = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("id", INTEGER)),
+                Map.of(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("missing")));
+        assertTrinoError(() -> metadata.createTable(SESSION, missingPrimaryKey,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Paimon primary_key columns not present in schema: [missing]");
+
+        ConnectorTableMetadata duplicatePartitionKey = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("dt", VARCHAR)),
+                Map.of(PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("dt", "dt")));
+        assertTrinoError(() -> metadata.createTable(SESSION, duplicatePartitionKey,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Paimon partitioned_by must not contain duplicate columns: [dt]");
+
+        ConnectorTableMetadata missingPartitionKey = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("dt", VARCHAR)),
+                Map.of(PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("missing")));
+        assertTrinoError(() -> metadata.createTable(SESSION, missingPartitionKey,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Paimon partitioned_by columns not present in schema: [missing]");
 
         ConnectorTableMetadata systemColumn = new ConnectorTableMetadata(
                 new SchemaTableName("schema", "table"),
