@@ -141,24 +141,51 @@ public record PaimonMetadata(PaimonCatalog catalog,
     }
 
     @Override
+    public Optional<ConnectorTableLayout> getNewTableLayout(ConnectorSession session, ConnectorTableMetadata tableMetadata)
+    {
+        requireNonNull(session, "session is null");
+        requireNonNull(tableMetadata, "tableMetadata is null");
+        rejectSystemSchemaWrite(tableMetadata.getTable().getSchemaName(), "create table");
+        TableSchema tableSchema = TableSchema.create(0, prepareSchema(tableMetadata));
+        return writeLayout(tableSchema, "new table layout", tableMetadata.getTable().toString());
+    }
+
+    @Override
     public Optional<ConnectorTableLayout> getInsertLayout(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("insert layout", tableHandle);
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "insert layout");
-        BucketMode bucketMode = storeTable.bucketMode();
+        return writeLayout(storeTable.schema(), storeTable.bucketMode(), "insert layout",
+                schemaTableName(paimonTableHandle).toString());
+    }
+
+    private static Optional<ConnectorTableLayout> writeLayout(TableSchema tableSchema, String operation, String tableName)
+    {
+        return writeLayout(tableSchema, bucketMode(tableSchema), operation, tableName);
+    }
+
+    private static Optional<ConnectorTableLayout> writeLayout(
+            TableSchema tableSchema,
+            BucketMode bucketMode,
+            String operation,
+            String tableName)
+    {
+        requireNonNull(tableSchema, "tableSchema is null");
+        requireNonNull(bucketMode, "bucketMode is null");
+        requireNonNull(operation, "operation is null");
+        requireNonNull(tableName, "tableName is null");
         switch (bucketMode) {
             case HASH_FIXED :
                 try {
                     return Optional.of(new ConnectorTableLayout(
-                            new PaimonPartitioningHandle(InstantiationUtil.serializeObject(storeTable.schema())),
-                            fixedBucketWritePartitionColumns(storeTable.schema()), false));
+                            new PaimonPartitioningHandle(InstantiationUtil.serializeObject(tableSchema)),
+                            fixedBucketWritePartitionColumns(tableSchema), false));
                 }
                 catch (IOException e) {
                     throw new TrinoException(PAIMON_METADATA_ERROR,
-                            format("Failed to prepare Paimon insert layout for table '%s'",
-                                    schemaTableName(paimonTableHandle)),
+                            format("Failed to prepare Paimon %s for table '%s'", operation, tableName),
                             e);
                 }
             case HASH_DYNAMIC :
@@ -166,19 +193,18 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     // TODO: Replace this single-writer HASH_DYNAMIC INSERT layout with a Flink-style
                     // two-stage assigner/writer topology that coordinates dynamic bucket index state.
                     return Optional.of(new ConnectorTableLayout(
-                            new PaimonPartitioningHandle(InstantiationUtil.serializeObject(storeTable.schema()), true),
+                            new PaimonPartitioningHandle(InstantiationUtil.serializeObject(tableSchema), true),
                             List.of(), false));
                 }
                 catch (IOException e) {
                     throw new TrinoException(PAIMON_METADATA_ERROR,
-                            format("Failed to prepare Paimon insert layout for table '%s'",
-                                    schemaTableName(paimonTableHandle)),
+                            format("Failed to prepare Paimon %s for table '%s'", operation, tableName),
                             e);
                 }
             case BUCKET_UNAWARE :
                 return Optional.empty();
             default :
-                throw PaimonTableSupport.unsupportedBucketMode("insert layout", bucketMode);
+                throw PaimonTableSupport.unsupportedBucketMode(operation, bucketMode);
         }
     }
 
@@ -187,6 +213,22 @@ public record PaimonMetadata(PaimonCatalog catalog,
         List<String> partitionColumns = new ArrayList<>(schema.partitionKeys());
         partitionColumns.addAll(schema.bucketKeys());
         return List.copyOf(partitionColumns);
+    }
+
+    private static BucketMode bucketMode(TableSchema schema)
+    {
+        requireNonNull(schema, "schema is null");
+        int bucket = CoreOptions.fromMap(schema.options()).bucket();
+        if (bucket == BucketMode.POSTPONE_BUCKET) {
+            return BucketMode.POSTPONE_MODE;
+        }
+        if (bucket != -1) {
+            return BucketMode.HASH_FIXED;
+        }
+        if (schema.primaryKeys().isEmpty()) {
+            return BucketMode.BUCKET_UNAWARE;
+        }
+        return schema.crossPartitionUpdate() ? BucketMode.KEY_DYNAMIC : BucketMode.HASH_DYNAMIC;
     }
 
     @Override
