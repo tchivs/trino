@@ -195,6 +195,24 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSystemSchemaListTablesDoesNotQueryCatalog()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new SystemSchemaRejectingCatalog(), TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.listTables(SESSION, Optional.of(SYSTEM_DATABASE_NAME)))
+                .containsExactlyElementsOf(SystemTableLoader.loadGlobalTableNames().stream()
+                        .map(table -> new SchemaTableName(SYSTEM_DATABASE_NAME, table))
+                        .toList());
+        assertThat(metadata.listTables(SESSION, Optional.empty()))
+                .containsExactly(
+                        new SchemaTableName("alpha", "t1"),
+                        new SchemaTableName(SYSTEM_DATABASE_NAME, "tables"),
+                        new SchemaTableName(SYSTEM_DATABASE_NAME, "partitions"),
+                        new SchemaTableName(SYSTEM_DATABASE_NAME, "all_table_options"),
+                        new SchemaTableName(SYSTEM_DATABASE_NAME, "catalog_options"));
+    }
+
+    @Test
     public void testSystemSchemaWritesAreRejected()
     {
         PaimonMetadata metadata = new PaimonMetadata(new CapturingDdlCatalog(), TESTING_TYPE_MANAGER);
@@ -6792,6 +6810,40 @@ public class PaimonMetadataTableModeTest
                 case SYSTEM_DATABASE_NAME -> SystemTableLoader.loadGlobalTableNames();
                 default -> List.of();
             };
+        }
+    }
+
+    private static class SystemSchemaRejectingCatalog
+            extends PaimonCatalog
+    {
+        private SystemSchemaRejectingCatalog()
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public List<String> listDatabases()
+        {
+            return List.of("alpha");
+        }
+
+        @Override
+        public List<String> listTables(String databaseName)
+        {
+            if (databaseName.equals(SYSTEM_DATABASE_NAME)) {
+                throw new AssertionError("system schema tables must be provided by the connector");
+            }
+            assertThat(databaseName).isEqualTo("alpha");
+            return List.of("t1");
         }
     }
 

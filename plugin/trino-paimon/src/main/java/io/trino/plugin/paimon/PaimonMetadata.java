@@ -80,6 +80,7 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
+import org.apache.paimon.table.system.SystemTableLoader;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
@@ -1258,6 +1259,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     private List<SchemaTableName> listTables(Catalog sessionCatalog, String schema)
     {
+        if (SYSTEM_DATABASE_NAME.equals(schema)) {
+            return SystemTableLoader.loadGlobalTableNames().stream()
+                    .map(table -> new SchemaTableName(schema, table))
+                    .collect(toList());
+        }
         try {
             return sessionCatalog.listTables(schema).stream().map(table -> new SchemaTableName(schema, table))
                     .collect(toList());
