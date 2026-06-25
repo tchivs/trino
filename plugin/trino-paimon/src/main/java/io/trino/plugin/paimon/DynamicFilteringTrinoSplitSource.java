@@ -137,28 +137,25 @@ public class DynamicFilteringTrinoSplitSource
 
     private PaimonSplitSource planSplits()
     {
-        TupleDomain<PaimonColumnHandle> combinedPredicate = PaimonSplitManager.effectivePredicate(tableHandle, dynamicFilter);
-        if (PaimonSplitManager.isEmptySplit(combinedPredicate, tableHandle)) {
+        TupleDomain<PaimonColumnHandle> effectivePredicate = PaimonSplitManager.effectivePredicate(tableHandle, dynamicFilter);
+        if (PaimonSplitManager.isEmptySplit(effectivePredicate, tableHandle)) {
             return PaimonSplitManager.emptySplitSource(tableHandle);
         }
 
         try {
             Catalog catalog = paimonCatalog.forSession(session);
 
-            // Apply combined predicate to table scan
             Table table = PaimonTableHandle.schemaAwareReadTable(
                     tableHandle.tableWithDynamicOptions(catalog, session),
                     !tableHandle.usesHistoricalReadSchema(session));
             ReadBuilder readBuilder = table.newReadBuilder();
-            PaimonSplitManager.pushPredicate(readBuilder, table, combinedPredicate);
+            PaimonSplitManager.pushPredicate(readBuilder, table, effectivePredicate);
             PaimonSplitManager.pushLimit(readBuilder, tableHandle);
 
-            // Plan splits
             List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
 
-            LOG.debug("Planned %s splits after applying dynamic filters", splits.size());
+            LOG.debug("Planned %s splits after applying effective filters", splits.size());
 
-            // Calculate split weights
             long maxRowCount = splits.stream().mapToLong(PaimonSplitManager::splitWeightRowCount).max().orElse(0L);
             double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
 
