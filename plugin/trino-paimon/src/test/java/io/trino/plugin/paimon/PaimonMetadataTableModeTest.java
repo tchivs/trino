@@ -1023,6 +1023,78 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testNewTableLayoutUsesPaimonBucketMode()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata fixedBucketTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "fixed_bucket"),
+                List.of(
+                        new ColumnMetadata("dt", INTEGER),
+                        new ColumnMetadata("id", INTEGER),
+                        new ColumnMetadata("bucket_key", INTEGER)),
+                Map.of(
+                        PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("dt"),
+                        "bucket", "4",
+                        "bucket_key", "bucket_key"));
+        ConnectorTableMetadata hashDynamicTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "hash_dynamic"),
+                List.of(
+                        new ColumnMetadata("dt", INTEGER),
+                        new ColumnMetadata("id", INTEGER)),
+                Map.of(
+                        PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("dt", "id"),
+                        PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("dt"),
+                        "bucket", "-1"));
+        ConnectorTableMetadata unawareTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "unaware"),
+                List.of(new ColumnMetadata("id", INTEGER)),
+                Map.of("bucket", "-1"));
+
+        ConnectorTableLayout fixedLayout = metadata.getNewTableLayout(SESSION, fixedBucketTable).orElseThrow();
+        TableSchema fixedSchema = partitioningSchema(fixedLayout.getPartitioning().orElseThrow());
+        assertThat(fixedLayout.getPartitionColumns()).containsExactly("dt", "bucket_key");
+        assertThat(fixedSchema.partitionKeys()).containsExactly("dt");
+        assertThat(fixedSchema.bucketKeys()).containsExactly("bucket_key");
+
+        ConnectorTableLayout dynamicLayout = metadata.getNewTableLayout(SESSION, hashDynamicTable).orElseThrow();
+        assertThat(dynamicLayout.getPartitionColumns()).isEmpty();
+        assertThat(dynamicLayout.getPartitioning().orElseThrow())
+                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> assertThat(handle.isSingleNode()).isTrue());
+
+        assertThat(metadata.getNewTableLayout(SESSION, unawareTable)).isEmpty();
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
+    public void testNewTableLayoutRejectsUnsupportedBucketModes()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata keyDynamicTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "key_dynamic"),
+                List.of(
+                        new ColumnMetadata("dt", INTEGER),
+                        new ColumnMetadata("id", INTEGER)),
+                Map.of(
+                        PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("id"),
+                        PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("dt"),
+                        "bucket", "-1"));
+        ConnectorTableMetadata postponeTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "postpone"),
+                List.of(new ColumnMetadata("id", INTEGER)),
+                Map.of("bucket", "-2"));
+
+        assertTrinoError(() -> metadata.getNewTableLayout(SESSION, keyDynamicTable),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported table bucket mode: KEY_DYNAMIC for Paimon new table layout. Key-dynamic tables require a global key-to-bucket index, which is not implemented by this Trino connector");
+        assertTrinoError(() -> metadata.getNewTableLayout(SESSION, postponeTable),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported table bucket mode: POSTPONE_MODE for Paimon new table layout");
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
     public void testInsertLayoutIgnoresSessionScanSnapshotAndHandleStartupSelections()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
