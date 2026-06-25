@@ -1918,6 +1918,42 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testApplyDeleteRejectsLimitedOrProjectedFullTableHandles()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle limitedHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(1));
+        PaimonTableHandle projectedHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.of(List.of(id)),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThat(metadata.applyDelete(SESSION, limitedHandle)).isEmpty();
+        assertThat(metadata.applyDelete(SESSION, projectedHandle)).isEmpty();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
     public void testApplyDeleteAcceptsCompletePartitionFilter()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
