@@ -47,11 +47,15 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.ComputedStatistics;
+import io.trino.spi.statistics.DoubleRange;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Decimals;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
@@ -59,6 +63,8 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.Decimal;
+import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
@@ -100,6 +106,8 @@ import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
 import static io.trino.plugin.paimon.PaimonSchemaProperties.COMMENT_PROPERTY;
 import static io.trino.plugin.paimon.PaimonSchemaProperties.LOCATION_PROPERTY;
 import static io.trino.plugin.paimon.PaimonSchemaProperties.OWNER_PROPERTY;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampToTrino;
+import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampToTrinoTimestampWithTimeZone;
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
@@ -819,13 +827,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
             if (columnStats != null) {
                 builder.setColumnStatistics(
                         PaimonColumnHandle.of(field.name(), field.type(), typeManager),
-                        toColumnStatistics(columnStats, mergedRecordCount));
+                        toColumnStatistics(field.type(), columnStats, mergedRecordCount, typeManager));
             }
         }
         return builder.build();
     }
 
-    private static ColumnStatistics toColumnStatistics(ColStats<?> stats, OptionalLong rowCount)
+    private static ColumnStatistics toColumnStatistics(
+            DataType logicalType,
+            ColStats<?> stats,
+            OptionalLong rowCount,
+            TypeManager typeManager)
     {
         ColumnStatistics.Builder builder = ColumnStatistics.builder();
 
@@ -852,8 +864,50 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 }
             });
         }
+        toRange(logicalType, stats, typeManager).ifPresent(builder::setRange);
 
         return builder.build();
+    }
+
+    private static Optional<DoubleRange> toRange(DataType logicalType, ColStats<?> stats, TypeManager typeManager)
+    {
+        Optional<?> min = stats.min();
+        Optional<?> max = stats.max();
+        if (min.isEmpty() || max.isEmpty()) {
+            return Optional.empty();
+        }
+
+        try {
+            Type trinoType = PaimonTypeUtils.fromPaimonType(logicalType, typeManager);
+            Object minValue = toTrinoNativeStatsValue(trinoType, logicalType, min.get());
+            Object maxValue = toTrinoNativeStatsValue(trinoType, logicalType, max.get());
+            return DoubleRange.from(trinoType, minValue, maxValue);
+        }
+        catch (RuntimeException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Object toTrinoNativeStatsValue(Type trinoType, DataType logicalType, Object value)
+    {
+        return switch (logicalType.getTypeRoot()) {
+            case BOOLEAN -> value;
+            case TINYINT, SMALLINT, INTEGER, BIGINT, DATE -> ((Number) value).longValue();
+            case FLOAT -> (long) Float.floatToIntBits(((Number) value).floatValue());
+            case DOUBLE -> ((Number) value).doubleValue();
+            case DECIMAL -> toTrinoNativeDecimalValue((DecimalType) trinoType, (Decimal) value);
+            case TIMESTAMP_WITHOUT_TIME_ZONE -> paimonTimestampToTrino(trinoType, (Timestamp) value);
+            case TIMESTAMP_WITH_LOCAL_TIME_ZONE -> paimonTimestampToTrinoTimestampWithTimeZone(trinoType, (Timestamp) value);
+            default -> throw new IllegalArgumentException("Unsupported Paimon statistics range type: " + logicalType);
+        };
+    }
+
+    private static Object toTrinoNativeDecimalValue(DecimalType trinoType, Decimal value)
+    {
+        if (trinoType.isShort()) {
+            return Decimals.encodeShortScaledValue(value.toBigDecimal(), trinoType.getScale());
+        }
+        return Decimals.encodeScaledValue(value.toBigDecimal(), trinoType.getScale());
     }
 
     public PaimonTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName,
