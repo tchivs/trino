@@ -46,6 +46,10 @@ public final class PaimonColumnHandle
     public static final String TRINO_ROW_ID_NAME = "$row_id";
     public static final String PAIMON_ROW_ID_NAME = "_ROW_ID";
     public static final String PAIMON_SEQUENCE_NUMBER_NAME = "_SEQUENCE_NUMBER";
+    private static final String PAIMON_VALUE_KIND_NAME = "_VALUE_KIND";
+    private static final String PAIMON_LEVEL_NAME = "_LEVEL";
+    private static final String PAIMON_ROW_KIND_NAME = "rowkind";
+    private static final String PAIMON_KEY_FIELD_PREFIX = "_KEY_";
     private final String columnName;
     private final String typeString;
     private final DataType logicalType;
@@ -238,6 +242,18 @@ public final class PaimonColumnHandle
         return TRINO_ROW_ID_NAME.equals(columnName)
                 || PAIMON_ROW_ID_NAME.equalsIgnoreCase(columnName)
                 || PAIMON_SEQUENCE_NUMBER_NAME.equalsIgnoreCase(columnName);
+    }
+
+    static boolean isPaimonSystemColumnName(String columnName)
+    {
+        requireNonNull(columnName, "columnName is null");
+        return TRINO_ROW_ID_NAME.equals(columnName)
+                || columnName.regionMatches(true, 0, PAIMON_KEY_FIELD_PREFIX, 0, PAIMON_KEY_FIELD_PREFIX.length())
+                || PAIMON_ROW_ID_NAME.equalsIgnoreCase(columnName)
+                || PAIMON_SEQUENCE_NUMBER_NAME.equalsIgnoreCase(columnName)
+                || PAIMON_VALUE_KIND_NAME.equalsIgnoreCase(columnName)
+                || PAIMON_LEVEL_NAME.equalsIgnoreCase(columnName)
+                || PAIMON_ROW_KIND_NAME.equalsIgnoreCase(columnName);
     }
 
     @Override
