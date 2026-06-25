@@ -299,14 +299,36 @@ public class TestTrinoPaimonFileFormatProvider
     }
 
     @Test
-    void testValidationDoesNotRejectTypesUnsupportedOnlyByTrinoWriterSchemaConverters()
+    void testTrinoOrcWriterRejectsTimeColumnsWithActionableMessage()
     {
         RowType rowType = DataTypes.ROW(
-                DataTypes.FIELD(0, "event_time", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)));
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "event_time", DataTypes.TIME(3)),
+                DataTypes.FIELD(2, "nested", DataTypes.ROW(
+                        DataTypes.FIELD(3, "nested_time", DataTypes.TIME(3)))));
 
-        assertThatCode(() -> FileFormat.fromIdentifier("parquet", trinoFormatOptions()).validateDataFields(rowType))
+        assertThatThrownBy(() -> FileFormat.fromIdentifier("orc", trinoFormatOptions()).createWriterFactory(rowType))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Trino Paimon ORC writer does not support Paimon TIME columns; use Parquet or Paimon's native writer for ORC TIME data");
+        assertThatCode(() -> FileFormat.fromIdentifier("parquet", trinoFormatOptions()).createWriterFactory(rowType))
                 .doesNotThrowAnyException();
-        assertThatCode(() -> FileFormat.fromIdentifier("orc", trinoFormatOptions()).validateDataFields(rowType))
+    }
+
+    @Test
+    void testValidationDoesNotRejectTypesUnsupportedOnlyByTrinoWriterSchemaConverters()
+    {
+        RowType timestampWithTimeZoneRowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "event_time", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(3)));
+        RowType variantRowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "payload", DataTypes.VARIANT()));
+
+        assertThatCode(() -> FileFormat.fromIdentifier("parquet", trinoFormatOptions()).validateDataFields(timestampWithTimeZoneRowType))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> FileFormat.fromIdentifier("orc", trinoFormatOptions()).validateDataFields(timestampWithTimeZoneRowType))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> FileFormat.fromIdentifier("parquet", trinoFormatOptions()).validateDataFields(variantRowType))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> FileFormat.fromIdentifier("orc", trinoFormatOptions()).validateDataFields(variantRowType))
                 .doesNotThrowAnyException();
     }
 

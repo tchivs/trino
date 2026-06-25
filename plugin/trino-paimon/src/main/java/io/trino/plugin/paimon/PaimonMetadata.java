@@ -140,6 +140,20 @@ public record PaimonMetadata(PaimonCatalog catalog,
                                     schemaTableName(paimonTableHandle)),
                             e);
                 }
+            case HASH_DYNAMIC :
+                try {
+                    // TODO: Replace this single-node layout when HASH_DYNAMIC writes have a Flink-style
+                    // two-stage topology with shared dynamic bucket index state.
+                    return Optional.of(new ConnectorTableLayout(
+                            new PaimonPartitioningHandle(InstantiationUtil.serializeObject(storeTable.schema()), true),
+                            List.of(), false));
+                }
+                catch (IOException e) {
+                    throw new TrinoException(PAIMON_METADATA_ERROR,
+                            format("Failed to prepare Paimon insert layout for table '%s'",
+                                    schemaTableName(paimonTableHandle)),
+                            e);
+                }
             case BUCKET_UNAWARE :
                 return Optional.empty();
             default :
@@ -341,7 +355,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
     public RowChangeParadigm getRowChangeParadigm(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         requireNonNull(session, "session is null");
-        getTableHandle("row change paradigm", tableHandle);
+        PaimonTableHandle paimonTableHandle = getTableHandle("row change paradigm", tableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "row-level change");
         return DELETE_ROW_AND_INSERT_ROW;
     }
 
@@ -351,12 +367,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("merge row id", tableHandle);
         Catalog sessionCatalog = catalog.forSession(session);
-        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge row id");
-        BucketMode bucketMode = storeTable.bucketMode();
-        if (bucketMode != BucketMode.HASH_FIXED) {
-            throw PaimonTableSupport.unsupportedBucketMode("merge row id", bucketMode);
-        }
-        PaimonTableSupport.validateRowLevelDelete(storeTable, "merge row id");
+        FileStoreTable storeTable = rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "merge row id");
         DataField[] row = storeTable.primaryKeys().stream()
                 .map(primaryKey -> {
                     if (!storeTable.rowType().containsField(primaryKey)) {
@@ -376,14 +387,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("update layout", tableHandle);
         Catalog sessionCatalog = catalog.forSession(session);
-        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "update layout");
-        BucketMode bucketMode = storeTable.bucketMode();
-        if (bucketMode != BucketMode.HASH_FIXED) {
-            throw PaimonTableSupport.unsupportedBucketMode("update layout", bucketMode);
-        }
-        PaimonTableSupport.validateRowLevelDelete(storeTable, "update layout");
+        FileStoreTable storeTable = rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "update layout");
         try {
-            return Optional.of(new PaimonPartitioningHandle(InstantiationUtil.serializeObject(storeTable.schema())));
+            return Optional.of(new PaimonPartitioningHandle(
+                    InstantiationUtil.serializeObject(storeTable.schema()),
+                    storeTable.bucketMode() == BucketMode.HASH_DYNAMIC));
         }
         catch (IOException e) {
             throw new TrinoException(PAIMON_METADATA_ERROR,
@@ -423,6 +431,20 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
+    private static FileStoreTable rowLevelChangeFileStoreTable(
+            PaimonTableHandle tableHandle,
+            Catalog sessionCatalog,
+            String operation)
+    {
+        FileStoreTable storeTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, operation);
+        BucketMode bucketMode = storeTable.bucketMode();
+        if (bucketMode != BucketMode.HASH_FIXED) {
+            throw PaimonTableSupport.unsupportedBucketMode(operation, bucketMode);
+        }
+        PaimonTableSupport.validateRowLevelDelete(storeTable, operation);
+        return storeTable;
+    }
+
     @Override
     public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle,
             RetryMode retryMode)
@@ -432,12 +454,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         validateNoQueryRetries(retryMode);
         PaimonTableHandle paimonTableHandle = getTableHandle("begin merge", tableHandle);
         Catalog sessionCatalog = catalog.forSession(session);
-        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge");
-        BucketMode bucketMode = storeTable.bucketMode();
-        if (bucketMode != BucketMode.HASH_FIXED) {
-            throw PaimonTableSupport.unsupportedBucketMode("merge", bucketMode);
-        }
-        PaimonTableSupport.validateRowLevelDelete(storeTable, "merge");
+        FileStoreTable storeTable = rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "merge");
         List<ColumnHandle> writeColumns = storeTable.rowType().getFields().stream()
                 .map(column -> PaimonColumnHandle.of(column.name(), column.type(), typeManager))
                 .collect(toList());

@@ -27,12 +27,17 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.type.Type;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.index.BucketAssigner;
+import org.apache.paimon.index.HashBucketAssigner;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
+import org.apache.paimon.table.sink.RowPartitionKeyExtractor;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 
@@ -61,6 +66,7 @@ public class PaimonPageSinkProvider
         BucketMode mode = requireFileStoreTable(table, "writes").bucketMode();
         switch (mode) {
             case HASH_FIXED :
+            case HASH_DYNAMIC :
             case BUCKET_UNAWARE :
                 break;
             default :
@@ -284,11 +290,34 @@ public class PaimonPageSinkProvider
                 batchWriteBuilder.withOverwrite();
             }
             BatchTableWrite write = batchWriteBuilder.newWrite();
+            if (table.bucketMode() == BucketMode.HASH_DYNAMIC) {
+                return new PaimonPageSink(write, columnTypes, logicalTypes, dynamicBucketWriter(table));
+            }
             return new PaimonPageSink(write, columnTypes, logicalTypes);
         }
         catch (Exception e) {
             throw PaimonPageSink.wrapWriteException(e);
         }
+    }
+
+    private static PaimonPageSink.DynamicBucketWriter dynamicBucketWriter(FileStoreTable table)
+    {
+        CoreOptions coreOptions = table.coreOptions();
+        Options options = new Options(table.options());
+        BucketAssigner bucketAssigner = new HashBucketAssigner(
+                table.store().snapshotManager(),
+                CoreOptions.createCommitUser(options),
+                table.store().newIndexFileHandler(),
+                1,
+                1,
+                0,
+                coreOptions.dynamicBucketTargetRowNum(),
+                coreOptions.dynamicBucketMaxBuckets());
+        // TODO: Replace this single-node INSERT writer with a Flink-style two-stage topology:
+        // first route rows by partition + primary-key hash into bucket assigners, then route
+        // partition + bucket to parallel writers while sharing dynamic bucket index state.
+        // DELETE, UPDATE, and MERGE should stay fail-fast until that coordination exists.
+        return new PaimonPageSink.DynamicBucketWriter(new RowPartitionKeyExtractor(table.schema()), bucketAssigner);
     }
 
     @Override

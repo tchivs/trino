@@ -80,7 +80,7 @@ public class FixedBucketTableShuffleFunction
             page = new Page(rowBlock.getPositionCount(), rowBlock.getFieldBlocks().toArray(Block[]::new));
         }
 
-        PaimonRow paimonRow = new PaimonRow(page.getSingleValuePage(position), RowKind.INSERT, paimonRowTypes,
+        PaimonRow paimonRow = new PaimonRow(page, position, RowKind.INSERT, paimonRowTypes,
                 paimonLogicalTypes);
         BinaryRow bucketKey = projectionContext.get().apply(paimonRow);
         int bucket = bucketFunction.bucket(bucketKey, bucketCount);
