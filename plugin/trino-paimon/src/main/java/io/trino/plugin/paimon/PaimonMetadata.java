@@ -1421,13 +1421,44 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("truncate table", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "truncate table");
-        Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
+        truncatePaimonTable(session, paimonTableHandle, "truncate table", "truncate");
+    }
+
+    @Override
+    public Optional<ConnectorTableHandle> applyDelete(ConnectorSession session, ConnectorTableHandle handle)
+    {
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("delete", handle);
+        if (!paimonTableHandle.getFilter().isAll()) {
+            return Optional.empty();
+        }
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "delete");
+
+        Catalog sessionCatalog = catalog.forSession(session);
+        latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "delete");
+        return Optional.of(paimonTableHandle);
+    }
+
+    @Override
+    public OptionalLong executeDelete(ConnectorSession session, ConnectorTableHandle handle)
+    {
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("delete", handle);
+        if (!paimonTableHandle.getFilter().isAll()) {
+            throw new IllegalStateException("Paimon delete requires an unfiltered table handle");
+        }
+        truncatePaimonTable(session, paimonTableHandle, "delete", "delete rows from");
+        return OptionalLong.empty();
+    }
+
+    private void truncatePaimonTable(ConnectorSession session, PaimonTableHandle paimonTableHandle, String operation,
+            String failureOperation)
+    {
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), operation);
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            FileStoreTable fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog,
-                    "truncate table");
+            FileStoreTable fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, operation);
 
             // Use BatchTableCommit to truncate the table
             try (BatchTableCommit commit = fileStoreTable.newBatchWriteBuilder().newCommit()) {
@@ -1439,7 +1470,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         catch (Exception e) {
             throw paimonMetadataException(
-                    format("Failed to truncate Paimon table '%s'", paimonTableHandle.getTableName()),
+                    format("Failed to %s Paimon table '%s'", failureOperation, paimonTableHandle.getTableName()),
                     e);
         }
     }
