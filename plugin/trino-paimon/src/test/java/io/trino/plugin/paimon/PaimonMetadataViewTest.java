@@ -437,6 +437,32 @@ public class PaimonMetadataViewTest
     }
 
     @Test
+    public void testRuntimeWrappedRenameViewFailuresUseStandardErrors()
+    {
+        SchemaTableName targetView = new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view");
+
+        PaimonMetadata missingSourceMetadata = new PaimonMetadata(
+                new RuntimeWrappedRenameViewFailureCatalog(new Catalog.ViewNotExistException(
+                        new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName()))),
+                TESTING_TYPE_MANAGER);
+        assertThatThrownBy(() -> missingSourceMetadata.renameView(SESSION, VIEW_NAME, targetView))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(TABLE_NOT_FOUND.toErrorCode());
+                    assertThat(exception).hasMessage("View 'test_schema.test_view' does not exist");
+                });
+
+        PaimonMetadata existingTargetMetadata = new PaimonMetadata(
+                new RuntimeWrappedRenameViewFailureCatalog(new Catalog.ViewAlreadyExistException(
+                        new Identifier(targetView.getSchemaName(), targetView.getTableName()))),
+                TESTING_TYPE_MANAGER);
+        assertThatThrownBy(() -> existingTargetMetadata.renameView(SESSION, VIEW_NAME, targetView))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ALREADY_EXISTS.toErrorCode());
+                    assertThat(exception).hasMessage("View 'test_schema.renamed_view' already exists");
+                });
+    }
+
+    @Test
     public void testRenameViewReportsUnsupportedCatalog()
     {
         PaimonMetadata metadata = new PaimonMetadata(
@@ -894,6 +920,27 @@ public class PaimonMetadataViewTest
         public View getView(Identifier identifier)
         {
             throw new AssertionError("system schema view lookup must not query the catalog");
+        }
+    }
+
+    private static class RuntimeWrappedRenameViewFailureCatalog
+            extends TestingPaimonCatalog
+    {
+        private final Exception failure;
+
+        private RuntimeWrappedRenameViewFailureCatalog(Exception failure)
+        {
+            super(null);
+            this.failure = failure;
+        }
+
+        @Override
+        public void renameView(Identifier fromView, Identifier toView, boolean ignoreIfNotExists)
+        {
+            assertThat(fromView.getFullName()).isEqualTo(VIEW_NAME.toString());
+            assertThat(toView.getFullName()).isEqualTo(VIEW_NAME.getSchemaName() + ".renamed_view");
+            assertThat(ignoreIfNotExists).isFalse();
+            throw new RuntimeException(failure);
         }
     }
 

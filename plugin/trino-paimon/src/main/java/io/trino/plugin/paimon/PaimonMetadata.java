@@ -2692,6 +2692,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     format("Table '%s' does not exist", tableNotExistException.identifier().getFullName()),
                     exception));
         }
+        if (exception instanceof Catalog.ViewAlreadyExistException viewAlreadyExistException) {
+            return Optional.of(new TrinoException(io.trino.spi.StandardErrorCode.ALREADY_EXISTS,
+                    format("View '%s' already exists", viewAlreadyExistException.identifier().getFullName()),
+                    exception));
+        }
+        if (exception instanceof Catalog.ViewNotExistException viewNotExistException) {
+            return Optional.of(new TrinoException(TABLE_NOT_FOUND,
+                    format("View '%s' does not exist", viewNotExistException.identifier().getFullName()),
+                    exception));
+        }
         if (exception instanceof Catalog.ColumnAlreadyExistException columnAlreadyExistException) {
             return Optional.of(new TrinoException(COLUMN_ALREADY_EXISTS,
                     format("Column '%s' already exists in table '%s'",
