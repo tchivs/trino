@@ -107,7 +107,7 @@ public class DynamicFilteringTrinoSplitSourceTest
     }
 
     @Test
-    public void testNonAwaitableDynamicPredicateIsStillAppliedBySplitManager()
+    public void testNonAwaitableDynamicPredicateIsNotPushedBySplitManager()
     {
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
         PaimonColumnHandle regionColumn = PaimonColumnHandle.of("region", DataTypes.BIGINT());
@@ -128,9 +128,7 @@ public class DynamicFilteringTrinoSplitSourceTest
                 tableHandle,
                 dynamicFilter(dynamicPredicate, false));
 
-        assertThat(effectivePredicate.getDomains().orElseThrow())
-                .containsEntry(regionColumn, Domain.singleValue(BIGINT, 7L))
-                .containsEntry(idColumn, Domain.singleValue(BIGINT, 11L));
+        assertThat(effectivePredicate).isEqualTo(staticPredicate);
     }
 
     @Test

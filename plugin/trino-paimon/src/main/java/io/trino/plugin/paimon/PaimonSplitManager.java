@@ -123,12 +123,20 @@ public class PaimonSplitManager
     static TupleDomain<PaimonColumnHandle> effectivePredicate(PaimonTableHandle tableHandle, DynamicFilter dynamicFilter)
     {
         requireNonNull(dynamicFilter, "dynamicFilter is null");
+        TupleDomain<PaimonColumnHandle> staticPredicate = requireNonNull(tableHandle, "tableHandle is null").getFilter();
         if (!canApplyDynamicFilter(tableHandle)) {
-            return requireNonNull(tableHandle, "tableHandle is null").getFilter();
+            return staticPredicate;
         }
-        return DynamicFilteringTrinoSplitSource.combinePredicates(
-                requireNonNull(tableHandle, "tableHandle is null").getFilter(),
-                dynamicFilter);
+
+        // Runtime dynamic filter domains can be evaluated by Paimon manifest stats pruning
+        // against evolved/dense stats rows that do not contain every filtered column. Keep
+        // static predicate pushdown, and only use dynamic filtering for the empty build-side
+        // case where split planning can be skipped entirely.
+        if (dynamicFilter.getCurrentPredicate().isNone()) {
+            return TupleDomain.none();
+        }
+
+        return staticPredicate;
     }
 
     static boolean canApplyDynamicFilter(PaimonTableHandle tableHandle)

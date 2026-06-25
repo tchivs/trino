@@ -33,7 +33,6 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.format.FileFormat;
-import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.format.FormatReaderContext;
 import org.apache.paimon.format.FormatWriter;
 import org.apache.paimon.format.SimpleColStats;
@@ -85,8 +84,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTrinoPaimonFileFormatProvider
 {
-    private static final String UNSUPPORTED_PROVIDER_READ_MESSAGE = "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads";
-    private static final String UNSUPPORTED_PROVIDER_WRITE_MESSAGE = "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes";
+    private static final String UNSUPPORTED_FORMAT_READ_MESSAGE = "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET reads";
+    private static final String UNSUPPORTED_FORMAT_WRITE_MESSAGE = "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes";
 
     @TempDir
     java.nio.file.Path tempDir;
@@ -154,7 +153,7 @@ public class TestTrinoPaimonFileFormatProvider
                 DataTypes.FIELD(1, "payload", DataTypes.STRING()));
         Path file = new Path(tempDir.resolve("block-size-data.parquet").toUri().toString());
         LocalFileIO fileIO = LocalFileIO.create();
-        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", trinoProviderOptionsWithBlockSize(2 * 1024));
+        FileFormat trinoWriteFormat = FileFormat.fromIdentifier("parquet", trinoFormatOptionsWithBlockSize(2 * 1024));
         try (PositionOutputStream out = fileIO.newOutputStream(file, false);
                 FormatWriter writer = trinoWriteFormat.createWriterFactory(rowType).create(out, "snappy")) {
             for (GenericRow row : largeRows(200)) {
@@ -180,11 +179,11 @@ public class TestTrinoPaimonFileFormatProvider
                 DataTypes.FIELD(1, "payload", DataTypes.STRING()));
         Path file = new Path(tempDir.resolve("page-options-data.parquet").toUri().toString());
         LocalFileIO fileIO = LocalFileIO.create();
-        Options options = trinoProviderOptions();
+        Options options = trinoFormatOptions();
         options.set("parquet.block.size", String.valueOf(1024 * 1024));
         options.set("parquet.page.size", "1024");
         options.set("parquet.page.row.count.limit", "5");
-        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", options);
+        FileFormat trinoWriteFormat = FileFormat.fromIdentifier("parquet", options);
         try (PositionOutputStream out = fileIO.newOutputStream(file, false);
                 FormatWriter writer = trinoWriteFormat.createWriterFactory(rowType).create(out, "snappy")) {
             for (GenericRow row : largeRows(40)) {
@@ -212,7 +211,7 @@ public class TestTrinoPaimonFileFormatProvider
                 DataTypes.FIELD(1, "payload", DataTypes.STRING()));
         Path file = new Path(tempDir.resolve("block-size-data.orc").toUri().toString());
         LocalFileIO fileIO = LocalFileIO.create();
-        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("orc", trinoProviderOptionsWithBlockSize(2 * 1024));
+        FileFormat trinoWriteFormat = FileFormat.fromIdentifier("orc", trinoFormatOptionsWithBlockSize(2 * 1024));
         try (PositionOutputStream out = fileIO.newOutputStream(file, false);
                 FormatWriter writer = trinoWriteFormat.createWriterFactory(rowType).create(out, "zstd")) {
             for (GenericRow row : largeRows(200)) {
@@ -234,7 +233,7 @@ public class TestTrinoPaimonFileFormatProvider
     @Test
     void testWriterRejectsNonPositivePaimonFileBlockSize()
     {
-        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", trinoProviderOptionsWithBlockSize(0));
+        FileFormat trinoWriteFormat = FileFormat.fromIdentifier("parquet", trinoFormatOptionsWithBlockSize(0));
 
         assertThatThrownBy(() -> trinoWriteFormat.createWriterFactory(rowType()))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -244,17 +243,17 @@ public class TestTrinoPaimonFileFormatProvider
     @Test
     void testWriterRejectsNonPositivePaimonParquetPageOptions()
     {
-        Options pageSizeOptions = trinoProviderOptions();
+        Options pageSizeOptions = trinoFormatOptions();
         pageSizeOptions.set("parquet.page.size", "0");
-        FileFormat pageSizeFormat = FileFormat.writerFromIdentifier("parquet", pageSizeOptions);
+        FileFormat pageSizeFormat = FileFormat.fromIdentifier("parquet", pageSizeOptions);
 
         assertThatThrownBy(() -> pageSizeFormat.createWriterFactory(rowType()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("parquet.page.size must be greater than 0");
 
-        Options rowCountLimitOptions = trinoProviderOptions();
+        Options rowCountLimitOptions = trinoFormatOptions();
         rowCountLimitOptions.set("parquet.page.row.count.limit", "0");
-        FileFormat rowCountLimitFormat = FileFormat.writerFromIdentifier("parquet", rowCountLimitOptions);
+        FileFormat rowCountLimitFormat = FileFormat.fromIdentifier("parquet", rowCountLimitOptions);
 
         assertThatThrownBy(() -> rowCountLimitFormat.createWriterFactory(rowType()))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -264,26 +263,26 @@ public class TestTrinoPaimonFileFormatProvider
     @Test
     void testTrinoReaderRejectsPaimonSpecialTypes()
     {
-        FileFormat trinoReadFormat = FileFormat.readerFromIdentifier("parquet", trinoReadProviderOptions());
+        FileFormat trinoReadFormat = FileFormat.fromIdentifier("parquet", trinoFormatOptions());
 
-        for (RowType rowType : unsupportedTrinoProviderTypes()) {
+        for (RowType rowType : unsupportedTrinoFormatTypes()) {
             assertThatThrownBy(() -> trinoReadFormat.createReaderFactory(rowType, rowType, new ArrayList<>()))
-                    .as("read provider should reject %s", rowType)
+                    .as("format reader should reject %s", rowType)
                     .isInstanceOf(UnsupportedOperationException.class)
-                    .hasMessage(UNSUPPORTED_PROVIDER_READ_MESSAGE);
+                    .hasMessage(UNSUPPORTED_FORMAT_READ_MESSAGE);
         }
     }
 
     @Test
     void testTrinoWriterRejectsPaimonSpecialTypes()
     {
-        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier("parquet", trinoProviderOptions());
+        FileFormat trinoWriteFormat = FileFormat.fromIdentifier("parquet", trinoFormatOptions());
 
-        for (RowType rowType : unsupportedTrinoProviderTypes()) {
+        for (RowType rowType : unsupportedTrinoFormatTypes()) {
             assertThatThrownBy(() -> trinoWriteFormat.createWriterFactory(rowType))
-                    .as("write provider should reject %s", rowType)
+                    .as("format writer should reject %s", rowType)
                     .isInstanceOf(UnsupportedOperationException.class)
-                    .hasMessage(UNSUPPORTED_PROVIDER_WRITE_MESSAGE);
+                    .hasMessage(UNSUPPORTED_FORMAT_WRITE_MESSAGE);
         }
     }
 
@@ -317,8 +316,9 @@ public class TestTrinoPaimonFileFormatProvider
                 .doesNotThrowAnyException();
         assertThatCode(() -> FileFormat.fromIdentifier("parquet", trinoFormatOptions()).validateDataFields(variantRowType))
                 .doesNotThrowAnyException();
-        assertThatCode(() -> FileFormat.fromIdentifier("orc", trinoFormatOptions()).validateDataFields(variantRowType))
-                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> FileFormat.fromIdentifier("orc", trinoFormatOptions()).validateDataFields(variantRowType))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage(UNSUPPORTED_FORMAT_WRITE_MESSAGE);
     }
 
     private void assertRoundTrip(String formatIdentifier, String compression)
@@ -329,7 +329,7 @@ public class TestTrinoPaimonFileFormatProvider
         Path file = new Path(tempDir.resolve("data." + formatIdentifier).toUri().toString());
         LocalFileIO fileIO = LocalFileIO.create();
 
-        FileFormat trinoFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
+        FileFormat trinoFormat = FileFormat.fromIdentifier(formatIdentifier, trinoFormatOptions());
         try (PositionOutputStream out = fileIO.newOutputStream(file, false);
                 FormatWriter writer = trinoFormat.createWriterFactory(rowType).create(out, compression)) {
             for (GenericRow row : rows) {
@@ -341,7 +341,7 @@ public class TestTrinoPaimonFileFormatProvider
         assertThat(readRows(paimonFormat, rowType, fileIO, file))
                 .containsExactlyElementsOf(canonicalizeRows(rowType, rows));
 
-        FileFormat trinoReadFormat = FileFormat.readerFromIdentifier(formatIdentifier, trinoReadProviderOptions());
+        FileFormat trinoReadFormat = FileFormat.fromIdentifier(formatIdentifier, trinoFormatOptions());
         assertThat(readRows(trinoReadFormat, rowType, fileIO, file))
                 .containsExactlyElementsOf(canonicalizeRows(rowType, rows));
     }
@@ -350,7 +350,7 @@ public class TestTrinoPaimonFileFormatProvider
             throws IOException
     {
         TrackingPositionOutputStream out = new TrackingPositionOutputStream();
-        FileFormat trinoFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
+        FileFormat trinoFormat = FileFormat.fromIdentifier(formatIdentifier, trinoFormatOptions());
 
         trinoFormat.createWriterFactory(rowType()).create(out, compression).close();
 
@@ -368,7 +368,7 @@ public class TestTrinoPaimonFileFormatProvider
                 DataTypes.FIELD(1, "name", DataTypes.STRING()));
         Path file = new Path(tempDir.resolve("stats-data." + formatIdentifier).toUri().toString());
         LocalFileIO fileIO = LocalFileIO.create();
-        FileFormat trinoFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
+        FileFormat trinoFormat = FileFormat.fromIdentifier(formatIdentifier, trinoFormatOptions());
 
         Object writerMetadata;
         try (PositionOutputStream out = fileIO.newOutputStream(file, false)) {
@@ -429,13 +429,12 @@ public class TestTrinoPaimonFileFormatProvider
                 DataTypes.FIELD(1, "name", DataTypes.STRING()));
         LocalFileIO fileIO = LocalFileIO.create();
         Path tablePath = new Path(tempDir.resolve("stats-table-" + formatIdentifier).toUri().toString());
-        Options options = trinoProviderOptions();
+        Options options = trinoFormatOptions();
         options.set(CoreOptions.FILE_FORMAT, formatIdentifier);
         options.set(CoreOptions.FILE_COMPRESSION, compression);
         options.set(CoreOptions.BUCKET, 1);
         options.set(CoreOptions.BUCKET_KEY, "id");
         options.set(CoreOptions.METADATA_STATS_MODE, "full");
-        options.setString(FileFormatProvider.VALIDATION_FORMAT_PROVIDER, TrinoPaimonFileFormatProvider.IDENTIFIER);
         new SchemaManager(fileIO, tablePath).createTable(new Schema(
                 rowType.getFields(),
                 Collections.emptyList(),
@@ -483,7 +482,7 @@ public class TestTrinoPaimonFileFormatProvider
         List<InternalRow> canonicalRows = canonicalizeRows(rowType, rows);
         Path file = new Path(tempDir.resolve("selection-data." + formatIdentifier).toUri().toString());
         LocalFileIO fileIO = LocalFileIO.create();
-        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
+        FileFormat trinoWriteFormat = FileFormat.fromIdentifier(formatIdentifier, trinoFormatOptions());
         try (PositionOutputStream out = fileIO.newOutputStream(file, false);
                 FormatWriter writer = trinoWriteFormat.createWriterFactory(rowType).create(out, compression)) {
             for (GenericRow row : rows) {
@@ -494,7 +493,7 @@ public class TestTrinoPaimonFileFormatProvider
         RoaringBitmap32 selection = new RoaringBitmap32();
         selection.add(1);
         selection.add(2);
-        FileFormat trinoReadFormat = FileFormat.readerFromIdentifier(formatIdentifier, trinoReadProviderOptions());
+        FileFormat trinoReadFormat = FileFormat.fromIdentifier(formatIdentifier, trinoFormatOptions());
 
         assertThat(readRowsWithPositions(trinoReadFormat, rowType, fileIO, file, selection))
                 .containsExactly(
@@ -520,7 +519,7 @@ public class TestTrinoPaimonFileFormatProvider
         Path file = new Path(tempDir.resolve("schema-evolution-data." + formatIdentifier).toUri().toString());
         LocalFileIO fileIO = LocalFileIO.create();
 
-        FileFormat trinoWriteFormat = FileFormat.writerFromIdentifier(formatIdentifier, trinoProviderOptions());
+        FileFormat trinoWriteFormat = FileFormat.fromIdentifier(formatIdentifier, trinoFormatOptions());
         try (PositionOutputStream out = fileIO.newOutputStream(file, false);
                 FormatWriter writer = trinoWriteFormat.createWriterFactory(dataSchema.logicalRowType()).create(out, compression)) {
             writer.addElement(GenericRow.of(BinaryString.fromString("alpha"), 12));
@@ -528,7 +527,7 @@ public class TestTrinoPaimonFileFormatProvider
         }
 
         FormatReaderMapping mapping = new FormatReaderMapping.Builder(
-                identifier -> FileFormat.readerFromIdentifier(identifier, trinoReadProviderOptions()),
+                identifier -> FileFormat.fromIdentifier(identifier, trinoFormatOptions()),
                 tableSchema.fields(),
                 TableSchema::fields,
                 new ArrayList<>(),
@@ -587,25 +586,17 @@ public class TestTrinoPaimonFileFormatProvider
         }
     }
 
-    private static Options trinoProviderOptions()
+    private static Options trinoFormatOptions()
     {
         Options options = new Options();
-        options.setString(FileFormatProvider.WRITE_FORMAT_PROVIDER, TrinoPaimonFileFormatProvider.IDENTIFIER);
         options.set(CoreOptions.WRITE_BATCH_SIZE, 1);
         return options;
     }
 
-    private static Options trinoProviderOptionsWithBlockSize(long blockSizeBytes)
+    private static Options trinoFormatOptionsWithBlockSize(long blockSizeBytes)
     {
-        Options options = trinoProviderOptions();
+        Options options = trinoFormatOptions();
         options.set(CoreOptions.FILE_BLOCK_SIZE, MemorySize.ofBytes(blockSizeBytes));
-        return options;
-    }
-
-    private static Options trinoReadProviderOptions()
-    {
-        Options options = new Options();
-        options.setString(FileFormatProvider.READ_FORMAT_PROVIDER, TrinoPaimonFileFormatProvider.IDENTIFIER);
         return options;
     }
 
@@ -626,7 +617,7 @@ public class TestTrinoPaimonFileFormatProvider
                                 DataTypes.FIELD(8, "note", DataTypes.STRING()))));
     }
 
-    private static List<RowType> unsupportedTrinoProviderTypes()
+    private static List<RowType> unsupportedTrinoFormatTypes()
     {
         return List.of(
                 rowTypeWith(DataTypes.BLOB()),

@@ -26,8 +26,8 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.CoreOptions;
-import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.schema.Schema;
@@ -127,7 +127,7 @@ public class PaimonPageSinkProviderTest
 
         assertThatThrownBy(() -> PaimonPageSinkProvider.validateMergeBucketMode(FullTextSearchTable.create(
                 innerTable(),
-                new FullTextSearch("paimon", 1, "content"))))
+                new FullTextSearch(FullTextQuery.match("paimon", "content"), 1))))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessage("Paimon full-text search tables are not supported by the Trino connector");
@@ -231,8 +231,7 @@ public class PaimonPageSinkProviderTest
 
         assertThat(pageSink).isNotNull();
         assertThat(copyWithoutTimeTravelOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
         assertThat(copiedWithLatestSchema).isTrue();
     }
 
@@ -817,7 +816,7 @@ public class PaimonPageSinkProviderTest
     public void testPageSinkProviderWrapsWriterInitializationUnsupportedFailures()
     {
         UnsupportedOperationException writerFailure = new UnsupportedOperationException(
-                "Trino Paimon file format provider does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
+                "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
         PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
                 writerInitializationFailingFileStoreTable(new AtomicReference<>(), writerFailure)));
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())

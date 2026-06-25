@@ -14,29 +14,21 @@
 package io.trino.plugin.paimon.format;
 
 import org.apache.paimon.format.FileFormat;
-import org.apache.paimon.format.FileFormatFactory.FormatContext;
-import org.apache.paimon.format.FileFormatProvider;
+import org.apache.paimon.format.FileFormatFactory;
 
-import java.util.Optional;
-
-/** File format provider backed by Trino's no-Hadoop ORC and Parquet writers. */
-public class TrinoPaimonFileFormatProvider
-        implements FileFormatProvider
+/** File format factory backed by Trino's no-Hadoop ORC reader and writer. */
+public class TrinoPaimonOrcFileFormatFactory
+        implements FileFormatFactory
 {
-    public static final String IDENTIFIER = "trino";
-
     @Override
     public String identifier()
     {
-        return IDENTIFIER;
+        return TrinoPaimonFileFormat.ORC;
     }
 
     @Override
-    public Optional<FileFormat> create(String identifier, FormatContext context)
+    public FileFormat create(FormatContext formatContext)
     {
-        if (TrinoPaimonFileFormat.PARQUET.equals(identifier) || TrinoPaimonFileFormat.ORC.equals(identifier)) {
-            return Optional.of(new TrinoPaimonFileFormat(identifier, context));
-        }
-        return Optional.empty();
+        return new TrinoPaimonFileFormat(identifier(), formatContext);
     }
 }

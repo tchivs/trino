@@ -30,8 +30,8 @@ import io.trino.type.TypeDeserializer;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
-import org.apache.paimon.format.FileFormatProvider;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.table.FileStoreTable;
@@ -157,8 +157,7 @@ public class TrinoTableHandleTest
         assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, session)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "custom.option", "value",
-                CoreOptions.SCAN_TAG_NAME.key(), "tag-2",
-                FileFormatProvider.READ_FORMAT_PROVIDER, "trino"));
+                CoreOptions.SCAN_TAG_NAME.key(), "tag-2"));
     }
 
     @Test
@@ -175,7 +174,12 @@ public class TrinoTableHandleTest
         ClassLoader sentinel = new ClassLoader(null) {};
         Thread.currentThread().setContextClassLoader(sentinel);
         try {
-            assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, SESSION)).isSameAs(table);
+            ConnectorSession session = TestingConnectorSession.builder()
+                    .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                    .setPropertyValues(Map.of(SCAN_TAG, "tag-2"))
+                    .build();
+
+            assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, session)).isSameAs(table);
             assertThat(copyContextClassLoader.get()).isSameAs(PaimonTableHandle.class.getClassLoader());
             assertThat(Thread.currentThread().getContextClassLoader()).isSameAs(sentinel);
         }
@@ -351,15 +355,14 @@ public class TrinoTableHandleTest
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
     }
 
     @Test
     public void testTableWithWriteDynamicOptionsUsesPluginContextClassLoader()
             throws Exception
     {
-        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of("custom.option", "value"),
                 TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
         AtomicReference<ClassLoader> copyContextClassLoader = new AtomicReference<>();
         FileStoreTable table = contextCapturingFileStoreTable("copyWithoutTimeTravel", copyContextClassLoader);
@@ -415,8 +418,7 @@ public class TrinoTableHandleTest
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
     }
 
     @Test
@@ -437,8 +439,7 @@ public class TrinoTableHandleTest
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
     }
 
     @Test
@@ -460,8 +461,7 @@ public class TrinoTableHandleTest
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
     }
 
     @Test
@@ -480,8 +480,7 @@ public class TrinoTableHandleTest
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
     }
 
     @Test
@@ -503,8 +502,7 @@ public class TrinoTableHandleTest
 
         assertThat(handle.tableWithWriteDynamicOptions(TESTING_CATALOG)).isSameAs(table);
         assertThat(copiedOptions.get()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "custom.option", "value",
-                FileFormatProvider.WRITE_FORMAT_PROVIDER, "trino"));
+                "custom.option", "value"));
     }
 
     @Test
@@ -570,7 +568,7 @@ public class TrinoTableHandleTest
         PaimonTableHandle fullTextSearchHandle = new PaimonTableHandle("test", "full_text_search", Map.of(),
                 TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
         setCachedTable(fullTextSearchHandle, TESTING_CATALOG, FullTextSearchTable.create(innerTable(),
-                new FullTextSearch("paimon", 1, "content")));
+                new FullTextSearch(FullTextQuery.match("paimon", "content"), 1)));
 
         assertThatThrownBy(() -> fullTextSearchHandle.table(TESTING_CATALOG))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
