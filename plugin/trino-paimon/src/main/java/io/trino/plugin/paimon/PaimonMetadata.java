@@ -142,8 +142,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 }
             case HASH_DYNAMIC :
                 try {
-                    // TODO: Replace this single-node layout when HASH_DYNAMIC writes have a Flink-style
-                    // two-stage topology with shared dynamic bucket index state.
+                    // TODO: Replace this single-writer HASH_DYNAMIC INSERT layout with a Flink-style
+                    // two-stage assigner/writer topology that coordinates dynamic bucket index state.
                     return Optional.of(new ConnectorTableLayout(
                             new PaimonPartitioningHandle(InstantiationUtil.serializeObject(storeTable.schema()), true),
                             List.of(), false));

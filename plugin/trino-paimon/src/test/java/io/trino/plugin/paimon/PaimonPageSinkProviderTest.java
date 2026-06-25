@@ -257,6 +257,28 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testDynamicBucketInsertOverwriteUsesOverwriteAssigner()
+    {
+        AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
+                writeReadyFileStoreTable(new AtomicBoolean(), new AtomicReference<>(), overwriteEnabled,
+                        List.of(), Map.of(CoreOptions.BUCKET.key(), "-1"), List.of("id"), BucketMode.HASH_DYNAMIC)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())));
+        ConnectorSession overwriteSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE.name()))
+                .build();
+
+        ConnectorPageSink pageSink = provider.createPageSink(null, overwriteSession, (ConnectorInsertTableHandle) tableHandle, null);
+
+        assertThat(pageSink).isNotNull();
+        assertThat(overwriteEnabled).isTrue();
+    }
+
+    @Test
     public void testInsertOverwriteDoesNotApplyToMergePageSink()
     {
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
@@ -1035,6 +1057,25 @@ public class PaimonPageSinkProviderTest
             Map<String, String> options,
             List<String> primaryKeys)
     {
+        return writeReadyFileStoreTable(
+                copiedWithLatestSchema,
+                copyWithoutTimeTravelOptions,
+                overwriteEnabled,
+                partitionKeys,
+                options,
+                primaryKeys,
+                BucketMode.HASH_FIXED);
+    }
+
+    private static FileStoreTable writeReadyFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            AtomicBoolean overwriteEnabled,
+            List<String> partitionKeys,
+            Map<String, String> options,
+            List<String> primaryKeys,
+            BucketMode bucketMode)
+    {
         org.apache.paimon.table.sink.BatchTableWrite writer = writer();
         org.apache.paimon.table.sink.BatchWriteBuilder batchWriteBuilder = (org.apache.paimon.table.sink.BatchWriteBuilder) Proxy
                 .newProxyInstance(
@@ -1057,7 +1098,7 @@ public class PaimonPageSinkProviderTest
                 PaimonPageSinkProviderTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
-                    case "bucketMode" -> BucketMode.HASH_FIXED;
+                    case "bucketMode" -> bucketMode;
                     case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
                     case "partitionKeys" -> partitionKeys;
                     case "primaryKeys" -> primaryKeys;
@@ -1087,7 +1128,7 @@ public class PaimonPageSinkProviderTest
                 PaimonPageSinkProviderTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
-                    case "bucketMode" -> BucketMode.HASH_FIXED;
+                    case "bucketMode" -> bucketMode;
                     case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
                     case "partitionKeys" -> partitionKeys;
                     case "primaryKeys" -> primaryKeys;
