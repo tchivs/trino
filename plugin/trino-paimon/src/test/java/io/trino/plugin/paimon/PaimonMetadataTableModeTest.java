@@ -70,6 +70,7 @@ import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataIncrement;
 import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.partition.Partition;
 import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
@@ -98,6 +99,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -1461,16 +1463,20 @@ public class PaimonMetadataTableModeTest
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
         AtomicBoolean committed = new AtomicBoolean();
         BinaryRow partition = partitionRow("p1");
+        Map<String, String> partitionSpec = Map.of("pt", "p1");
         FileStoreTable table = commitFileStoreTable(
                 copiedWithLatestSchema,
                 committed,
                 new AtomicReference<>(),
                 null,
                 new AtomicBoolean(),
-                List.of(new PartitionEntry(partition, 1, 1, 1, 1, 1)),
+                List.of(),
                 List.of("pt"),
                 Map.of());
-        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(
+                table,
+                List.of(new Partition(partitionSpec, 1, 1, 1, 1, 1, true)));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         ConnectorSession errorSession = TestingConnectorSession.builder()
                 .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
                 .setPropertyValues(Map.of(
@@ -1484,6 +1490,7 @@ public class PaimonMetadataTableModeTest
                 READ_ONLY_VIOLATION.toErrorCode(),
                 "Cannot insert into an existing partition of Paimon table: schema.table");
         assertThat(committed).isFalse();
+        assertThat(catalog.listedPartitionsByNames).containsExactly(List.of(partitionSpec));
     }
 
     @Test
@@ -1513,6 +1520,115 @@ public class PaimonMetadataTableModeTest
         assertThat(metadata.finishInsert(errorSession, new PaimonTableHandle("schema", "table", Map.of()),
                 List.of(fragment), List.of())).isEmpty();
         assertThat(committed).isTrue();
+    }
+
+    @Test
+    public void testInsertErrorChecksOnlyWrittenPartitionNames()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                new AtomicReference<>(),
+                null,
+                new AtomicBoolean(),
+                List.of(),
+                List.of("pt"),
+                Map.of());
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table, List.of());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorSession errorSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR.name()))
+                .build();
+
+        assertThat(metadata.finishInsert(errorSession, new PaimonTableHandle("schema", "table", Map.of()),
+                List.of(
+                        commitFragment(partitionRow("p1")),
+                        commitFragment(partitionRow("p1")),
+                        commitFragment(partitionRow("p2"))),
+                List.of())).isEmpty();
+
+        assertThat(committed).isTrue();
+        assertThat(catalog.listedPartitionsByNames).containsExactly(List.of(
+                Map.of("pt", "p1"),
+                Map.of("pt", "p2")));
+    }
+
+    @Test
+    public void testInsertErrorBatchesWrittenPartitionNameChecks()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                new AtomicReference<>(),
+                null,
+                new AtomicBoolean(),
+                List.of(),
+                List.of("pt"),
+                Map.of());
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table, List.of());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorSession errorSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR.name()))
+                .build();
+        List<Slice> fragments = new ArrayList<>();
+        for (int i = 0; i < 1001; i++) {
+            fragments.add(commitFragment(partitionRow("p" + i)));
+        }
+
+        assertThat(metadata.finishInsert(errorSession, new PaimonTableHandle("schema", "table", Map.of()),
+                fragments, List.of())).isEmpty();
+
+        assertThat(committed).isTrue();
+        assertThat(catalog.listedPartitionsByNames).hasSize(2);
+        assertThat(catalog.listedPartitionsByNames.get(0)).hasSize(1000);
+        assertThat(catalog.listedPartitionsByNames.get(1)).containsExactly(Map.of("pt", "p1000"));
+    }
+
+    @Test
+    public void testInsertErrorChecksPartitionsOnWriteBranch()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                new AtomicReference<>(),
+                null,
+                new AtomicBoolean(),
+                List.of(),
+                List.of("pt"),
+                Map.of(CoreOptions.BRANCH.key(), "dev"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table, List.of());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorSession errorSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR.name()))
+                .build();
+
+        assertThat(metadata.finishInsert(errorSession, new PaimonTableHandle("schema", "table", Map.of()),
+                List.of(commitFragment(partitionRow("p1"))), List.of())).isEmpty();
+
+        assertThat(committed).isTrue();
+        assertThat(catalog.listedPartitionIdentifiers).singleElement()
+                .satisfies(identifier -> {
+                    assertThat(identifier.getTableName()).isEqualTo("table");
+                    assertThat(identifier.getBranchNameOrDefault()).isEqualTo("dev");
+                });
     }
 
     @Test
@@ -4786,6 +4902,9 @@ public class PaimonMetadataTableModeTest
             Map<String, String> options)
     {
         AtomicReference<FileStoreTable> latestTableRef = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "pt", DataTypes.STRING()));
         Object snapshotReader = Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
                 new Class<?>[] {org.apache.paimon.table.source.snapshot.SnapshotReader.class},
@@ -4821,7 +4940,7 @@ public class PaimonMetadataTableModeTest
                         yield proxy;
                     }
                     case "tableName" -> "testing";
-                    case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+                    case "rowType" -> rowType;
                     case "newWriteSelector" -> Optional.empty();
                     case "toString" -> "testing-batch-write-builder";
                     default -> throw new UnsupportedOperationException(method.getName());
@@ -4832,10 +4951,11 @@ public class PaimonMetadataTableModeTest
                 (proxy, method, args) -> switch (method.getName()) {
                     case "newBatchWriteBuilder" -> batchWriteBuilder;
                     case "newSnapshotReader" -> snapshotReader;
+                    case "rowType" -> rowType;
                     case "partitionKeys" -> partitionKeys;
                     case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> TableSchema.create(1, new Schema(
-                            DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())).getFields(),
+                            rowType.getFields(),
                             partitionKeys,
                             List.of(),
                             options,
@@ -4866,10 +4986,11 @@ public class PaimonMetadataTableModeTest
                         copyWithoutTimeTravelOptions.set(Map.copyOf((Map<String, String>) args[0]));
                         yield latestTableRef.get();
                     }
+                    case "rowType" -> rowType;
                     case "partitionKeys" -> partitionKeys;
                     case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> TableSchema.create(1, new Schema(
-                            DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())).getFields(),
+                            rowType.getFields(),
                             partitionKeys,
                             List.of(),
                             options,
@@ -5175,12 +5296,21 @@ public class PaimonMetadataTableModeTest
             extends PaimonCatalog
     {
         private final Table table;
+        private final List<Partition> partitionsByNames;
+        private final List<Identifier> listedPartitionIdentifiers = new ArrayList<>();
+        private final List<List<Map<String, String>>> listedPartitionsByNames = new ArrayList<>();
         private boolean initialized;
 
         private TestingPaimonCatalog(Table table)
         {
+            this(table, List.of());
+        }
+
+        private TestingPaimonCatalog(Table table, List<Partition> partitionsByNames)
+        {
             super(new Options(), unsupportedFileSystemFactory());
             this.table = table;
+            this.partitionsByNames = partitionsByNames;
         }
 
         @Override
@@ -5205,6 +5335,19 @@ public class PaimonMetadataTableModeTest
             assertThat(identifier.getDatabaseName()).isEqualTo("schema");
             assertThat(identifier.getObjectName()).isEqualTo("table");
             return table;
+        }
+
+        @Override
+        public List<Partition> listPartitionsByNames(Identifier identifier, List<Map<String, String>> partitions)
+        {
+            assertThat(initialized).isTrue();
+            assertThat(identifier.getDatabaseName()).isEqualTo("schema");
+            assertThat(identifier.getTableName()).isEqualTo("table");
+            listedPartitionIdentifiers.add(identifier);
+            listedPartitionsByNames.add(List.copyOf(partitions));
+            return partitionsByNames.stream()
+                    .filter(partition -> partitions.contains(partition.spec()))
+                    .toList();
         }
     }
 

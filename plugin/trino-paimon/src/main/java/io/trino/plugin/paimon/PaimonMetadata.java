@@ -61,11 +61,10 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
-import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Decimal;
 import org.apache.paimon.data.Timestamp;
-import org.apache.paimon.manifest.PartitionEntry;
+import org.apache.paimon.partition.Partition;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.TableSchema;
@@ -81,7 +80,9 @@ import org.apache.paimon.table.sink.CommitMessageSerializer;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.InstantiationUtil;
+import org.apache.paimon.utils.InternalRowPartitionComputer;
 import org.apache.paimon.utils.StringUtils;
 import org.apache.paimon.view.ViewChange;
 
@@ -94,6 +95,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -134,6 +136,7 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
 public record PaimonMetadata(PaimonCatalog catalog,
                              io.trino.spi.type.TypeManager typeManager) implements ConnectorMetadata
 {
+    private static final int MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE = 1000;
     private static final int MAX_PARTITION_DELETE_SPECS = 1024;
 
     public PaimonMetadata
@@ -349,7 +352,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         try {
             if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR) {
-                validateInsertTargetIsNew(fileStoreTable, schemaTableName(tableHandle), commitMessages);
+                validateInsertTargetIsNew(sessionCatalog, fileStoreTable, tableHandle, commitMessages);
             }
 
             BatchWriteBuilder batchWriteBuilder = fileStoreTable.newBatchWriteBuilder();
@@ -391,29 +394,54 @@ public record PaimonMetadata(PaimonCatalog catalog,
     }
 
     private static void validateInsertTargetIsNew(
+            Catalog catalog,
             FileStoreTable fileStoreTable,
-            SchemaTableName tableName,
+            PaimonTableHandle tableHandle,
             List<CommitMessage> commitMessages)
+            throws Catalog.TableNotExistException
     {
-        Set<BinaryRow> existingPartitions = fileStoreTable.newSnapshotReader().partitionEntries().stream()
-                .map(PartitionEntry::partition)
-                .collect(Collectors.toSet());
-        if (existingPartitions.isEmpty()) {
+        SchemaTableName tableName = schemaTableName(tableHandle);
+        if (fileStoreTable.partitionKeys().isEmpty()) {
+            if (!fileStoreTable.newSnapshotReader().partitionEntries().isEmpty()) {
+                throw new TrinoException(READ_ONLY_VIOLATION,
+                        format("Cannot insert into an existing non-partitioned Paimon table: %s", tableName));
+            }
             return;
         }
 
-        if (fileStoreTable.partitionKeys().isEmpty()) {
-            throw new TrinoException(READ_ONLY_VIOLATION,
-                    format("Cannot insert into an existing non-partitioned Paimon table: %s", tableName));
+        List<Map<String, String>> writtenPartitions = writtenPartitionSpecs(fileStoreTable, commitMessages);
+        for (int start = 0; start < writtenPartitions.size(); start += MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE) {
+            int end = Math.min(start + MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE, writtenPartitions.size());
+            List<Partition> existingPartitions = catalog.listPartitionsByNames(
+                    new Identifier(
+                            tableHandle.getSchemaName(),
+                            tableHandle.getTableName(),
+                            fileStoreTable.coreOptions().branch()),
+                    writtenPartitions.subList(start, end));
+            if (!existingPartitions.isEmpty()) {
+                throw new TrinoException(READ_ONLY_VIOLATION,
+                        format("Cannot insert into an existing partition of Paimon table: %s", tableName));
+            }
         }
+    }
 
-        boolean writesExistingPartition = commitMessages.stream()
-                .map(CommitMessage::partition)
-                .anyMatch(existingPartitions::contains);
-        if (writesExistingPartition) {
-            throw new TrinoException(READ_ONLY_VIOLATION,
-                    format("Cannot insert into an existing partition of Paimon table: %s", tableName));
+    private static List<Map<String, String>> writtenPartitionSpecs(
+            FileStoreTable fileStoreTable,
+            List<CommitMessage> commitMessages)
+    {
+        RowType partitionType = new RowType(fileStoreTable.partitionKeys().stream()
+                .map(partitionKey -> fileStoreTable.rowType().getField(partitionKey))
+                .collect(toList()));
+        InternalRowPartitionComputer partitionComputer = new InternalRowPartitionComputer(
+                fileStoreTable.coreOptions().partitionDefaultName(),
+                partitionType,
+                fileStoreTable.partitionKeys().toArray(new String[0]),
+                fileStoreTable.coreOptions().legacyPartitionName());
+        Set<Map<String, String>> writtenPartitions = new LinkedHashSet<>();
+        for (CommitMessage commitMessage : commitMessages) {
+            writtenPartitions.add(partitionComputer.generatePartValues(commitMessage.partition()));
         }
+        return List.copyOf(writtenPartitions);
     }
 
     private static List<Slice> copyFragments(Collection<Slice> fragments)
