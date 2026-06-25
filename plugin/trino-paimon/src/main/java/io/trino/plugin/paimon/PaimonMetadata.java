@@ -83,6 +83,7 @@ import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.InstantiationUtil;
 import org.apache.paimon.utils.StringUtils;
+import org.apache.paimon.view.ViewChange;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -997,6 +998,25 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
+    @Override
+    public void setTableAuthorization(ConnectorSession session, SchemaTableName tableName, TrinoPrincipal principal)
+    {
+        requireNonNull(session, "session is null");
+        requireNonNull(tableName, "tableName is null");
+        requireNonNull(principal, "principal is null");
+        rejectSystemSchemaWrite(tableName.getSchemaName(), "set table authorization");
+
+        Identifier identifier = new Identifier(tableName.getSchemaName(), tableName.getTableName());
+        List<SchemaChange> changes = List.of(SchemaChange.setOption(OWNER_PROPERTY, principal.getName()));
+        try {
+            Catalog sessionCatalog = catalog.forSession(session);
+            sessionCatalog.alterTable(identifier, changes, false);
+        }
+        catch (Exception e) {
+            throw paimonAlterTableException(tableName, e);
+        }
+    }
+
     private static void rejectSystemSchemaWrite(String schemaName, String operation)
     {
         requireNonNull(schemaName, "schemaName is null");
@@ -1835,6 +1855,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         Map<String, String> options = new HashMap<>();
         definition.getComment().ifPresent(c -> options.put("comment", c));
+        definition.getOwner().ifPresent(owner -> options.put(OWNER_PROPERTY, owner));
 
         return new org.apache.paimon.view.ViewImpl(identifier, fields, definition.getOriginalSql(), dialects,
                 definition.getComment().orElse(null), options);
@@ -1896,6 +1917,33 @@ public record PaimonMetadata(PaimonCatalog catalog,
     }
 
     @Override
+    public void setViewAuthorization(ConnectorSession session, SchemaTableName viewName, TrinoPrincipal principal)
+    {
+        requireNonNull(session, "session is null");
+        requireNonNull(viewName, "viewName is null");
+        requireNonNull(principal, "principal is null");
+        rejectSystemSchemaWrite(viewName.getSchemaName(), "set view authorization");
+
+        Catalog sessionCatalog = catalog.forSession(session);
+        Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
+
+        try {
+            sessionCatalog.alterView(identifier, List.of(ViewChange.setOption(OWNER_PROPERTY, principal.getName())),
+                    false);
+        }
+        catch (Catalog.ViewNotExistException e) {
+            throw new TrinoException(io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND,
+                    format("View '%s' does not exist", viewName));
+        }
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("alter", e);
+        }
+        catch (Exception e) {
+            throw paimonViewException(format("Failed to set authorization on view '%s'", viewName), e);
+        }
+    }
+
+    @Override
     public Optional<ConnectorViewDefinition> getView(ConnectorSession session, SchemaTableName viewName)
     {
         requireNonNull(session, "session is null");
@@ -1933,7 +1981,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return Optional.of(new ConnectorViewDefinition(originalSql, Optional.empty(), // catalog
                 Optional.empty(), // schema
                 columns, paimonView.comment(), // comment
-                Optional.empty(), // owner
+                Optional.ofNullable(paimonView.options().get(OWNER_PROPERTY)), // owner
                 false, // runAsInvoker
                 List.of())); // path
     }

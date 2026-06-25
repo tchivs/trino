@@ -28,6 +28,7 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.view.View;
+import org.apache.paimon.view.ViewChange;
 import org.apache.paimon.view.ViewImpl;
 import org.junit.jupiter.api.Test;
 
@@ -37,10 +38,12 @@ import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
+import static io.trino.plugin.paimon.PaimonSchemaProperties.OWNER_PROPERTY;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.trino.spi.security.PrincipalType.USER;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -86,6 +89,21 @@ public class PaimonMetadataViewTest
         assertThat(view.getColumns().get(0).getName()).isEqualTo("id");
         assertThat(view.getColumns().get(0).getType()).isEqualTo(TypeId.of(BIGINT.getTypeSignature().toString()));
         assertThat(view.getColumns().get(0).getComment()).contains("id column");
+        assertThat(view.getOwner()).isEmpty();
+    }
+
+    @Test
+    public void testGetViewReturnsOwnerFromPaimonOptions()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(
+                        Map.of("trino", "SELECT id FROM trino_table"),
+                        Map.of(OWNER_PROPERTY, "view_owner"))),
+                TESTING_TYPE_MANAGER);
+
+        ConnectorViewDefinition view = metadata.getView(SESSION, VIEW_NAME).orElseThrow();
+
+        assertThat(view.getOwner()).contains("view_owner");
     }
 
     @Test
@@ -149,7 +167,7 @@ public class PaimonMetadataViewTest
                         new ConnectorViewDefinition.ViewColumn("payload", TypeId.of(JSON), Optional.of("json payload")),
                         new ConnectorViewDefinition.ViewColumn("name", VARCHAR.getTypeId(), Optional.empty())),
                 Optional.of("view comment"),
-                Optional.empty(),
+                Optional.of("view_owner"),
                 false,
                 List.of(new CatalogSchemaName("paimon", VIEW_NAME.getSchemaName())));
 
@@ -163,6 +181,7 @@ public class PaimonMetadataViewTest
         assertThat(createdView.query()).isEqualTo("SELECT payload FROM source_table");
         assertThat(createdView.comment()).contains("view comment");
         assertThat(createdView.options()).containsEntry("comment", "view comment");
+        assertThat(createdView.options()).containsEntry(OWNER_PROPERTY, "view_owner");
         assertThat(createdView.rowType().getFields()).extracting(field -> field.type().getTypeRoot())
                 .containsExactly(DataTypeRoot.VARIANT, DataTypeRoot.VARCHAR);
         assertThat(createdView.rowType().getFields()).extracting(field -> field.description())
@@ -200,6 +219,12 @@ public class PaimonMetadataViewTest
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessage("Paimon set view comment is not supported for the system schema 'sys'");
+                });
+        assertThatThrownBy(() -> metadata.setViewAuthorization(SESSION, systemView,
+                        new io.trino.spi.security.TrinoPrincipal(USER, "view_owner")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon set view authorization is not supported for the system schema 'sys'");
                 });
 
         assertThat(catalog.createdView).isNull();
@@ -296,6 +321,23 @@ public class PaimonMetadataViewTest
         assertThatThrownBy(() -> metadata.setViewComment(SESSION, VIEW_NAME, null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("comment is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.setViewAuthorization(null, VIEW_NAME,
+                        new io.trino.spi.security.TrinoPrincipal(USER, "view_owner")))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.setViewAuthorization(SESSION, null,
+                        new io.trino.spi.security.TrinoPrincipal(USER, "view_owner")))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("viewName is null");
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.setViewAuthorization(SESSION, VIEW_NAME, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("principal is null");
         assertThat(catalog.initialized).isFalse();
     }
 
@@ -442,6 +484,25 @@ public class PaimonMetadataViewTest
     }
 
     @Test
+    public void testSetViewAuthorizationStoresOwnerProperty()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT id FROM table")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        metadata.setViewAuthorization(SESSION, VIEW_NAME,
+                new io.trino.spi.security.TrinoPrincipal(USER, "new_owner"));
+
+        assertThat(catalog.alterViewCalls).isEqualTo(1);
+        assertThat(catalog.alterViewIgnoreIfNotExists).isFalse();
+        assertThat(catalog.alterViewChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(ViewChange.SetViewOption.class, change -> {
+                    assertThat(change.key()).isEqualTo(OWNER_PROPERTY);
+                    assertThat(change.value()).isEqualTo("new_owner");
+                });
+    }
+
+    @Test
     public void testSetViewCommentNonExistentThrowsTableNotFound()
     {
         PaimonMetadata metadata = new PaimonMetadata(
@@ -451,6 +512,12 @@ public class PaimonMetadataViewTest
                 TESTING_TYPE_MANAGER);
 
         assertThatThrownBy(() -> metadata.setViewComment(SESSION, VIEW_NAME, Optional.of("comment")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(TABLE_NOT_FOUND.toErrorCode());
+                    assertThat(exception).hasMessage("View 'test_schema.test_view' does not exist");
+                });
+        assertThatThrownBy(() -> metadata.setViewAuthorization(SESSION, VIEW_NAME,
+                        new io.trino.spi.security.TrinoPrincipal(USER, "view_owner")))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(TABLE_NOT_FOUND.toErrorCode());
                     assertThat(exception).hasMessage("View 'test_schema.test_view' does not exist");
@@ -489,6 +556,9 @@ public class PaimonMetadataViewTest
                 new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view")))
                 .isSameAs(failure);
         assertThatThrownBy(() -> metadata.setViewComment(SESSION, VIEW_NAME, Optional.of("comment")))
+                .isSameAs(failure);
+        assertThatThrownBy(() -> metadata.setViewAuthorization(SESSION, VIEW_NAME,
+                        new io.trino.spi.security.TrinoPrincipal(USER, "view_owner")))
                 .isSameAs(failure);
     }
 
@@ -535,9 +605,21 @@ public class PaimonMetadataViewTest
                     assertThat(exception).hasMessage("Failed to set comment on view 'test_schema.test_view'");
                     assertThat(exception.getCause()).isSameAs(failure);
                 });
+        assertThatThrownBy(() -> metadata.setViewAuthorization(SESSION, VIEW_NAME,
+                        new io.trino.spi.security.TrinoPrincipal(USER, "view_owner")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to set authorization on view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
     }
 
     private static View view(Map<String, String> dialects)
+    {
+        return view(dialects, Map.of());
+    }
+
+    private static View view(Map<String, String> dialects, Map<String, String> options)
     {
         Identifier identifier = new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName());
         return new ViewImpl(
@@ -546,7 +628,7 @@ public class PaimonMetadataViewTest
                 "SELECT id FROM canonical_table",
                 dialects,
                 null,
-                Map.of());
+                options);
     }
 
     private static ConnectorViewDefinition viewDefinition(String sql)

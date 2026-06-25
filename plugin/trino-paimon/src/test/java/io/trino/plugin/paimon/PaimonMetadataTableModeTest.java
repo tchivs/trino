@@ -209,6 +209,11 @@ public class PaimonMetadataTableModeTest
                         new TrinoPrincipal(PrincipalType.USER, "schema_owner")),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon set schema authorization is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.setTableAuthorization(SESSION,
+                        new SchemaTableName(SYSTEM_DATABASE_NAME, "all_tables"),
+                        new TrinoPrincipal(PrincipalType.USER, "table_owner")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set table authorization is not supported for the system schema 'sys'");
         assertTrinoError(() -> metadata.setTableProperties(SESSION, systemTableHandle, Map.of("bucket", Optional.of("4"))),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon set table properties is not supported for the system schema 'sys'");
@@ -2779,6 +2784,17 @@ public class PaimonMetadataTableModeTest
         assertThatThrownBy(() -> metadata.setFieldType(SESSION, tableHandle, List.of("payload", "zip"), null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("type is null");
+        assertThatThrownBy(() -> metadata.setTableAuthorization(null, new SchemaTableName("schema", "table"),
+                        new TrinoPrincipal(PrincipalType.USER, "table_owner")))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThatThrownBy(() -> metadata.setTableAuthorization(SESSION, null,
+                        new TrinoPrincipal(PrincipalType.USER, "table_owner")))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("tableName is null");
+        assertThatThrownBy(() -> metadata.setTableAuthorization(SESSION, new SchemaTableName("schema", "table"), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("principal is null");
 
         assertThat(catalog.alterCalls).isEqualTo(0);
     }
@@ -2936,6 +2952,9 @@ public class PaimonMetadataTableModeTest
                 COLUMN_NOT_FOUND.toErrorCode(), "Column 'missing' does not exist in table 'schema.table'");
         assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))),
                 TABLE_NOT_FOUND.toErrorCode(), "Table 'schema.table' does not exist");
+        assertTrinoError(() -> metadata.setTableAuthorization(SESSION, new SchemaTableName("schema", "table"),
+                        new TrinoPrincipal(PrincipalType.USER, "table_owner")),
+                TABLE_NOT_FOUND.toErrorCode(), "Table 'schema.table' does not exist");
         assertTrinoError(() -> metadata.setTableComment(SESSION, tableHandle, Optional.of("comment")),
                 TABLE_NOT_FOUND.toErrorCode(), "Table 'schema.table' does not exist");
         assertTrinoError(() -> metadata.truncateTable(SESSION, tableHandle),
@@ -2970,6 +2989,9 @@ public class PaimonMetadataTableModeTest
 
         assertThatThrownBy(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))))
                 .isSameAs(failure);
+        assertThatThrownBy(() -> metadata.setTableAuthorization(SESSION, new SchemaTableName("schema", "table"),
+                        new TrinoPrincipal(PrincipalType.USER, "table_owner")))
+                .isSameAs(failure);
     }
 
     @Test
@@ -2991,6 +3013,13 @@ public class PaimonMetadataTableModeTest
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
         assertThatThrownBy(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to alter Paimon table 'schema.table'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThatThrownBy(() -> metadata.setTableAuthorization(SESSION, new SchemaTableName("schema", "table"),
+                        new TrinoPrincipal(PrincipalType.USER, "table_owner")))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
                     assertThat(exception).hasMessage("Failed to alter Paimon table 'schema.table'");
@@ -3732,6 +3761,25 @@ public class PaimonMetadataTableModeTest
         assertThat(removeChange)
                 .isInstanceOfSatisfying(SchemaChange.RemoveOption.class, change ->
                         assertThat(change.key()).isEqualTo("removed_prop"));
+    }
+
+    @Test
+    public void testSetTableAuthorizationStoresOwnerProperty()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        metadata.setTableAuthorization(SESSION, new SchemaTableName("schema", "table"),
+                new TrinoPrincipal(PrincipalType.USER, "new_owner"));
+
+        assertThat(catalog.alterCalls).isEqualTo(1);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.SetOption.class, change -> {
+                    assertThat(change.key()).isEqualTo(OWNER_PROPERTY);
+                    assertThat(change.value()).isEqualTo("new_owner");
+                });
+        assertThat(catalog.initialized).isTrue();
     }
 
     @Test
