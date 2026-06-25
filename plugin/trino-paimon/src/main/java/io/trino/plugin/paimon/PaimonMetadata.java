@@ -2623,6 +2623,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
         if (exception instanceof TrinoException trinoException) {
             return trinoException;
         }
+        Optional<RuntimeException> catalogException = paimonCatalogException(exception);
+        if (catalogException.isPresent()) {
+            return catalogException.get();
+        }
         if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
             return new TrinoException(NOT_SUPPORTED,
                     unsupportedOperationException.getMessage() == null || unsupportedOperationException.getMessage().isBlank()
@@ -2638,11 +2642,59 @@ public record PaimonMetadata(PaimonCatalog catalog,
         if (exception instanceof RuntimeException runtimeException) {
             Throwable cause = runtimeException.getCause();
             if (cause instanceof Exception nestedException) {
+                Optional<RuntimeException> nestedCatalogException = paimonCatalogException(nestedException);
+                if (nestedCatalogException.isPresent()) {
+                    return nestedCatalogException.get();
+                }
                 return new TrinoException(PAIMON_METADATA_ERROR, message, nestedException);
             }
             return new TrinoException(PAIMON_METADATA_ERROR, message, runtimeException);
         }
         return new TrinoException(PAIMON_METADATA_ERROR, message, exception);
+    }
+
+    private static Optional<RuntimeException> paimonCatalogException(Exception exception)
+    {
+        if (exception instanceof Catalog.DatabaseAlreadyExistException databaseAlreadyExistException) {
+            return Optional.of(new TrinoException(SCHEMA_ALREADY_EXISTS,
+                    format("Schema '%s' already exists", databaseAlreadyExistException.database()),
+                    exception));
+        }
+        if (exception instanceof Catalog.DatabaseNotExistException databaseNotExistException) {
+            return Optional.of(new TrinoException(SCHEMA_NOT_FOUND,
+                    format("Schema '%s' does not exist", databaseNotExistException.database()),
+                    exception));
+        }
+        if (exception instanceof Catalog.DatabaseNotEmptyException databaseNotEmptyException) {
+            return Optional.of(new TrinoException(SCHEMA_NOT_EMPTY,
+                    format("Schema '%s' is not empty", databaseNotEmptyException.database()),
+                    exception));
+        }
+        if (exception instanceof Catalog.TableAlreadyExistException tableAlreadyExistException) {
+            return Optional.of(new TrinoException(TABLE_ALREADY_EXISTS,
+                    format("Table '%s' already exists", tableAlreadyExistException.identifier().getFullName()),
+                    exception));
+        }
+        if (exception instanceof Catalog.TableNotExistException tableNotExistException) {
+            return Optional.of(new TrinoException(TABLE_NOT_FOUND,
+                    format("Table '%s' does not exist", tableNotExistException.identifier().getFullName()),
+                    exception));
+        }
+        if (exception instanceof Catalog.ColumnAlreadyExistException columnAlreadyExistException) {
+            return Optional.of(new TrinoException(COLUMN_ALREADY_EXISTS,
+                    format("Column '%s' already exists in table '%s'",
+                            columnAlreadyExistException.column(),
+                            columnAlreadyExistException.identifier().getFullName()),
+                    exception));
+        }
+        if (exception instanceof Catalog.ColumnNotExistException columnNotExistException) {
+            return Optional.of(new TrinoException(COLUMN_NOT_FOUND,
+                    format("Column '%s' does not exist in table '%s'",
+                            columnNotExistException.column(),
+                            columnNotExistException.identifier().getFullName()),
+                    exception));
+        }
+        return Optional.empty();
     }
 
     private static TrinoException unsupportedViewOperation(String operation, UnsupportedOperationException cause)

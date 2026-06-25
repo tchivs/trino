@@ -4084,6 +4084,38 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testRuntimeWrappedRenameCatalogFailuresUseStandardErrors()
+    {
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        Identifier source = new Identifier("schema", "table");
+        Identifier target = new Identifier("target_schema", "target");
+
+        PaimonMetadata missingSchemaMetadata = new PaimonMetadata(
+                new RuntimeWrappedRenameFailureCatalog(new Catalog.DatabaseNotExistException(target.getDatabaseName())),
+                TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> missingSchemaMetadata.renameTable(SESSION, tableHandle,
+                        new SchemaTableName(target.getDatabaseName(), target.getObjectName())),
+                SCHEMA_NOT_FOUND.toErrorCode(),
+                "Schema 'target_schema' does not exist");
+
+        PaimonMetadata missingSourceMetadata = new PaimonMetadata(
+                new RuntimeWrappedRenameFailureCatalog(new Catalog.TableNotExistException(source)),
+                TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> missingSourceMetadata.renameTable(SESSION, tableHandle,
+                        new SchemaTableName(target.getDatabaseName(), target.getObjectName())),
+                TABLE_NOT_FOUND.toErrorCode(),
+                "Table 'schema.table' does not exist");
+
+        PaimonMetadata existingTargetMetadata = new PaimonMetadata(
+                new RuntimeWrappedRenameFailureCatalog(new Catalog.TableAlreadyExistException(target)),
+                TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> existingTargetMetadata.renameTable(SESSION, tableHandle,
+                        new SchemaTableName(target.getDatabaseName(), target.getObjectName())),
+                TABLE_ALREADY_EXISTS.toErrorCode(),
+                "Table 'target_schema.target' already exists");
+    }
+
+    @Test
     public void testCheckedDropTableFailureUsesPaimonMetadataError()
     {
         IOException failure = new IOException("table drop metastore I/O failed");
@@ -6650,6 +6682,36 @@ public class PaimonMetadataTableModeTest
         {
             assertThat(fromTable.getFullName()).isEqualTo("schema.table");
             assertThat(toTable.getFullName()).isEqualTo("schema.target");
+            assertThat(ignoreIfNotExists).isFalse();
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private static class RuntimeWrappedRenameFailureCatalog
+            extends PaimonCatalog
+    {
+        private final Exception failure;
+
+        private RuntimeWrappedRenameFailureCatalog(Exception failure)
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+            this.failure = failure;
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public void renameTable(Identifier fromTable, Identifier toTable, boolean ignoreIfNotExists)
+        {
+            assertThat(fromTable.getFullName()).isEqualTo("schema.table");
+            assertThat(toTable.getFullName()).isEqualTo("target_schema.target");
             assertThat(ignoreIfNotExists).isFalse();
             throw new RuntimeException(failure);
         }
