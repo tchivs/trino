@@ -45,7 +45,10 @@ import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.TrinoPrincipal;
+import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.ComputedStatistics;
+import io.trino.spi.statistics.Estimate;
+import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
@@ -60,6 +63,8 @@ import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.stats.ColStats;
+import org.apache.paimon.stats.Statistics;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -761,6 +766,95 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         getTableHandle("table properties", table);
         return new ConnectorTableProperties();
+    }
+
+    @Override
+    public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        requireNonNull(session, "session is null");
+        PaimonTableHandle paimonTableHandle = getTableHandle("table statistics", tableHandle);
+        if (paimonTableHandle.getFilter().isNone()
+                || (paimonTableHandle.getLimit().isPresent() && paimonTableHandle.getLimit().getAsLong() == 0)) {
+            return TableStatistics.builder().setRowCount(Estimate.zero()).build();
+        }
+        if (!paimonTableHandle.getFilter().isAll() || paimonTableHandle.getLimit().isPresent()) {
+            return TableStatistics.empty();
+        }
+        if (paimonTableHandle.hasIncrementalReadMode()) {
+            return TableStatistics.empty();
+        }
+
+        Catalog sessionCatalog = catalog.forSession(session);
+        Table table = PaimonTableHandle.schemaAwareReadTable(
+                paimonTableHandle.tableWithDynamicOptions(sessionCatalog, session),
+                !paimonTableHandle.usesHistoricalReadSchema(session));
+
+        Optional<Statistics> statistics;
+        try {
+            statistics = table.statistics();
+        }
+        catch (RuntimeException e) {
+            return TableStatistics.empty();
+        }
+        return statistics.map(value -> toTableStatistics(table, value)).orElse(TableStatistics.empty());
+    }
+
+    private TableStatistics toTableStatistics(Table table, Statistics statistics)
+    {
+        TableStatistics.Builder builder = TableStatistics.builder();
+
+        OptionalLong mergedRecordCount = statistics.mergedRecordCount();
+        mergedRecordCount.ifPresent(rowCount -> {
+            if (rowCount >= 0) {
+                builder.setRowCount(Estimate.of(rowCount));
+            }
+        });
+
+        Map<String, ColStats<?>> colStats = statistics.colStats();
+        if (colStats == null || colStats.isEmpty()) {
+            return builder.build();
+        }
+
+        for (DataField field : PaimonTableHandle.effectiveReadRowType(table).getFields()) {
+            ColStats<?> columnStats = colStats.get(field.name());
+            if (columnStats != null) {
+                builder.setColumnStatistics(
+                        PaimonColumnHandle.of(field.name(), field.type(), typeManager),
+                        toColumnStatistics(columnStats, mergedRecordCount));
+            }
+        }
+        return builder.build();
+    }
+
+    private static ColumnStatistics toColumnStatistics(ColStats<?> stats, OptionalLong rowCount)
+    {
+        ColumnStatistics.Builder builder = ColumnStatistics.builder();
+
+        stats.distinctCount().ifPresent(distinctCount -> {
+            if (distinctCount >= 0) {
+                builder.setDistinctValuesCount(Estimate.of(distinctCount));
+            }
+        });
+        if (rowCount.isPresent()) {
+            long records = rowCount.getAsLong();
+            stats.nullCount().ifPresent(nullCount -> {
+                if (records == 0) {
+                    builder.setNullsFraction(Estimate.zero());
+                }
+                else if (records > 0 && nullCount >= 0 && nullCount <= records) {
+                    builder.setNullsFraction(Estimate.of((double) nullCount / records));
+                }
+            });
+            stats.avgLen().ifPresent(avgLen -> {
+                if (records >= 0 && avgLen >= 0) {
+                    long nullCount = stats.nullCount().orElse(0);
+                    long nonNullRecords = Math.max(0, records - nullCount);
+                    builder.setDataSize(Estimate.of((double) nonNullRecords * avgLen));
+                }
+            });
+        }
+
+        return builder.build();
     }
 
     public PaimonTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName,
