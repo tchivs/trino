@@ -29,8 +29,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -172,6 +175,45 @@ public class PaimonCatalogTest
         assertThat(fileSystemFactory.createCalls()).hasValue(2);
     }
 
+    @Test
+    public void testCatalogDelegatesPaimonDefaultMethodsToCurrentCatalog()
+            throws Exception
+    {
+        PaimonCatalog catalog = catalog();
+        RecordingCatalog recordingCatalog = new RecordingCatalog();
+        setCurrentCatalog(catalog, recordingCatalog.catalog());
+        Identifier identifier = new Identifier("default", "test_table");
+
+        catalog.listTablesPagedGlobally("default%", "test%", 10, "page");
+        catalog.invalidateTable(identifier);
+        catalog.repairCatalog();
+        catalog.repairDatabase("default");
+        catalog.repairTable(identifier);
+        catalog.registerTable(identifier, "s3://warehouse/default.db/test_table");
+        catalog.listConsumersPaged(identifier, 10, "page");
+        catalog.resetConsumer(identifier, "consumer", 1L);
+        catalog.rollbackSchema(identifier, 1);
+        catalog.createBranch(identifier, "branch", "tag", true);
+        catalog.listFunctionsPaged("default", 10, "page", "fn%");
+        catalog.listFunctionsPagedGlobally("default%", "fn%", 10, "page");
+        catalog.listFunctionDetailsPaged("default", 10, "page", "fn%");
+
+        assertThat(recordingCatalog.calls()).containsExactly(
+                "listTablesPagedGlobally",
+                "invalidateTable",
+                "repairCatalog",
+                "repairDatabase",
+                "repairTable",
+                "registerTable",
+                "listConsumersPaged",
+                "resetConsumer",
+                "rollbackSchema",
+                "createBranch",
+                "listFunctionsPaged",
+                "listFunctionsPagedGlobally",
+                "listFunctionDetailsPaged");
+    }
+
     private PaimonCatalog catalog()
     {
         return catalog(new LocalFileSystemFactory(root));
@@ -207,6 +249,51 @@ public class PaimonCatalogTest
                         .withExtraCredentials(extraCredentials)
                         .build())
                 .build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void setCurrentCatalog(PaimonCatalog catalog, Catalog currentCatalog)
+            throws Exception
+    {
+        Field currentCatalogField = PaimonCatalog.class.getDeclaredField("currentCatalog");
+        currentCatalogField.setAccessible(true);
+        ((ThreadLocal<Catalog>) currentCatalogField.get(catalog)).set(currentCatalog);
+    }
+
+    private static final class RecordingCatalog
+    {
+        private final List<String> calls = new ArrayList<>();
+
+        private Catalog catalog()
+        {
+            return (Catalog) Proxy.newProxyInstance(
+                    PaimonCatalogTest.class.getClassLoader(),
+                    new Class<?>[] {Catalog.class},
+                    (proxy, method, args) -> {
+                        if (method.getDeclaringClass() == Object.class) {
+                            return method.invoke(this, args);
+                        }
+                        calls.add(method.getName());
+                        if (method.getReturnType() == boolean.class) {
+                            return false;
+                        }
+                        if (method.getReturnType() == Map.class) {
+                            return Map.of();
+                        }
+                        if (method.getReturnType() == List.class) {
+                            return List.of();
+                        }
+                        if (method.getReturnType() == org.apache.paimon.PagedList.class) {
+                            return new org.apache.paimon.PagedList<>(List.of(), null);
+                        }
+                        return null;
+                    });
+        }
+
+        private List<String> calls()
+        {
+            return calls;
+        }
     }
 
     private static final class RecordingFileSystemFactory
