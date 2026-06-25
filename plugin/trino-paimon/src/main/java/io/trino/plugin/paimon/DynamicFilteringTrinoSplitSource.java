@@ -41,7 +41,6 @@ public class DynamicFilteringTrinoSplitSource
         ConnectorSplitSource
 {
     private static final Logger LOG = Logger.get(DynamicFilteringTrinoSplitSource.class);
-    private static final int DOMAIN_COMPACTION_THRESHOLD = 1000;
     private static final ConnectorSplitBatch EMPTY_BATCH = new ConnectorSplitBatch(ImmutableList.of(), false);
     private static final ConnectorSplitBatch FINISHED_BATCH = new ConnectorSplitBatch(ImmutableList.of(), true);
 
@@ -186,48 +185,5 @@ public class DynamicFilteringTrinoSplitSource
             }
             return batch;
         });
-    }
-
-    static TupleDomain<PaimonColumnHandle> combinePredicates(TupleDomain<PaimonColumnHandle> staticPredicate,
-            DynamicFilter dynamicFilter)
-    {
-        TupleDomain<PaimonColumnHandle> dynamicPredicate = requireNonNull(dynamicFilter, "dynamicFilter is null")
-                .getCurrentPredicate()
-                .transformKeys(DynamicFilteringTrinoSplitSource::getDynamicFilterColumn);
-
-        LOG.debug("Static predicate: %s", staticPredicate);
-        LOG.debug("Dynamic predicate: %s", dynamicPredicate);
-
-        TupleDomain<PaimonColumnHandle> combined = combinePredicates(staticPredicate, dynamicPredicate,
-                DOMAIN_COMPACTION_THRESHOLD);
-
-        LOG.debug("Combined predicate: %s", combined);
-        return combined;
-    }
-
-    private static PaimonColumnHandle getDynamicFilterColumn(io.trino.spi.connector.ColumnHandle column)
-    {
-        if (!(requireNonNull(column, "dynamicFilter predicate contains null column") instanceof PaimonColumnHandle paimonColumnHandle)) {
-            throw new IllegalStateException("Paimon dynamic filter requires PaimonColumnHandle, got: "
-                    + column.getClass().getName());
-        }
-        return paimonColumnHandle;
-    }
-
-    static TupleDomain<PaimonColumnHandle> combinePredicates(
-            TupleDomain<PaimonColumnHandle> staticPredicate,
-            TupleDomain<PaimonColumnHandle> dynamicPredicate,
-            int domainCompactionThreshold)
-    {
-        requireNonNull(staticPredicate, "staticPredicate is null");
-        requireNonNull(dynamicPredicate, "dynamicPredicate is null");
-        checkArgument(domainCompactionThreshold > 0, "domainCompactionThreshold must be positive");
-        TupleDomain<PaimonColumnHandle> combined = staticPredicate.intersect(dynamicPredicate);
-        TupleDomain<PaimonColumnHandle> compacted = staticPredicate.intersect(
-                combined.simplify(domainCompactionThreshold));
-        if (!compacted.equals(combined)) {
-            LOG.debug("Combined predicate was compacted with threshold %s", domainCompactionThreshold);
-        }
-        return compacted;
     }
 }

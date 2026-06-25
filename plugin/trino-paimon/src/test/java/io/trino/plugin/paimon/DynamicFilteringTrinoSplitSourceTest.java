@@ -20,9 +20,7 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.predicate.Domain;
-import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.spi.predicate.ValueSet;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
@@ -47,7 +45,6 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.LongStream;
 
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -62,50 +59,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class DynamicFilteringTrinoSplitSourceTest
 {
-    @Test
-    public void testComplexDynamicPredicateIsCompactedWithoutDroppingStaticPredicate()
-    {
-        PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
-        PaimonColumnHandle regionColumn = PaimonColumnHandle.of("region", DataTypes.BIGINT());
-        TupleDomain<PaimonColumnHandle> staticPredicate = TupleDomain.withColumnDomains(Map.of(
-                regionColumn, Domain.singleValue(BIGINT, 7L)));
-        TupleDomain<PaimonColumnHandle> dynamicPredicate = TupleDomain.withColumnDomains(Map.of(
-                idColumn, Domain.multipleValues(BIGINT, LongStream.range(0, 10).boxed().toList())));
-
-        TupleDomain<PaimonColumnHandle> combined = DynamicFilteringTrinoSplitSource.combinePredicates(
-                staticPredicate, dynamicPredicate, 3);
-
-        assertThat(combined.getDomains().orElseThrow()).containsEntry(regionColumn, Domain.singleValue(BIGINT, 7L));
-        assertThat(combined.getDomains().orElseThrow()).containsEntry(idColumn,
-                Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 0L, true, 9L, true)), false));
-    }
-
-    @Test
-    public void testDynamicPredicateIsPreservedWhenBelowCompactionThreshold()
-    {
-        PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
-        TupleDomain<PaimonColumnHandle> dynamicPredicate = TupleDomain.withColumnDomains(Map.of(
-                idColumn, Domain.multipleValues(BIGINT, List.of(1L, 2L))));
-
-        TupleDomain<PaimonColumnHandle> combined = DynamicFilteringTrinoSplitSource.combinePredicates(
-                TupleDomain.all(), dynamicPredicate, 3);
-
-        assertThat(combined).isEqualTo(dynamicPredicate);
-    }
-
-    @Test
-    public void testNoneDynamicPredicateIsPreserved()
-    {
-        PaimonColumnHandle regionColumn = PaimonColumnHandle.of("region", DataTypes.BIGINT());
-        TupleDomain<PaimonColumnHandle> staticPredicate = TupleDomain.withColumnDomains(Map.of(
-                regionColumn, Domain.singleValue(BIGINT, 7L)));
-
-        TupleDomain<PaimonColumnHandle> combined = DynamicFilteringTrinoSplitSource.combinePredicates(
-                staticPredicate, TupleDomain.none(), 3);
-
-        assertThat(combined).isEqualTo(TupleDomain.none());
-    }
-
     @Test
     public void testNonAwaitableDynamicPredicateIsNotPushedBySplitManager()
     {
@@ -176,20 +129,6 @@ public class DynamicFilteringTrinoSplitSourceTest
                 dynamicFilter(dynamicPredicate, false));
 
         assertThat(effectivePredicate).isEqualTo(staticPredicate);
-    }
-
-    @Test
-    public void testDynamicRowIdPredicateIsConvertedToRowRanges()
-    {
-        PaimonColumnHandle rowIdColumn = PaimonColumnHandle.of("_row_id", org.apache.paimon.table.SpecialFields.ROW_ID.type());
-        TupleDomain<PaimonColumnHandle> combinedPredicate = DynamicFilteringTrinoSplitSource.combinePredicates(
-                TupleDomain.all(),
-                TupleDomain.withColumnDomains(Map.of(rowIdColumn, Domain.singleValue(BIGINT, 11L))),
-                3);
-
-        assertThat(PaimonRowRangeExtractor.extractRowIdRanges(combinedPredicate))
-                .hasValue(List.of(new org.apache.paimon.utils.Range(11, 11)));
-        assertThat(PaimonRowRangeExtractor.removeRowIdPredicate(combinedPredicate)).isEqualTo(TupleDomain.all());
     }
 
     @Test
@@ -639,45 +578,6 @@ public class DynamicFilteringTrinoSplitSourceTest
         assertThat(catalog.tableLoaded()).isFalse();
         assertThat(batch.getSplits()).isEmpty();
         assertThat(batch.isNoMoreSplits()).isTrue();
-    }
-
-    @Test
-    public void testCombinePredicatesRejectsNullInputs()
-    {
-        assertThatThrownBy(() -> DynamicFilteringTrinoSplitSource.combinePredicates(null, TupleDomain.all(), 3))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("staticPredicate is null");
-        assertThatThrownBy(() -> DynamicFilteringTrinoSplitSource.combinePredicates(TupleDomain.all(), (TupleDomain<PaimonColumnHandle>) null, 3))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("dynamicPredicate is null");
-        assertThatThrownBy(() -> DynamicFilteringTrinoSplitSource.combinePredicates(TupleDomain.all(), (DynamicFilter) null))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("dynamicFilter is null");
-    }
-
-    @Test
-    public void testCombinePredicatesRejectsNonPositiveCompactionThreshold()
-    {
-        assertThatThrownBy(() -> DynamicFilteringTrinoSplitSource.combinePredicates(TupleDomain.all(), TupleDomain.all(), 0))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("domainCompactionThreshold must be positive");
-        assertThatThrownBy(() -> DynamicFilteringTrinoSplitSource.combinePredicates(TupleDomain.all(), TupleDomain.all(), -1))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("domainCompactionThreshold must be positive");
-    }
-
-    @Test
-    public void testDynamicFilterPredicateRequiresPaimonColumnHandles()
-    {
-        ColumnHandle wrongColumn = new ColumnHandle() {};
-        TupleDomain<ColumnHandle> dynamicPredicate = TupleDomain.withColumnDomains(Map.of(
-                wrongColumn, Domain.singleValue(BIGINT, 11L)));
-
-        assertThatThrownBy(() -> DynamicFilteringTrinoSplitSource.combinePredicates(
-                TupleDomain.all(), dynamicFilter(dynamicPredicate, false)))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("Paimon dynamic filter requires PaimonColumnHandle, got: %s",
-                        wrongColumn.getClass().getName());
     }
 
     private static DynamicFilter dynamicFilter(TupleDomain<ColumnHandle> predicate, boolean awaitable)
