@@ -31,6 +31,7 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.index.BucketAssigner;
 import org.apache.paimon.index.HashBucketAssigner;
+import org.apache.paimon.index.SimpleHashBucketAssigner;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
@@ -291,7 +292,7 @@ public class PaimonPageSinkProvider
             }
             BatchTableWrite write = batchWriteBuilder.newWrite();
             if (table.bucketMode() == BucketMode.HASH_DYNAMIC) {
-                return new PaimonPageSink(write, columnTypes, logicalTypes, dynamicBucketWriter(table));
+                return new PaimonPageSink(write, columnTypes, logicalTypes, dynamicBucketWriter(table, overwrite));
             }
             return new PaimonPageSink(write, columnTypes, logicalTypes);
         }
@@ -300,22 +301,32 @@ public class PaimonPageSinkProvider
         }
     }
 
-    private static PaimonPageSink.DynamicBucketWriter dynamicBucketWriter(FileStoreTable table)
+    private static PaimonPageSink.DynamicBucketWriter dynamicBucketWriter(FileStoreTable table, boolean overwrite)
     {
         CoreOptions coreOptions = table.coreOptions();
-        Options options = new Options(table.options());
-        BucketAssigner bucketAssigner = new HashBucketAssigner(
-                table.store().snapshotManager(),
-                CoreOptions.createCommitUser(options),
-                table.store().newIndexFileHandler(),
-                1,
-                1,
-                0,
-                coreOptions.dynamicBucketTargetRowNum(),
-                coreOptions.dynamicBucketMaxBuckets());
-        // TODO: Replace this single-node INSERT writer with a Flink-style two-stage topology:
-        // first route rows by partition + primary-key hash into bucket assigners, then route
-        // partition + bucket to parallel writers while sharing dynamic bucket index state.
+        BucketAssigner bucketAssigner;
+        if (overwrite) {
+            bucketAssigner = new SimpleHashBucketAssigner(
+                    1,
+                    0,
+                    coreOptions.dynamicBucketTargetRowNum(),
+                    coreOptions.dynamicBucketMaxBuckets());
+        }
+        else {
+            Options options = new Options(table.options());
+            bucketAssigner = new HashBucketAssigner(
+                    table.store().snapshotManager(),
+                    CoreOptions.createCommitUser(options),
+                    table.store().newIndexFileHandler(),
+                    1,
+                    1,
+                    0,
+                    coreOptions.dynamicBucketTargetRowNum(),
+                    coreOptions.dynamicBucketMaxBuckets());
+        }
+        // TODO: Replace this single-writer HASH_DYNAMIC INSERT/overwrite path with a Flink-style
+        // two-stage topology: first route rows by partition + primary-key hash into bucket
+        // assigners, then route partition + bucket to writers while sharing dynamic bucket index state.
         // DELETE, UPDATE, and MERGE should stay fail-fast until that coordination exists.
         return new PaimonPageSink.DynamicBucketWriter(new RowPartitionKeyExtractor(table.schema()), bucketAssigner);
     }

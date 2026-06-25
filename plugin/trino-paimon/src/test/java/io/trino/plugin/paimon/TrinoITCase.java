@@ -1105,6 +1105,25 @@ public class TrinoITCase
     }
 
     @Test
+    public void testHashDynamicInsertOverwrite()
+    {
+        sql("CREATE TABLE paimon.default.hash_dynamic_overwrite ("
+                + "id integer, "
+                + "name varchar) "
+                + "WITH (primary_key = ARRAY['id'], bucket = '-1')");
+        sql("INSERT INTO paimon.default.hash_dynamic_overwrite VALUES (1, 'old'), (2, 'stale')");
+
+        Session overwriteSession = Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR, "overwrite")
+                .build();
+        getQueryRunner().execute(overwriteSession,
+                "INSERT INTO paimon.default.hash_dynamic_overwrite VALUES (3, 'new'), (4, 'fresh')");
+
+        assertThat(sql("SELECT * FROM paimon.default.hash_dynamic_overwrite ORDER BY id"))
+                .isEqualTo("[[3, new], [4, fresh]]");
+    }
+
+    @Test
     public void testHashDynamicRowLevelChangesFailFast()
     {
         sql("CREATE TABLE paimon.default.hash_dynamic_mutations ("
