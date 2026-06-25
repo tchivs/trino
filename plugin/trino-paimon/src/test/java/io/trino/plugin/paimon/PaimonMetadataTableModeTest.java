@@ -4005,6 +4005,26 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetTablePropertiesValidatesAgainstStoredOptionsNotHandleDynamicOptions()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(CoreOptions.BUCKET.key(), "4")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table",
+                Map.of(CoreOptions.BUCKET.key(), "-1"));
+
+        metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("8")));
+
+        assertThat(catalog.alterCalls).isEqualTo(1);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.SetOption.class, change -> {
+                    assertThat(change.key()).isEqualTo(CoreOptions.BUCKET.key());
+                    assertThat(change.value()).isEqualTo("8");
+                });
+    }
+
+    @Test
     public void testSetTablePropertiesRejectsNullPropertyEntriesBeforeCatalogAlter()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
