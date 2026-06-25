@@ -1394,8 +1394,9 @@ public class PaimonMetadataTableModeTest
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
         AtomicBoolean committed = new AtomicBoolean();
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
         FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
-                overwriteEnabled);
+                overwriteEnabled, operation);
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
@@ -1410,6 +1411,7 @@ public class PaimonMetadataTableModeTest
                 .isEmpty();
 
         assertThat(overwriteEnabled).isTrue();
+        assertThat(operation).hasValue(Snapshot.Operation.OVERWRITE);
         assertThat(committed).isTrue();
     }
 
@@ -1419,8 +1421,9 @@ public class PaimonMetadataTableModeTest
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
         AtomicBoolean committed = new AtomicBoolean();
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
         FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
-                overwriteEnabled);
+                overwriteEnabled, operation);
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
@@ -1436,6 +1439,7 @@ public class PaimonMetadataTableModeTest
 
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(overwriteEnabled).isTrue();
+        assertThat(operation).hasValue(Snapshot.Operation.OVERWRITE);
         assertThat(committed).isTrue();
         assertThat(catalog.initialized).isTrue();
     }
