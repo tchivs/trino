@@ -1436,6 +1436,44 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testFinishCreateTableMarksCreateTableAsSelectOperation()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
+        FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
+                new AtomicBoolean(), operation);
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withCreateTableOperation(Snapshot.Operation.CREATE_TABLE_AS_SELECT);
+
+        metadata.finishCreateTable(SESSION, tableHandle, List.of(commitFragment()), List.of());
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(operation).hasValue(Snapshot.Operation.CREATE_TABLE_AS_SELECT);
+        assertThat(committed).isTrue();
+    }
+
+    @Test
+    public void testFinishCreateTableMarksCreateOrReplaceTableAsSelectOperation()
+            throws Exception
+    {
+        AtomicBoolean committed = new AtomicBoolean();
+        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
+        FileStoreTable table = commitFileStoreTable(new AtomicBoolean(), committed, new AtomicReference<>(), null,
+                new AtomicBoolean(), operation);
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withCreateTableOperation(Snapshot.Operation.CREATE_OR_REPLACE_TABLE_AS_SELECT);
+
+        metadata.finishCreateTable(SESSION, tableHandle, List.of(commitFragment()), List.of());
+
+        assertThat(operation).hasValue(Snapshot.Operation.CREATE_OR_REPLACE_TABLE_AS_SELECT);
+        assertThat(committed).isTrue();
+    }
+
+    @Test
     public void testInsertErrorRejectsExistingNonPartitionedTable()
             throws Exception
     {
@@ -4667,6 +4705,40 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testBeginCreateTableMarksCreateTableAsSelectOperation()
+    {
+        CreatedSchemaCatalog catalog = new CreatedSchemaCatalog(createdLowerCaseTable());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(
+                        new ColumnMetadata("id", INTEGER),
+                        new ColumnMetadata("value", INTEGER)));
+
+        PaimonTableHandle handle = (PaimonTableHandle) metadata.beginCreateTable(SESSION, tableMetadata,
+                Optional.empty(), RetryMode.NO_RETRIES);
+
+        assertThat(handle.getCreateTableOperation()).hasValue(Snapshot.Operation.CREATE_TABLE_AS_SELECT);
+    }
+
+    @Test
+    public void testBeginCreateTableMarksCreateOrReplaceTableAsSelectOperation()
+    {
+        CreatedSchemaCatalog catalog = new CreatedSchemaCatalog(createdLowerCaseTable());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(
+                        new ColumnMetadata("id", INTEGER),
+                        new ColumnMetadata("value", INTEGER)));
+
+        PaimonTableHandle handle = (PaimonTableHandle) metadata.beginCreateTable(SESSION, tableMetadata,
+                Optional.empty(), RetryMode.NO_RETRIES, true);
+
+        assertThat(handle.getCreateTableOperation()).hasValue(Snapshot.Operation.CREATE_OR_REPLACE_TABLE_AS_SELECT);
+    }
+
+    @Test
     public void testBeginCreateTableRejectsDuplicateCaseInsensitiveCreatedFields()
     {
         CreatedSchemaCatalog catalog = new CreatedSchemaCatalog(createdDuplicateCaseTable());
@@ -6033,6 +6105,13 @@ public class PaimonMetadataTableModeTest
         {
             assertThat(identifier.getFullName()).isEqualTo("schema.table");
             this.createdSchema = schema;
+        }
+
+        @Override
+        public void replaceTable(Identifier identifier, Schema newSchema, boolean ignoreIfNotExists)
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            this.createdSchema = newSchema;
         }
 
         @Override

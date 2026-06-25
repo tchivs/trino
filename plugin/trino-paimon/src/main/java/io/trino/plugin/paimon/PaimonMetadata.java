@@ -58,6 +58,7 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
@@ -273,13 +274,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Catalog sessionCatalog = catalog.forSession(session);
         Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
         validateNoCaseInsensitiveDuplicateCreatedFieldNames(table.rowType().getFields(), tableMetadata.getTable());
+        Snapshot.Operation createTableOperation = replace
+                ? Snapshot.Operation.CREATE_OR_REPLACE_TABLE_AS_SELECT
+                : Snapshot.Operation.CREATE_TABLE_AS_SELECT;
         return tableHandle.withWriteColumns(tableMetadata.getColumns().stream()
                 .map(column -> {
                     DataField field = createdTableField(table.rowType().getFields(), column.getName(),
                             tableMetadata.getTable());
                     return PaimonColumnHandle.of(field.name(), field.type(), typeManager);
                 })
-                .collect(toList()));
+                .collect(toList()))
+                .withCreateTableOperation(createTableOperation);
     }
 
     private static void validateNoCaseInsensitiveDuplicateCreatedFieldNames(List<DataField> fields,
@@ -314,8 +319,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
             ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments,
             Collection<ComputedStatistics> computedStatistics)
     {
-        return commit(session, getOutputTableHandle(tableHandle), fragments,
-                PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND);
+        PaimonTableHandle paimonTableHandle = getOutputTableHandle(tableHandle);
+        return commit(session, paimonTableHandle, fragments,
+                PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND,
+                paimonTableHandle.getCreateTableOperation());
     }
 
     @Override
