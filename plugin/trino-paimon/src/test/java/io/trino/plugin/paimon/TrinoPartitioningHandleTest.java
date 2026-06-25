@@ -199,6 +199,22 @@ public class TrinoPartitioningHandleTest
                 .hasMessage("workerCount must be positive: -1");
     }
 
+    @Test
+    public void testSingleNodePartitioningProviderRoutesAllRowsToSingleBucket()
+            throws Exception
+    {
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider();
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(serializedTestSchema(), true);
+
+        assertThat(provider.getBucketNodeMapping(null, null, handle))
+                .get()
+                .extracting(mapping -> mapping.getBucketCount())
+                .isEqualTo(1);
+        assertThat(provider.getBucketFunction(null, null, handle, List.of(BIGINT), 8)
+                .getBucket(null, 0))
+                .isEqualTo(0);
+    }
+
     private void testRoundTrip(PaimonPartitioningHandle expected)
     {
         String json = codec.toJson(expected);
