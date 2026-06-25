@@ -31,6 +31,7 @@ import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.catalog.TableQueryAuthResult;
+import org.apache.paimon.consumer.ConsumerInfo;
 import org.apache.paimon.function.Function;
 import org.apache.paimon.function.FunctionChange;
 import org.apache.paimon.options.Options;
@@ -211,6 +212,13 @@ public class PaimonCatalog
     }
 
     @Override
+    public PagedList<Identifier> listTablesPagedGlobally(@Nullable String databaseNamePattern,
+            @Nullable String tableNamePattern, @Nullable Integer maxResults, @Nullable String pageToken)
+    {
+        return current().listTablesPagedGlobally(databaseNamePattern, tableNamePattern, maxResults, pageToken);
+    }
+
+    @Override
     public void dropTable(Identifier identifier, boolean ignoreIfNotExists)
             throws TableNotExistException
     {
@@ -240,6 +248,12 @@ public class PaimonCatalog
             ColumnNotExistException
     {
         current().alterTable(identifier, changes, ignoreIfNotExists);
+    }
+
+    @Override
+    public void invalidateTable(Identifier identifier)
+    {
+        current().invalidateTable(identifier);
     }
 
     @Override
@@ -319,6 +333,32 @@ public class PaimonCatalog
     }
 
     @Override
+    public void repairCatalog()
+    {
+        current().repairCatalog();
+    }
+
+    @Override
+    public void repairDatabase(String databaseName)
+    {
+        current().repairDatabase(databaseName);
+    }
+
+    @Override
+    public void repairTable(Identifier identifier)
+            throws TableNotExistException
+    {
+        current().repairTable(identifier);
+    }
+
+    @Override
+    public void registerTable(Identifier identifier, String path)
+            throws TableAlreadyExistException
+    {
+        current().registerTable(identifier, path);
+    }
+
+    @Override
     public List<Partition> listPartitions(Identifier identifier)
             throws TableNotExistException
     {
@@ -395,6 +435,21 @@ public class PaimonCatalog
     }
 
     @Override
+    public PagedList<ConsumerInfo> listConsumersPaged(Identifier identifier, @Nullable Integer maxResults,
+            @Nullable String pageToken)
+            throws TableNotExistException
+    {
+        return current().listConsumersPaged(identifier, maxResults, pageToken);
+    }
+
+    @Override
+    public void resetConsumer(Identifier identifier, String consumerId, @Nullable Long nextSnapshotId)
+            throws TableNotExistException
+    {
+        current().resetConsumer(identifier, consumerId, nextSnapshotId);
+    }
+
+    @Override
     public void rollbackTo(Identifier identifier, Instant instant)
             throws TableNotExistException
     {
@@ -409,12 +464,28 @@ public class PaimonCatalog
     }
 
     @Override
+    public void rollbackSchema(Identifier identifier, long schemaId)
+            throws TableNotExistException
+    {
+        current().rollbackSchema(identifier, schemaId);
+    }
+
+    @Override
     public void createBranch(Identifier identifier, String branch, @Nullable String fromTag)
             throws TableNotExistException,
             BranchAlreadyExistException,
             TagNotExistException
     {
         current().createBranch(identifier, branch, fromTag);
+    }
+
+    @Override
+    public void createBranch(Identifier identifier, String branch, @Nullable String fromTag, boolean ignoreIfExists)
+            throws TableNotExistException,
+            BranchAlreadyExistException,
+            TagNotExistException
+    {
+        current().createBranch(identifier, branch, fromTag, ignoreIfExists);
     }
 
     @Override
@@ -512,6 +583,29 @@ public class PaimonCatalog
             throws DatabaseNotExistException
     {
         return current().listFunctions(databaseName);
+    }
+
+    @Override
+    public PagedList<String> listFunctionsPaged(String databaseName, @Nullable Integer maxResults,
+            @Nullable String pageToken, @Nullable String functionNamePattern)
+            throws DatabaseNotExistException
+    {
+        return current().listFunctionsPaged(databaseName, maxResults, pageToken, functionNamePattern);
+    }
+
+    @Override
+    public PagedList<Identifier> listFunctionsPagedGlobally(@Nullable String databaseNamePattern,
+            @Nullable String functionNamePattern, @Nullable Integer maxResults, @Nullable String pageToken)
+    {
+        return current().listFunctionsPagedGlobally(databaseNamePattern, functionNamePattern, maxResults, pageToken);
+    }
+
+    @Override
+    public PagedList<Function> listFunctionDetailsPaged(String databaseName, @Nullable Integer maxResults,
+            @Nullable String pageToken, @Nullable String functionNamePattern)
+            throws DatabaseNotExistException
+    {
+        return current().listFunctionDetailsPaged(databaseName, maxResults, pageToken, functionNamePattern);
     }
 
     @Override
