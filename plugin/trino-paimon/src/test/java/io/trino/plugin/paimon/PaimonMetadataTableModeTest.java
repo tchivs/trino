@@ -3286,6 +3286,7 @@ public class PaimonMetadataTableModeTest
                 .isInstanceOfSatisfying(SchemaChange.UpdateColumnType.class, change -> {
                     assertThat(change.fieldNames()).containsExactly("payload", "zip");
                     assertThat(change.newDataType().getTypeRoot()).isEqualTo(DataTypeRoot.INTEGER);
+                    assertThat(change.keepNullability()).isTrue();
                 });
     }
 
@@ -4975,6 +4976,7 @@ public class PaimonMetadataTableModeTest
                 .isInstanceOfSatisfying(SchemaChange.UpdateColumnType.class, change -> {
                     assertThat(change.fieldNames()).containsExactly("address", "zip");
                     assertThat(change.newDataType().getTypeRoot()).isEqualTo(DataTypeRoot.BIGINT);
+                    assertThat(change.keepNullability()).isTrue();
                 });
     }
 
