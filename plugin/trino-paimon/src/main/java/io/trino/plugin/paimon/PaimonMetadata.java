@@ -341,7 +341,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         requireNonNull(retryMode, "retryMode is null");
         validateNoQueryRetries(retryMode);
-        return getTableHandle("begin insert", tableHandle).withWriteColumns(columns);
+        PaimonTableHandle paimonTableHandle = getTableHandle("begin insert", tableHandle);
+        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "begin insert");
+        return paimonTableHandle.withWriteColumns(columns);
     }
 
     @Override
