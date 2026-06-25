@@ -813,13 +813,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
         try {
             Catalog sessionCatalog = catalog.forSession(session);
             if (saveMode == io.trino.spi.connector.SaveMode.REPLACE) {
-                // For REPLACE mode, drop the table if it exists first
-                try {
-                    sessionCatalog.dropTable(identifier, false);
-                }
-                catch (Catalog.TableNotExistException e) {
-                    // Table doesn't exist, continue with creation
-                }
+                replaceOrCreateTable(sessionCatalog, identifier, schema);
+                return;
             }
             sessionCatalog.createTable(identifier, schema, saveMode == io.trino.spi.connector.SaveMode.IGNORE);
         }
@@ -832,8 +827,23 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
             throw new TrinoException(TABLE_ALREADY_EXISTS, format("Table '%s' already exists", table), e);
         }
+        catch (UnsupportedOperationException e) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    format("Paimon create or replace table '%s' is not supported: %s", table, e.getMessage()), e);
+        }
         catch (Exception e) {
             throw paimonMetadataException(format("Failed to create Paimon table '%s'", table), e);
+        }
+    }
+
+    private static void replaceOrCreateTable(Catalog sessionCatalog, Identifier identifier, Schema schema)
+            throws Catalog.TableAlreadyExistException, Catalog.DatabaseNotExistException, Catalog.TableNotExistException
+    {
+        try {
+            sessionCatalog.replaceTable(identifier, schema, false);
+        }
+        catch (Catalog.TableNotExistException e) {
+            sessionCatalog.createTable(identifier, schema, false);
         }
     }
 

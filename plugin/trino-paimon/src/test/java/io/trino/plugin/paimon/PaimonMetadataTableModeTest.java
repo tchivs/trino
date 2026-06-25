@@ -2670,7 +2670,8 @@ public class PaimonMetadataTableModeTest
         assertThatCode(() -> metadata.createTable(SESSION, tableMetadata, io.trino.spi.connector.SaveMode.IGNORE))
                 .doesNotThrowAnyException();
         assertTrinoError(() -> metadata.createTable(SESSION, tableMetadata, io.trino.spi.connector.SaveMode.REPLACE),
-                TABLE_ALREADY_EXISTS.toErrorCode(), "Table 'schema.table' already exists");
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon create or replace table 'schema.table' is not supported: replace is not supported");
         assertTrinoError(() -> metadata.createTable(SESSION, missingSchemaTableMetadata,
                 io.trino.spi.connector.SaveMode.FAIL),
                 SCHEMA_NOT_FOUND.toErrorCode(), "Schema 'missing_schema' does not exist");
@@ -3268,9 +3269,9 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testCreateTableReplaceModeDropsFirst()
+    public void testCreateTableReplaceModeUsesPaimonReplaceTable()
     {
-        java.util.concurrent.atomic.AtomicBoolean dropped = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicBoolean replaced = new java.util.concurrent.atomic.AtomicBoolean();
         PaimonCatalog catalog = new PaimonCatalog(new Options(), unsupportedFileSystemFactory()) {
             @Override
             public void initSession(ConnectorSession connectorSession) {}
@@ -3282,17 +3283,17 @@ public class PaimonMetadataTableModeTest
             }
 
             @Override
-            public void dropTable(Identifier identifier, boolean ignoreIfNotExists)
+            public void replaceTable(Identifier identifier, Schema newSchema, boolean ignoreIfNotExists)
             {
                 assertThat(identifier.getFullName()).isEqualTo("schema.table");
-                dropped.set(true);
+                assertThat(ignoreIfNotExists).isFalse();
+                replaced.set(true);
             }
 
             @Override
-            public void createTable(Identifier identifier, Schema schema, boolean ignoreIfExists)
+            public void dropTable(Identifier identifier, boolean ignoreIfNotExists)
             {
-                assertThat(dropped).isTrue();
-                assertThat(identifier.getFullName()).isEqualTo("schema.table");
+                throw new AssertionError("CREATE OR REPLACE TABLE should use Paimon replaceTable");
             }
         };
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
@@ -3301,7 +3302,47 @@ public class PaimonMetadataTableModeTest
                 List.of(ColumnMetadata.builder().setName("id").setType(BIGINT).build()));
 
         metadata.createTable(SESSION, tableMetadata, io.trino.spi.connector.SaveMode.REPLACE);
-        assertThat(dropped).isTrue();
+        assertThat(replaced).isTrue();
+    }
+
+    @Test
+    public void testCreateTableReplaceModeCreatesMissingTable()
+    {
+        java.util.concurrent.atomic.AtomicBoolean created = new java.util.concurrent.atomic.AtomicBoolean();
+        PaimonCatalog catalog = new PaimonCatalog(new Options(), unsupportedFileSystemFactory()) {
+            @Override
+            public void initSession(ConnectorSession connectorSession) {}
+
+            @Override
+            public Catalog forSession(ConnectorSession connectorSession)
+            {
+                return this;
+            }
+
+            @Override
+            public void replaceTable(Identifier identifier, Schema newSchema, boolean ignoreIfNotExists)
+                    throws Catalog.TableNotExistException
+            {
+                assertThat(identifier.getFullName()).isEqualTo("schema.table");
+                assertThat(ignoreIfNotExists).isFalse();
+                throw new Catalog.TableNotExistException(identifier);
+            }
+
+            @Override
+            public void createTable(Identifier identifier, Schema schema, boolean ignoreIfExists)
+            {
+                assertThat(identifier.getFullName()).isEqualTo("schema.table");
+                assertThat(ignoreIfExists).isFalse();
+                created.set(true);
+            }
+        };
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(ColumnMetadata.builder().setName("id").setType(BIGINT).build()));
+
+        metadata.createTable(SESSION, tableMetadata, io.trino.spi.connector.SaveMode.REPLACE);
+        assertThat(created).isTrue();
     }
 
     @Test
@@ -4480,6 +4521,14 @@ public class PaimonMetadataTableModeTest
             }
             assertThat(identifier.getDatabaseName()).isEqualTo("schema");
             throw new Catalog.TableAlreadyExistException(identifier);
+        }
+
+        @Override
+        public void replaceTable(Identifier identifier, Schema newSchema, boolean ignoreIfNotExists)
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            assertThat(ignoreIfNotExists).isFalse();
+            throw new UnsupportedOperationException("replace is not supported");
         }
 
         @Override

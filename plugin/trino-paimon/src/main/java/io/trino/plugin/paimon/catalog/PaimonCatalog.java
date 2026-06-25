@@ -243,6 +243,13 @@ public class PaimonCatalog
     }
 
     @Override
+    public void replaceTable(Identifier identifier, Schema newSchema, boolean ignoreIfNotExists)
+            throws TableNotExistException
+    {
+        current().replaceTable(identifier, newSchema, ignoreIfNotExists);
+    }
+
+    @Override
     public View getView(Identifier identifier)
             throws ViewNotExistException
     {
