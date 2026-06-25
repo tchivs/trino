@@ -107,6 +107,19 @@ public class PaimonMetadataViewTest
     }
 
     @Test
+    public void testSystemSchemaViewReadsAreEmpty()
+    {
+        SystemSchemaRejectingViewCatalog catalog = new SystemSchemaRejectingViewCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        SchemaTableName systemView = new SchemaTableName(SYSTEM_DATABASE_NAME, "catalog_options_view");
+
+        assertThat(metadata.getView(SESSION, systemView)).isEmpty();
+        assertThat(metadata.getViews(SESSION, Optional.of(SYSTEM_DATABASE_NAME))).isEmpty();
+        assertThat(metadata.getViews(SESSION, Optional.empty())).isEmpty();
+        assertThat(catalog.listDatabasesCalls).isEqualTo(1);
+    }
+
+    @Test
     public void testGetViewsReportsUnsupportedCatalog()
     {
         PaimonMetadata metadata = new PaimonMetadata(
@@ -842,6 +855,45 @@ public class PaimonMetadataViewTest
                     Map.of("trino", sql),
                     null,
                     Map.of());
+        }
+    }
+
+    private static class SystemSchemaRejectingViewCatalog
+            extends PaimonCatalog
+    {
+        private int listDatabasesCalls;
+
+        private SystemSchemaRejectingViewCatalog()
+        {
+            super(new Options(), unsupportedFileSystemFactory());
+        }
+
+        @Override
+        public void initSession(ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public List<String> listDatabases()
+        {
+            listDatabasesCalls++;
+            return List.of(SYSTEM_DATABASE_NAME);
+        }
+
+        @Override
+        public List<String> listViews(String databaseName)
+        {
+            throw new AssertionError("system schema views must be empty without querying the catalog");
+        }
+
+        @Override
+        public View getView(Identifier identifier)
+        {
+            throw new AssertionError("system schema view lookup must not query the catalog");
         }
     }
 

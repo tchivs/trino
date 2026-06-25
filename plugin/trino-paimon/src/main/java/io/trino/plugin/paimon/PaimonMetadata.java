@@ -2512,6 +2512,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         requireNonNull(viewName, "viewName is null");
+        if (SYSTEM_DATABASE_NAME.equals(viewName.getSchemaName())) {
+            return Optional.empty();
+        }
         Catalog sessionCatalog = catalog.forSession(session);
         Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
 
@@ -2569,6 +2572,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     private Map<SchemaTableName, ConnectorViewDefinition> getViews(Catalog sessionCatalog, ConnectorSession session, String schemaName)
     {
+        if (SYSTEM_DATABASE_NAME.equals(schemaName)) {
+            return Map.of();
+        }
         List<String> viewNames;
         try {
             viewNames = sessionCatalog.listViews(schemaName);
