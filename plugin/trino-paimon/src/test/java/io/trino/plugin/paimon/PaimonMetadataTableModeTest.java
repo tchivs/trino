@@ -3959,6 +3959,52 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetTablePropertiesValidatesPaimonOptionUpdatesBeforeCatalogAlter()
+    {
+        CapturingDdlCatalog immutableCatalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED,
+                new AtomicBoolean(),
+                DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())),
+                DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())),
+                List.of(),
+                List.of("id"),
+                "id"));
+        PaimonMetadata immutableMetadata = new PaimonMetadata(immutableCatalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> immutableMetadata.setTableProperties(SESSION, tableHandle,
+                        Map.of("bucket_key", Optional.of("payload"))),
+                NOT_SUPPORTED.toErrorCode(),
+                "The following properties cannot be updated: bucket_key");
+        assertThat(immutableCatalog.alterCalls).isEqualTo(0);
+
+        CapturingDdlCatalog dynamicBucketCatalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(CoreOptions.BUCKET.key(), "-1")));
+        PaimonMetadata dynamicBucketMetadata = new PaimonMetadata(dynamicBucketCatalog, TESTING_TYPE_MANAGER);
+
+        assertTrinoError(() -> dynamicBucketMetadata.setTableProperties(SESSION, tableHandle,
+                        Map.of("bucket", Optional.of("4"))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot change bucket when it is -1.");
+        assertThat(dynamicBucketCatalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
+    public void testSetTablePropertiesValidatesPaimonOptionRemovesBeforeCatalogAlter()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(CoreOptions.BUCKET.key(), "4")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle,
+                        Map.of("bucket", Optional.empty())),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot reset bucket.");
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testSetTablePropertiesRejectsNullPropertyEntriesBeforeCatalogAlter()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
@@ -5019,6 +5065,28 @@ public class PaimonMetadataTableModeTest
                     }
                     case "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "testing-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static FileStoreTable schemaOptionsFileStoreTable(Map<String, String> options)
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        TableSchema schema = TableSchema.create(1, new Schema(rowType.getFields(), List.of(), List.of(), options, ""));
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "bucketMode" -> BucketMode.HASH_FIXED;
+                    case "name" -> "schema_options_file_store_table";
+                    case "rowType" -> rowType;
+                    case "partitionKeys", "primaryKeys" -> List.of();
+                    case "comment" -> Optional.empty();
+                    case "options" -> options;
+                    case "coreOptions" -> new CoreOptions(new Options(options));
+                    case "schema" -> schema;
+                    case "copyWithLatestSchema", "copy", "copyWithoutTimeTravel" -> proxy;
+                    case "toString" -> "schema-options-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
