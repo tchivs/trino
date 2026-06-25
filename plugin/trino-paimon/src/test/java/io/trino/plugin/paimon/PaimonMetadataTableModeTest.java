@@ -44,6 +44,7 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ColumnStatistics;
+import io.trino.spi.statistics.DoubleRange;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.VarbinaryType;
@@ -54,6 +55,8 @@ import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataIncrement;
@@ -263,11 +266,17 @@ public class PaimonMetadataTableModeTest
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
                 DataTypes.FIELD(0, "id", DataTypes.BIGINT()),
                 DataTypes.FIELD(1, "name", DataTypes.STRING()),
-                DataTypes.FIELD(2, "extra", DataTypes.INT()));
+                DataTypes.FIELD(2, "extra", DataTypes.INT()),
+                DataTypes.FIELD(3, "event_date", DataTypes.DATE()),
+                DataTypes.FIELD(4, "event_time", DataTypes.TIMESTAMP(6)));
         Statistics statistics = new Statistics(7, 3, 100L, 4096L, Map.of(
                 "id", ColStats.newColStats(0, 20L, 1L, 99L, 5L, 8L, 8L),
                 "missing", ColStats.newColStats(9, 1L, null, null, 0L, 4L, 4L),
-                "name", ColStats.newColStats(1, null, null, null, 25L, 12L, 64L)));
+                "name", ColStats.newColStats(1, null, BinaryString.fromString("a"), BinaryString.fromString("z"),
+                        25L, 12L, 64L),
+                "event_date", ColStats.newColStats(3, null, 10, 20, 0L, 4L, 4L),
+                "event_time", ColStats.newColStats(4, null, Timestamp.fromMicros(1_000_000L),
+                        Timestamp.fromMicros(2_500_000L), 0L, 8L, 8L)));
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(statisticsTable(rowType, Optional.of(statistics))),
                 TESTING_TYPE_MANAGER);
 
@@ -275,19 +284,29 @@ public class PaimonMetadataTableModeTest
                 new PaimonTableHandle("schema", "table", Map.of()));
 
         assertThat(tableStatistics.getRowCount().getValue()).isEqualTo(100);
-        assertThat(tableStatistics.getColumnStatistics()).hasSize(2);
+        assertThat(tableStatistics.getColumnStatistics()).hasSize(4);
 
         ColumnStatistics idStats = tableStatistics.getColumnStatistics()
                 .get(PaimonColumnHandle.of("id", DataTypes.BIGINT()));
         assertThat(idStats.getDistinctValuesCount().getValue()).isEqualTo(20);
         assertThat(idStats.getNullsFraction().getValue()).isEqualTo(0.05);
         assertThat(idStats.getDataSize().getValue()).isEqualTo(760);
+        assertThat(idStats.getRange()).contains(new DoubleRange(1, 99));
 
         ColumnStatistics nameStats = tableStatistics.getColumnStatistics()
                 .get(PaimonColumnHandle.of("name", DataTypes.STRING()));
         assertThat(nameStats.getDistinctValuesCount().isUnknown()).isTrue();
         assertThat(nameStats.getNullsFraction().getValue()).isEqualTo(0.25);
         assertThat(nameStats.getDataSize().getValue()).isEqualTo(900);
+        assertThat(nameStats.getRange()).isEmpty();
+
+        ColumnStatistics dateStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("event_date", DataTypes.DATE()));
+        assertThat(dateStats.getRange()).contains(new DoubleRange(10, 20));
+
+        ColumnStatistics timestampStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("event_time", DataTypes.TIMESTAMP(6)));
+        assertThat(timestampStats.getRange()).contains(new DoubleRange(1_000_000, 2_500_000));
 
         assertThat(tableStatistics.getColumnStatistics())
                 .doesNotContainKey(PaimonColumnHandle.of("missing", DataTypes.INT()));
