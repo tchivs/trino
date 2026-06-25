@@ -68,6 +68,7 @@ import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.partition.Partition;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.stats.ColStats;
 import org.apache.paimon.stats.Statistics;
@@ -138,6 +139,18 @@ public record PaimonMetadata(PaimonCatalog catalog,
 {
     private static final int MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE = 1000;
     private static final int MAX_PARTITION_DELETE_SPECS = 1024;
+    private static final Set<String> UNSUPPORTED_PAIMON_OPTION_UPDATES = Set.of(
+            CoreOptions.BUCKET_KEY.key(),
+            CoreOptions.BUCKET_FUNCTION_TYPE.key(),
+            CoreOptions.ROW_TRACKING_ENABLED.key());
+    private static final Set<String> PAIMON_OPTION_UPDATES_REQUIRING_EXISTING_OPTIONS = Set.of(
+            CoreOptions.BUCKET.key(),
+            CoreOptions.DELETION_VECTORS_ENABLED.key(),
+            CoreOptions.IGNORE_DELETE.key(),
+            CoreOptions.IGNORE_UPDATE_BEFORE.key(),
+            CoreOptions.CLUSTERING_COLUMNS.key());
+    private static final Set<String> PAIMON_OPTION_REMOVES_REQUIRING_EXISTING_OPTIONS = Set.of(
+            CoreOptions.CLUSTERING_COLUMNS.key());
 
     public PaimonMetadata
     {
@@ -1025,6 +1038,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         rejectUnsupportedTablePropertyUpdates(properties);
+        Catalog sessionCatalog = catalog.forSession(session);
+        Optional<Map<String, String>> existingOptions = Optional.empty();
         List<SchemaChange> changes = new ArrayList<>();
 
         // Handle both setting and removing options
@@ -1038,21 +1053,83 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
             if (value.isPresent()) {
                 // Set the property to the specified value
-                changes.add(SchemaChange.setOption(key,
-                        PaimonTableOptionUtils.requireNonBlankStringOptionValue(propertyName, value.get())));
+                String optionValue = PaimonTableOptionUtils.requireNonBlankStringOptionValue(propertyName,
+                        value.get());
+                if (requiresExistingOptionsForPaimonOptionUpdate(key)) {
+                    existingOptions = existingOptions.or(() ->
+                            getPaimonTableOptionsIfAvailable(sessionCatalog, paimonTableHandle));
+                    existingOptions.ifPresent(options -> validatePaimonTableOptionUpdate(options, key, optionValue));
+                }
+                else {
+                    validatePaimonTableOptionUpdate(Map.of(), key, optionValue);
+                }
+                changes.add(SchemaChange.setOption(key, optionValue));
             }
             else {
                 // Remove the property (SET PROPERTIES x = DEFAULT)
+                if (requiresExistingOptionsForPaimonOptionRemove(key)) {
+                    existingOptions = existingOptions.or(() ->
+                            getPaimonTableOptionsIfAvailable(sessionCatalog, paimonTableHandle));
+                    existingOptions.ifPresent(options -> validatePaimonTableOptionRemove(options, key));
+                }
+                else {
+                    validatePaimonTableOptionRemove(Map.of(), key);
+                }
                 changes.add(SchemaChange.removeOption(key));
             }
         }
 
         try {
-            Catalog sessionCatalog = catalog.forSession(session);
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
             throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
+        }
+    }
+
+    private static boolean requiresExistingOptionsForPaimonOptionUpdate(String key)
+    {
+        return PAIMON_OPTION_UPDATES_REQUIRING_EXISTING_OPTIONS.contains(key);
+    }
+
+    private static boolean requiresExistingOptionsForPaimonOptionRemove(String key)
+    {
+        return PAIMON_OPTION_REMOVES_REQUIRING_EXISTING_OPTIONS.contains(key);
+    }
+
+    private static Optional<Map<String, String>> getPaimonTableOptionsIfAvailable(Catalog sessionCatalog,
+            PaimonTableHandle tableHandle)
+    {
+        try {
+            Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
+            Map<String, String> options = table instanceof FileStoreTable fileStoreTable
+                    ? fileStoreTable.schema().options()
+                    : table.options();
+            return Optional.of(Map.copyOf(options));
+        }
+        catch (RuntimeException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static void validatePaimonTableOptionUpdate(Map<String, String> existingOptions, String key,
+            String value)
+    {
+        try {
+            SchemaManager.checkAlterTableOption(existingOptions, key, existingOptions.get(key), value);
+        }
+        catch (UnsupportedOperationException e) {
+            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+        }
+    }
+
+    private static void validatePaimonTableOptionRemove(Map<String, String> existingOptions, String key)
+    {
+        try {
+            SchemaManager.checkResetTableOption(existingOptions, key);
+        }
+        catch (UnsupportedOperationException e) {
+            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
         }
     }
 
@@ -1066,6 +1143,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
                         || PaimonTableOptions.PARTITIONED_BY_PROPERTY.equals(property)
                         || CoreOptions.PRIMARY_KEY.key().equals(property)
                         || CoreOptions.PARTITION.key().equals(property)
+                        || UNSUPPORTED_PAIMON_OPTION_UPDATES.contains(
+                                PaimonTableOptionUtils.toPaimonOptionKey(property))
                         || PaimonTableOptionUtils.isRuntimeOnlyTableProperty(property))
                 .sorted()
                 .toList();
