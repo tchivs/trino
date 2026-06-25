@@ -47,6 +47,7 @@ public class PaimonConnector
     private final ConnectorPageSourceProvider trinoPageSourceProvider;
     private final ConnectorPageSinkProvider trinoPageSinkProvider;
     private final ConnectorNodePartitioningProvider trinoNodePartitioningProvider;
+    private final List<PropertyMetadata<?>> schemaProperties;
     private final List<PropertyMetadata<?>> tableProperties;
     private final List<PropertyMetadata<?>> sessionProperties;
     private final Set<ConnectorTableFunction> tableFunctions;
@@ -54,9 +55,9 @@ public class PaimonConnector
 
     public PaimonConnector(ConnectorMetadata trinoMetadata, ConnectorSplitManager trinoSplitManager,
             ConnectorPageSourceProvider trinoPageSourceProvider, ConnectorPageSinkProvider trinoPageSinkProvider,
-            ConnectorNodePartitioningProvider trinoNodePartitioningProvider, PaimonTableOptions paimonTableOptions,
-            PaimonSessionProperties paimonSessionProperties, Set<ConnectorTableFunction> tableFunctions,
-            FunctionProvider functionProvider)
+            ConnectorNodePartitioningProvider trinoNodePartitioningProvider, PaimonSchemaProperties paimonSchemaProperties,
+            PaimonTableOptions paimonTableOptions, PaimonSessionProperties paimonSessionProperties,
+            Set<ConnectorTableFunction> tableFunctions, FunctionProvider functionProvider)
     {
         this.trinoMetadata = requireNonNull(trinoMetadata, "trinoMetadata is null");
         this.trinoSplitManager = requireNonNull(trinoSplitManager, "trinoSplitManager is null");
@@ -64,6 +65,7 @@ public class PaimonConnector
         this.trinoPageSinkProvider = requireNonNull(trinoPageSinkProvider, "trinoPageSinkProvider is null");
         this.trinoNodePartitioningProvider = requireNonNull(trinoNodePartitioningProvider,
                 "trinoNodePartitioningProvider is null");
+        this.schemaProperties = paimonSchemaProperties.getSchemaProperties();
         this.tableProperties = paimonTableOptions.getTableProperties();
         this.sessionProperties = paimonSessionProperties.getSessionProperties();
         this.tableFunctions = ImmutableSet.copyOf(requireNonNull(tableFunctions, "tableFunctions is null"));
@@ -112,6 +114,12 @@ public class PaimonConnector
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return sessionProperties;
+    }
+
+    @Override
+    public List<PropertyMetadata<?>> getSchemaProperties()
+    {
+        return schemaProperties;
     }
 
     @Override

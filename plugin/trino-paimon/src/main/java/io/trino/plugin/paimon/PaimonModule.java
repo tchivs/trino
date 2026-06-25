@@ -46,6 +46,7 @@ public class PaimonModule
         binder.bind(PaimonPageSinkProvider.class).in(SINGLETON);
         binder.bind(PaimonNodePartitioningProvider.class).in(SINGLETON);
         binder.bind(PaimonSessionProperties.class).in(SINGLETON);
+        binder.bind(PaimonSchemaProperties.class).in(SINGLETON);
         binder.bind(PaimonTableOptions.class).in(SINGLETON);
         newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(TableChangesFunctionProvider.class)
                 .in(Scopes.SINGLETON);
