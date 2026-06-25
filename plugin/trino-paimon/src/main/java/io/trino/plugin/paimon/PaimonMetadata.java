@@ -134,6 +134,8 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
 public record PaimonMetadata(PaimonCatalog catalog,
                              io.trino.spi.type.TypeManager typeManager) implements ConnectorMetadata
 {
+    private static final int MAX_PARTITION_DELETE_SPECS = 1024;
+
     public PaimonMetadata
     {
         catalog = requireNonNull(catalog, "catalog is null");
@@ -1713,21 +1715,59 @@ public record PaimonMetadata(PaimonCatalog catalog,
             columnsByName.put(columnName, entry.getKey());
         }
 
-        Map<String, String> partitionSpec = new LinkedHashMap<>();
+        List<Map<String, String>> partitionSpecs = List.of(new LinkedHashMap<>());
         for (String partitionKey : fileStoreTable.partitionKeys()) {
             Domain domain = domainsByName.get(partitionKey);
             PaimonColumnHandle columnHandle = columnsByName.get(partitionKey);
-            if (domain == null || columnHandle == null || !domain.isSingleValue()) {
+            if (domain == null || columnHandle == null || domain.isNullAllowed()
+                    || !domain.getValues().isDiscreteSet()) {
                 return Optional.empty();
             }
-            Optional<String> partitionValue = partitionValue(columnHandle, domain.getSingleValue());
+            Optional<List<String>> partitionValues = partitionValues(columnHandle, domain);
+            if (partitionValues.isEmpty()) {
+                return Optional.empty();
+            }
+            if (partitionSpecs.size() > MAX_PARTITION_DELETE_SPECS / partitionValues.get().size()) {
+                return Optional.empty();
+            }
+            partitionSpecs = appendPartitionValues(partitionSpecs, partitionKey, partitionValues.get());
+        }
+
+        return Optional.of(partitionSpecs);
+    }
+
+    private static Optional<List<String>> partitionValues(PaimonColumnHandle columnHandle, Domain domain)
+    {
+        requireNonNull(columnHandle, "columnHandle is null");
+        requireNonNull(domain, "domain is null");
+        List<String> values = new ArrayList<>();
+        for (Object value : domain.getValues().getDiscreteSet()) {
+            Optional<String> partitionValue = partitionValue(columnHandle, value);
             if (partitionValue.isEmpty()) {
                 return Optional.empty();
             }
-            partitionSpec.put(partitionKey, partitionValue.get());
+            values.add(partitionValue.get());
         }
+        return Optional.of(List.copyOf(values));
+    }
 
-        return Optional.of(List.of(partitionSpec));
+    private static List<Map<String, String>> appendPartitionValues(
+            List<Map<String, String>> partitionSpecs,
+            String partitionKey,
+            List<String> partitionValues)
+    {
+        requireNonNull(partitionSpecs, "partitionSpecs is null");
+        requireNonNull(partitionKey, "partitionKey is null");
+        requireNonNull(partitionValues, "partitionValues is null");
+        List<Map<String, String>> result = new ArrayList<>(partitionSpecs.size() * partitionValues.size());
+        for (Map<String, String> partitionSpec : partitionSpecs) {
+            for (String partitionValue : partitionValues) {
+                Map<String, String> newPartitionSpec = new LinkedHashMap<>(partitionSpec);
+                newPartitionSpec.put(partitionKey, partitionValue);
+                result.add(newPartitionSpec);
+            }
+        }
+        return List.copyOf(result);
     }
 
     private static Optional<String> partitionValue(PaimonColumnHandle columnHandle, Object value)

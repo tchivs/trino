@@ -43,7 +43,9 @@ import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ColumnStatistics;
@@ -1624,6 +1626,52 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testApplyDeleteAcceptsDiscretePartitionFilters()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                DataTypes.FIELD(1, "region", DataTypes.INT()),
+                DataTypes.FIELD(2, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType, List.of("dt", "region"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        PaimonColumnHandle region = PaimonColumnHandle.of("region", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(
+                        dt, Domain.multipleValues(VARCHAR, List.of(
+                                Slices.utf8Slice("2026-06-26"),
+                                Slices.utf8Slice("2026-06-27"))),
+                        region, Domain.multipleValues(INTEGER, List.of(7L, 8L)))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        Optional<ConnectorTableHandle> deleteHandle = metadata.applyDelete(SESSION, tableHandle);
+
+        assertThat(deleteHandle).isPresent();
+        PaimonTableHandle partitionDeleteHandle = (PaimonTableHandle) deleteHandle.orElseThrow();
+        assertThat(partitionDeleteHandle.getDeletePartitionSpecs()).contains(List.of(
+                Map.of("dt", "2026-06-26", "region", "7"),
+                Map.of("dt", "2026-06-26", "region", "8"),
+                Map.of("dt", "2026-06-27", "region", "7"),
+                Map.of("dt", "2026-06-27", "region", "8")));
+        assertThat(partitionDeleteHandle.getDeletePartitionSpecs().orElseThrow().get(0).keySet())
+                .containsExactly("dt", "region");
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
     public void testPartitionDeleteHandleJsonRoundTrip()
     {
         Map<String, String> partitionSpec = new LinkedHashMap<>();
@@ -1684,20 +1732,20 @@ public class PaimonMetadataTableModeTest
                 Optional.empty(),
                 Optional.empty(),
                 OptionalLong.empty());
-        PaimonTableHandle multiValuePartitionHandle = new PaimonTableHandle(
+        PaimonTableHandle rangePartitionHandle = new PaimonTableHandle(
                 "schema",
                 "table",
                 Map.of(),
                 TupleDomain.withColumnDomains(Map.of(
                         dt, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-06-26")),
-                        region, Domain.multipleValues(INTEGER, List.of(7L, 8L)))),
+                        region, Domain.create(ValueSet.ofRanges(Range.range(INTEGER, 7L, true, 8L, true)), false))),
                 Optional.empty(),
                 Optional.empty(),
                 OptionalLong.empty());
 
         assertThat(metadata.applyDelete(SESSION, nonPartitionHandle)).isEmpty();
         assertThat(metadata.applyDelete(SESSION, missingPartitionHandle)).isEmpty();
-        assertThat(metadata.applyDelete(SESSION, multiValuePartitionHandle)).isEmpty();
+        assertThat(metadata.applyDelete(SESSION, rangePartitionHandle)).isEmpty();
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(truncated).isFalse();
         assertThat(truncatedPartitions.get()).isNull();
