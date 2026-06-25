@@ -64,6 +64,7 @@ import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Decimal;
+import org.apache.paimon.data.LocalZoneTimestamp;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.schema.Schema;
@@ -897,7 +898,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             case DOUBLE -> ((Number) value).doubleValue();
             case DECIMAL -> toTrinoNativeDecimalValue((DecimalType) trinoType, (Decimal) value);
             case TIMESTAMP_WITHOUT_TIME_ZONE -> paimonTimestampToTrino(trinoType, (Timestamp) value);
-            case TIMESTAMP_WITH_LOCAL_TIME_ZONE -> paimonTimestampToTrinoTimestampWithTimeZone(trinoType, (Timestamp) value);
+            case TIMESTAMP_WITH_LOCAL_TIME_ZONE -> toTrinoNativeTimestampWithTimeZoneValue(trinoType, value);
             default -> throw new IllegalArgumentException("Unsupported Paimon statistics range type: " + logicalType);
         };
     }
@@ -908,6 +909,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return Decimals.encodeShortScaledValue(value.toBigDecimal(), trinoType.getScale());
         }
         return Decimals.encodeScaledValue(value.toBigDecimal(), trinoType.getScale());
+    }
+
+    private static Object toTrinoNativeTimestampWithTimeZoneValue(Type trinoType, Object value)
+    {
+        if (value instanceof Timestamp timestamp) {
+            return paimonTimestampToTrinoTimestampWithTimeZone(trinoType, timestamp);
+        }
+        LocalZoneTimestamp timestamp = (LocalZoneTimestamp) value;
+        return paimonTimestampToTrinoTimestampWithTimeZone(
+                trinoType,
+                Timestamp.fromEpochMillis(timestamp.getMillisecond(), timestamp.getNanoOfMillisecond()));
     }
 
     public PaimonTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName,
