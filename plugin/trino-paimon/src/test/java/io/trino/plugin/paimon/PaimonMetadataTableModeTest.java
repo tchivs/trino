@@ -2185,6 +2185,18 @@ public class PaimonMetadataTableModeTest
         assertThatThrownBy(() -> metadata.executeDelete(SESSION, tableHandle))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("Paimon delete requires an unfiltered table handle or a validated partition delete handle");
+
+        PaimonTableHandle systemTableHandle = new PaimonTableHandle(
+                SYSTEM_DATABASE_NAME,
+                "all_tables",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(id, Domain.singleValue(INTEGER, 1L))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+        assertTrinoError(() -> metadata.executeDelete(SESSION, systemTableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon delete is not supported for the system schema 'sys'");
     }
 
     @Test
