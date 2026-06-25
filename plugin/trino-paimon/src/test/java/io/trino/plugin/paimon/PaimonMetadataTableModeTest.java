@@ -36,6 +36,7 @@ import io.trino.spi.connector.ConnectorTableProperties;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.PointerType;
+import io.trino.spi.connector.RelationType;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
@@ -927,6 +928,12 @@ public class PaimonMetadataTableModeTest
             }
 
             @Override
+            public List<String> listViews(String databaseName)
+            {
+                return List.of();
+            }
+
+            @Override
             public Table getTable(Identifier identifier)
                     throws Catalog.TableNotExistException
             {
@@ -961,6 +968,12 @@ public class PaimonMetadataTableModeTest
             public List<String> listTables(String databaseName)
             {
                 return List.of("table");
+            }
+
+            @Override
+            public List<String> listViews(String databaseName)
+            {
+                return List.of();
             }
 
             @Override
@@ -4587,7 +4600,8 @@ public class PaimonMetadataTableModeTest
         List<SchemaTableName> tables = metadata.listTables(SESSION, Optional.of("alpha"));
         assertThat(tables).containsExactly(
                 new SchemaTableName("alpha", "t1"),
-                new SchemaTableName("alpha", "t2"));
+                new SchemaTableName("alpha", "t2"),
+                new SchemaTableName("alpha", "v1"));
     }
 
     @Test
@@ -4600,11 +4614,25 @@ public class PaimonMetadataTableModeTest
         assertThat(tables).containsExactly(
                 new SchemaTableName("alpha", "t1"),
                 new SchemaTableName("alpha", "t2"),
+                new SchemaTableName("alpha", "v1"),
                 new SchemaTableName("beta", "t3"),
+                new SchemaTableName("beta", "v2"),
                 new SchemaTableName(SYSTEM_DATABASE_NAME, "tables"),
                 new SchemaTableName(SYSTEM_DATABASE_NAME, "partitions"),
                 new SchemaTableName(SYSTEM_DATABASE_NAME, "all_table_options"),
                 new SchemaTableName(SYSTEM_DATABASE_NAME, "catalog_options"));
+    }
+
+    @Test
+    public void testRelationTypesMarkPaimonViews()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new SchemaQueryCatalog(), TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.getRelationTypes(SESSION, Optional.of("alpha")))
+                .containsExactlyInAnyOrderEntriesOf(Map.of(
+                        new SchemaTableName("alpha", "t1"), RelationType.TABLE,
+                        new SchemaTableName("alpha", "t2"), RelationType.TABLE,
+                        new SchemaTableName("alpha", "v1"), RelationType.VIEW));
     }
 
     @Test
@@ -6811,6 +6839,16 @@ public class PaimonMetadataTableModeTest
                 default -> List.of();
             };
         }
+
+        @Override
+        public List<String> listViews(String databaseName)
+        {
+            return switch (databaseName) {
+                case "alpha" -> List.of("v1");
+                case "beta" -> List.of("v2");
+                default -> List.of();
+            };
+        }
     }
 
     private static class SystemSchemaRejectingCatalog
@@ -6844,6 +6882,16 @@ public class PaimonMetadataTableModeTest
             }
             assertThat(databaseName).isEqualTo("alpha");
             return List.of("t1");
+        }
+
+        @Override
+        public List<String> listViews(String databaseName)
+        {
+            if (databaseName.equals(SYSTEM_DATABASE_NAME)) {
+                throw new AssertionError("system schema views must not be queried while listing tables");
+            }
+            assertThat(databaseName).isEqualTo("alpha");
+            return List.of();
         }
     }
 
