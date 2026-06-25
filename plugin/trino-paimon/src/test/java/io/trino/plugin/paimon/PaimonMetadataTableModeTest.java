@@ -235,6 +235,12 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> metadata.truncateTable(SESSION, systemTableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon truncate table is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.applyDelete(SESSION, systemTableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon delete is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.executeDelete(SESSION, systemTableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon delete is not supported for the system schema 'sys'");
     }
 
     @Test
@@ -308,6 +314,9 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> vectorSearchMetadata.truncateTable(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon vector search tables are not supported by the Trino connector");
+        assertTrinoError(() -> vectorSearchMetadata.applyDelete(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon vector search tables are not supported by the Trino connector");
         assertTrinoError(() -> vectorSearchMetadata.finishInsert(SESSION, tableHandle, List.of(fragment), List.of()),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon vector search tables are not supported by the Trino connector");
@@ -331,6 +340,9 @@ public class PaimonMetadataTableModeTest
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon full-text search tables are not supported by the Trino connector");
         assertTrinoError(() -> fullTextSearchMetadata.truncateTable(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon full-text search tables are not supported by the Trino connector");
+        assertTrinoError(() -> fullTextSearchMetadata.applyDelete(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon full-text search tables are not supported by the Trino connector");
         assertTrinoError(() -> fullTextSearchMetadata.finishInsert(SESSION, tableHandle, List.of(fragment), List.of()),
@@ -1051,6 +1063,10 @@ public class PaimonMetadataTableModeTest
 
         assertUnsupportedFileStoreTable(() -> metadata.truncateTable(SESSION, tableHandle),
                 "Paimon truncate table requires FileStoreTable");
+        assertUnsupportedFileStoreTable(() -> metadata.applyDelete(SESSION, tableHandle),
+                "Paimon delete requires FileStoreTable");
+        assertUnsupportedFileStoreTable(() -> metadata.executeDelete(SESSION, tableHandle),
+                "Paimon delete requires FileStoreTable");
     }
 
     @Test
@@ -1336,6 +1352,85 @@ public class PaimonMetadataTableModeTest
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(truncated).isTrue();
         assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testApplyDeleteAcceptsUnfilteredFileStoreTable()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        Optional<ConnectorTableHandle> deleteHandle = metadata.applyDelete(SESSION, tableHandle);
+
+        assertThat(deleteHandle).contains(tableHandle);
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testApplyDeleteDoesNotAcceptFilteredTableHandle()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(id, Domain.singleValue(INTEGER, 1L))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThat(metadata.applyDelete(SESSION, tableHandle)).isEmpty();
+        assertThat(copiedWithLatestSchema).isFalse();
+        assertThat(truncated).isFalse();
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
+    public void testExecuteDeleteUsesPaimonTruncateFastPath()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.executeDelete(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
+                .isEmpty();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isTrue();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testExecuteDeleteRejectsFilteredTableHandle()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED)),
+                TESTING_TYPE_MANAGER);
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(id, Domain.singleValue(INTEGER, 1L))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThatThrownBy(() -> metadata.executeDelete(SESSION, tableHandle))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon delete requires an unfiltered table handle");
     }
 
     @Test
@@ -2307,6 +2402,14 @@ public class PaimonMetadataTableModeTest
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("Paimon truncate table requires PaimonTableHandle, got: %s",
                         wrongTableHandle.getClass().getName());
+        assertThatThrownBy(() -> metadata.applyDelete(SESSION, wrongTableHandle))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon delete requires PaimonTableHandle, got: %s",
+                        wrongTableHandle.getClass().getName());
+        assertThatThrownBy(() -> metadata.executeDelete(SESSION, wrongTableHandle))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon delete requires PaimonTableHandle, got: %s",
+                        wrongTableHandle.getClass().getName());
     }
 
     @Test
@@ -2357,6 +2460,12 @@ public class PaimonMetadataTableModeTest
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("session is null");
         assertThatThrownBy(() -> metadata.truncateTable(null, tableHandle))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThatThrownBy(() -> metadata.applyDelete(null, tableHandle))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
+        assertThatThrownBy(() -> metadata.executeDelete(null, tableHandle))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("session is null");
         assertThat(catalog.initialized).isFalse();
@@ -2702,6 +2811,10 @@ public class PaimonMetadataTableModeTest
                 TABLE_NOT_FOUND.toErrorCode(), "Table 'schema.table' does not exist");
         assertTrinoError(() -> metadata.truncateTable(SESSION, tableHandle),
                 TABLE_NOT_FOUND.toErrorCode(), "Table 'schema.table' does not exist");
+        assertTrinoError(() -> metadata.applyDelete(SESSION, tableHandle),
+                TABLE_NOT_FOUND.toErrorCode(), "Table 'schema.table' does not exist");
+        assertTrinoError(() -> metadata.executeDelete(SESSION, tableHandle),
+                TABLE_NOT_FOUND.toErrorCode(), "Table 'schema.table' does not exist");
         assertThat(metadata.getTableHandle(SESSION, new SchemaTableName("schema", "table"),
                 Optional.empty(), Optional.of(new ConnectorTableVersion(PointerType.TARGET_ID, INTEGER, 1L))))
                 .isNull();
@@ -2769,6 +2882,25 @@ public class PaimonMetadataTableModeTest
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
                     assertThat(exception).hasMessage("Failed to truncate Paimon table 'table'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testCheckedExecuteDeleteFailureUsesPaimonMetadataError()
+    {
+        IOException failure = new IOException("delete metastore I/O failed");
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        FileStoreTable table = truncateFailingFileStoreTable(copiedWithLatestSchema, failure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.executeDelete(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to delete rows from Paimon table 'table'");
                     assertThat(exception.getCause()).isSameAs(failure);
                 });
         assertThat(copiedWithLatestSchema).isTrue();
