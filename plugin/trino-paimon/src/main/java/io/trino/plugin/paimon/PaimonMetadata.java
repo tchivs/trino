@@ -2662,7 +2662,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Catalog sessionCatalog = catalog.forSession(session);
 
         List<String> schemas = schemaName.map(Collections::singletonList).orElseGet(sessionCatalog::listDatabases);
-        Map<SchemaTableName, ConnectorViewDefinition> views = new HashMap<>();
+        Map<SchemaTableName, ConnectorViewDefinition> views = new LinkedHashMap<>();
         for (String schema : schemas) {
             views.putAll(getViews(sessionCatalog, session, schema));
         }
@@ -2692,9 +2692,22 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Map<SchemaTableName, ConnectorViewDefinition> views = new HashMap<>();
         for (String viewName : viewNames) {
             SchemaTableName tableName = new SchemaTableName(schemaName, viewName);
-            getView(session, tableName).ifPresent(def -> views.put(tableName, def));
+            try {
+                getView(session, tableName).ifPresent(def -> views.put(tableName, def));
+            }
+            catch (TrinoException e) {
+                if (!isMissingTrinoViewDialect(e, tableName)) {
+                    throw e;
+                }
+            }
         }
         return views;
+    }
+
+    private static boolean isMissingTrinoViewDialect(TrinoException exception, SchemaTableName viewName)
+    {
+        return exception.getErrorCode().equals(NOT_SUPPORTED.toErrorCode())
+                && exception.getMessage().equals(format("Paimon view '%s' does not contain a Trino SQL dialect", viewName));
     }
 
     @Override
