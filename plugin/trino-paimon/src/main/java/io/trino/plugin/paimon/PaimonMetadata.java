@@ -1253,7 +1253,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
         List<SchemaTableName> tables = new ArrayList<>();
         schemaName.map(Collections::singletonList)
                 .orElseGet(() -> listSchemaNames(session))
-                .forEach(schema -> tables.addAll(listTables(sessionCatalog, schema)));
+                .forEach(schema -> {
+                    tables.addAll(listTables(sessionCatalog, schema));
+                    tables.addAll(listViews(sessionCatalog, schema));
+                });
         return tables;
     }
 
