@@ -3331,11 +3331,14 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testNestedFieldDdlUsesExplicitFieldPaths()
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "payload", DataTypes.ROW(
+                        DataTypes.FIELD(1, "zip", DataTypes.INT()))));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
-        PaimonColumnHandle rowColumn = PaimonColumnHandle.of("payload", DataTypes.ROW(
-                DataTypes.FIELD(0, "zip", DataTypes.INT())));
+        PaimonColumnHandle rowColumn = PaimonColumnHandle.of("payload", rowType.getField("payload").type());
 
         metadata.addField(SESSION, tableHandle, List.of("payload"), "city", INTEGER, false);
         assertThat(catalog.lastAlterChanges)
@@ -3364,6 +3367,50 @@ public class PaimonMetadataTableModeTest
                     assertThat(change.fieldNames()).containsExactly("payload", "zip");
                     assertThat(change.newDataType().getTypeRoot()).isEqualTo(DataTypeRoot.INTEGER);
                     assertThat(change.keepNullability()).isTrue();
+                });
+    }
+
+    @Test
+    public void testNestedFieldDdlCanonicalizesPaimonFieldPath()
+    {
+        org.apache.paimon.types.RowType zipType = DataTypes.ROW(
+                DataTypes.FIELD(2, "Code", DataTypes.INT()));
+        org.apache.paimon.types.RowType payloadType = DataTypes.ROW(
+                DataTypes.FIELD(1, "Zip", zipType));
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "Payload", payloadType));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle rowColumn = PaimonColumnHandle.of("Payload", rowType.getField("Payload").type());
+
+        metadata.addField(SESSION, tableHandle, List.of("payload", "zip"), "new_Code", INTEGER, false);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.AddColumn.class, change ->
+                        assertThat(change.fieldNames()).containsExactly("Payload", "Zip", "new_Code"));
+
+        metadata.dropField(SESSION, tableHandle, rowColumn, List.of("zip", "code"));
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.DropColumn.class, change ->
+                        assertThat(change.fieldNames()).containsExactly("Payload", "Zip", "Code"));
+
+        metadata.renameField(SESSION, tableHandle, List.of("payload", "zip", "code"), "PostalCode");
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.RenameColumn.class, change -> {
+                    assertThat(change.fieldNames()).containsExactly("Payload", "Zip", "Code");
+                    assertThat(change.newName()).isEqualTo("PostalCode");
+                });
+
+        metadata.setFieldType(SESSION, tableHandle, List.of("payload", "zip", "code"), BIGINT);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.UpdateColumnType.class, change -> {
+                    assertThat(change.fieldNames()).containsExactly("Payload", "Zip", "Code");
+                    assertThat(change.newDataType().getTypeRoot()).isEqualTo(DataTypeRoot.BIGINT);
                 });
     }
 
@@ -4995,7 +5042,11 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testAddFieldSuccess()
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "address", DataTypes.ROW(
+                        DataTypes.FIELD(1, "city", DataTypes.STRING()))));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
@@ -5024,6 +5075,16 @@ public class PaimonMetadataTableModeTest
             }
 
             @Override
+            public Table getTable(Identifier identifier)
+            {
+                org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                        DataTypes.FIELD(0, "address", DataTypes.ROW(
+                                DataTypes.FIELD(1, "street", DataTypes.STRING()))));
+                return fileStoreTable(BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(),
+                        List.of(), "");
+            }
+
+            @Override
             public void alterTable(Identifier identifier, List<SchemaChange> changes, boolean ignoreIfNotExists)
                     throws Catalog.ColumnAlreadyExistException
             {
@@ -5040,10 +5101,15 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testDropFieldSuccess()
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "address", DataTypes.ROW(
+                        DataTypes.FIELD(1, "street", DataTypes.STRING()),
+                        DataTypes.FIELD(2, "city", DataTypes.STRING()))));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
-        PaimonColumnHandle columnHandle = PaimonColumnHandle.of("address", DataTypes.ROW(DataTypes.FIELD(0, "street", DataTypes.STRING())));
+        PaimonColumnHandle columnHandle = PaimonColumnHandle.of("address", rowType.getField("address").type());
 
         metadata.dropField(SESSION, tableHandle, columnHandle, List.of("street"));
 
@@ -5057,7 +5123,11 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testRenameFieldSuccess()
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "address", DataTypes.ROW(
+                        DataTypes.FIELD(1, "street", DataTypes.STRING()))));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
@@ -5075,7 +5145,11 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testSetFieldTypeSuccess()
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "address", DataTypes.ROW(
+                        DataTypes.FIELD(1, "zip", DataTypes.INT()))));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
