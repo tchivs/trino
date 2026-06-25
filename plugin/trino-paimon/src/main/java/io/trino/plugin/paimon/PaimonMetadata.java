@@ -86,6 +86,7 @@ import org.apache.paimon.utils.StringUtils;
 import org.apache.paimon.view.ViewChange;
 
 import java.io.IOException;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -123,6 +124,7 @@ import static io.trino.spi.connector.RetryMode.NO_RETRIES;
 import static io.trino.spi.connector.RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
 import static io.trino.spi.expression.Constant.TRUE;
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
+import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
@@ -1619,14 +1621,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("delete", handle);
-        if (!paimonTableHandle.getFilter().isAll()) {
-            return Optional.empty();
-        }
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "delete");
 
         Catalog sessionCatalog = catalog.forSession(session);
-        latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "delete");
-        return Optional.of(paimonTableHandle);
+        FileStoreTable fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "delete");
+        if (paimonTableHandle.getFilter().isAll()) {
+            return Optional.of(paimonTableHandle);
+        }
+        return partitionDeleteSpecs(paimonTableHandle, fileStoreTable)
+                .map(paimonTableHandle::withDeletePartitionSpecs)
+                .map(ConnectorTableHandle.class::cast);
     }
 
     @Override
@@ -1634,15 +1638,90 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("delete", handle);
-        if (!paimonTableHandle.getFilter().isAll()) {
-            throw new IllegalStateException("Paimon delete requires an unfiltered table handle");
+        if (!paimonTableHandle.getFilter().isAll() && paimonTableHandle.getDeletePartitionSpecs().isEmpty()) {
+            throw new IllegalStateException(
+                    "Paimon delete requires an unfiltered table handle or a validated partition delete handle");
         }
-        truncatePaimonTable(session, paimonTableHandle, "delete", "delete rows from");
+        truncatePaimonTable(session, paimonTableHandle, "delete", "delete rows from",
+                paimonTableHandle.getDeletePartitionSpecs());
         return OptionalLong.empty();
+    }
+
+    private static Optional<List<Map<String, String>>> partitionDeleteSpecs(
+            PaimonTableHandle tableHandle,
+            FileStoreTable fileStoreTable)
+    {
+        requireNonNull(tableHandle, "tableHandle is null");
+        requireNonNull(fileStoreTable, "fileStoreTable is null");
+        if (tableHandle.getLimit().isPresent() || tableHandle.getProjectedColumns().isPresent()
+                || tableHandle.getFilter().isNone() || fileStoreTable.partitionKeys().isEmpty()) {
+            return Optional.empty();
+        }
+
+        Optional<Map<PaimonColumnHandle, Domain>> domains = tableHandle.getFilter().getDomains();
+        if (domains.isEmpty() || domains.get().size() != fileStoreTable.partitionKeys().size()) {
+            return Optional.empty();
+        }
+
+        Map<String, Domain> domainsByName = new HashMap<>();
+        Map<String, PaimonColumnHandle> columnsByName = new HashMap<>();
+        for (Map.Entry<PaimonColumnHandle, Domain> entry : domains.get().entrySet()) {
+            String columnName = entry.getKey().getColumnName();
+            domainsByName.put(columnName, entry.getValue());
+            columnsByName.put(columnName, entry.getKey());
+        }
+
+        Map<String, String> partitionSpec = new LinkedHashMap<>();
+        for (String partitionKey : fileStoreTable.partitionKeys()) {
+            Domain domain = domainsByName.get(partitionKey);
+            PaimonColumnHandle columnHandle = columnsByName.get(partitionKey);
+            if (domain == null || columnHandle == null || !domain.isSingleValue()) {
+                return Optional.empty();
+            }
+            Optional<String> partitionValue = partitionValue(columnHandle, domain.getSingleValue());
+            if (partitionValue.isEmpty()) {
+                return Optional.empty();
+            }
+            partitionSpec.put(partitionKey, partitionValue.get());
+        }
+
+        return Optional.of(List.of(partitionSpec));
+    }
+
+    private static Optional<String> partitionValue(PaimonColumnHandle columnHandle, Object value)
+    {
+        requireNonNull(columnHandle, "columnHandle is null");
+        requireNonNull(value, "value is null");
+        Type type = columnHandle.getTrinoType();
+        DataType dataType = columnHandle.logicalType();
+        return switch (dataType.getTypeRoot()) {
+            case CHAR, VARCHAR -> value instanceof Slice slice ? Optional.of(slice.toStringUtf8()) : Optional.of(value.toString());
+            case BOOLEAN -> Optional.of(value.toString());
+            case TINYINT, SMALLINT, INTEGER -> Optional.of(String.valueOf(toIntExact((Long) value)));
+            case BIGINT -> Optional.of(value.toString());
+            case DECIMAL -> Optional.of(decimalPartitionValue((DecimalType) type, value));
+            case DATE -> Optional.of(LocalDate.ofEpochDay((Long) value).toString());
+            default -> Optional.empty();
+        };
+    }
+
+    private static String decimalPartitionValue(DecimalType decimalType, Object value)
+    {
+        requireNonNull(decimalType, "decimalType is null");
+        if (value instanceof Long longValue) {
+            return Decimals.toString(longValue, decimalType.getScale());
+        }
+        return Decimals.toString((io.trino.spi.type.Int128) value, decimalType.getScale());
     }
 
     private void truncatePaimonTable(ConnectorSession session, PaimonTableHandle paimonTableHandle, String operation,
             String failureOperation)
+    {
+        truncatePaimonTable(session, paimonTableHandle, operation, failureOperation, Optional.empty());
+    }
+
+    private void truncatePaimonTable(ConnectorSession session, PaimonTableHandle paimonTableHandle, String operation,
+            String failureOperation, Optional<List<Map<String, String>>> deletePartitionSpecs)
     {
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), operation);
 
@@ -1652,7 +1731,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
             // Use BatchTableCommit to truncate the table
             try (BatchTableCommit commit = fileStoreTable.newBatchWriteBuilder().newCommit()) {
-                commit.truncateTable();
+                if (deletePartitionSpecs.isPresent()) {
+                    commit.truncatePartitions(deletePartitionSpecs.get());
+                }
+                else {
+                    commit.truncateTable();
+                }
             }
         }
         catch (TrinoException e) {
