@@ -43,6 +43,8 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
+import io.trino.spi.statistics.ColumnStatistics;
+import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.testing.TestingConnectorSession;
@@ -63,6 +65,8 @@ import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.stats.ColStats;
+import org.apache.paimon.stats.Statistics;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FullTextSearchTable;
@@ -246,6 +250,88 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> metadata.executeDelete(SESSION, systemTableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon delete is not supported for the system schema 'sys'");
+    }
+
+    @Test
+    public void testTableStatisticsUsesPaimonSnapshotStats()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.BIGINT()),
+                DataTypes.FIELD(1, "name", DataTypes.STRING()),
+                DataTypes.FIELD(2, "extra", DataTypes.INT()));
+        Statistics statistics = new Statistics(7, 3, 100L, 4096L, Map.of(
+                "id", ColStats.newColStats(0, 20L, 1L, 99L, 5L, 8L, 8L),
+                "missing", ColStats.newColStats(9, 1L, null, null, 0L, 4L, 4L),
+                "name", ColStats.newColStats(1, null, null, null, 25L, 12L, 64L)));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(statisticsTable(rowType, Optional.of(statistics))),
+                TESTING_TYPE_MANAGER);
+
+        TableStatistics tableStatistics = metadata.getTableStatistics(SESSION,
+                new PaimonTableHandle("schema", "table", Map.of()));
+
+        assertThat(tableStatistics.getRowCount().getValue()).isEqualTo(100);
+        assertThat(tableStatistics.getColumnStatistics()).hasSize(2);
+
+        ColumnStatistics idStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("id", DataTypes.BIGINT()));
+        assertThat(idStats.getDistinctValuesCount().getValue()).isEqualTo(20);
+        assertThat(idStats.getNullsFraction().getValue()).isEqualTo(0.05);
+        assertThat(idStats.getDataSize().getValue()).isEqualTo(760);
+
+        ColumnStatistics nameStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("name", DataTypes.STRING()));
+        assertThat(nameStats.getDistinctValuesCount().isUnknown()).isTrue();
+        assertThat(nameStats.getNullsFraction().getValue()).isEqualTo(0.25);
+        assertThat(nameStats.getDataSize().getValue()).isEqualTo(900);
+
+        assertThat(tableStatistics.getColumnStatistics())
+                .doesNotContainKey(PaimonColumnHandle.of("missing", DataTypes.INT()));
+    }
+
+    @Test
+    public void testTableStatisticsReturnsUnknownWhenPaimonStatsAreMissingOrUnreadable()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+
+        PaimonMetadata missingStatsMetadata = new PaimonMetadata(new TestingPaimonCatalog(statisticsTable(rowType,
+                Optional.empty())), TESTING_TYPE_MANAGER);
+        assertThat(missingStatsMetadata.getTableStatistics(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
+                .isEqualTo(TableStatistics.empty());
+
+        PaimonMetadata failingStatsMetadata = new PaimonMetadata(new TestingPaimonCatalog(failingStatisticsTable(rowType)),
+                TESTING_TYPE_MANAGER);
+        assertThat(failingStatsMetadata.getTableStatistics(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
+                .isEqualTo(TableStatistics.empty());
+    }
+
+    @Test
+    public void testTableStatisticsDoesNotApplyFullTableStatsToFilteredOrLimitedHandles()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+        Statistics statistics = new Statistics(7, 3, 100L, 4096L, Map.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(statisticsTable(rowType, Optional.of(statistics))),
+                TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThat(metadata.getTableStatistics(SESSION, tableHandle.copy(OptionalLong.of(10))))
+                .isEqualTo(TableStatistics.empty());
+
+        PaimonColumnHandle columnHandle = PaimonColumnHandle.of("id", DataTypes.BIGINT());
+        assertThat(metadata.getTableStatistics(SESSION, tableHandle.copy(TupleDomain.withColumnDomains(Map.of(
+                columnHandle,
+                Domain.singleValue(BIGINT, 1L))))))
+                .isEqualTo(TableStatistics.empty());
+        assertThat(metadata.getTableStatistics(SESSION, new PaimonTableHandle("schema", "table", Map.of(
+                CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"))))
+                .isEqualTo(TableStatistics.empty());
+
+        TableStatistics emptyFilteredStats = metadata.getTableStatistics(SESSION, tableHandle.copy(TupleDomain.none()));
+        assertThat(emptyFilteredStats.getRowCount().getValue()).isEqualTo(0);
+        assertThat(emptyFilteredStats.getColumnStatistics()).isEmpty();
+
+        TableStatistics zeroLimitStats = metadata.getTableStatistics(SESSION, tableHandle.copy(OptionalLong.of(0)));
+        assertThat(zeroLimitStats.getRowCount().getValue()).isEqualTo(0);
+        assertThat(zeroLimitStats.getColumnStatistics()).isEmpty();
     }
 
     @Test
@@ -4662,6 +4748,34 @@ public class PaimonMetadataTableModeTest
                 (proxy, method, args) -> switch (method.getName()) {
                     case "copy" -> proxy;
                     case "toString" -> "testing-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Table statisticsTable(org.apache.paimon.types.RowType rowType, Optional<Statistics> statistics)
+    {
+        return (Table) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
+                    case "rowType" -> rowType;
+                    case "statistics" -> statistics;
+                    case "toString" -> "statistics-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Table failingStatisticsTable(org.apache.paimon.types.RowType rowType)
+    {
+        return (Table) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
+                    case "rowType" -> rowType;
+                    case "statistics" -> throw new RuntimeException("stats file is unreadable");
+                    case "toString" -> "failing-statistics-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
