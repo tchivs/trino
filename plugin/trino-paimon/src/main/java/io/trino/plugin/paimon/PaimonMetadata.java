@@ -1152,7 +1152,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     : table.options();
             return Optional.of(Map.copyOf(options));
         }
-        catch (Catalog.TableNotExistException | RuntimeException e) {
+        catch (Catalog.TableNotExistException e) {
             return Optional.empty();
         }
     }
