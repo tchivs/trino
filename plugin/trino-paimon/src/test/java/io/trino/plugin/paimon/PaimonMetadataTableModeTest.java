@@ -3895,6 +3895,27 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetTablePropertiesPropagatesExistingOptionsReadFailure()
+    {
+        IllegalStateException failure = new IllegalStateException("catalog options read failed");
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog()
+        {
+            @Override
+            public Table getTable(Identifier identifier)
+            {
+                assertThat(identifier.getFullName()).isEqualTo("schema.table");
+                throw failure;
+            }
+        };
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))))
+                .isSameAs(failure);
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testCheckedTruncateFailureUsesPaimonMetadataError()
     {
         IOException failure = new IOException("truncate metastore I/O failed");
@@ -6377,6 +6398,13 @@ public class PaimonMetadataTableModeTest
         }
 
         @Override
+        public Table getTable(Identifier identifier)
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            return schemaOptionsFileStoreTable(Map.of(CoreOptions.BUCKET.key(), "4"));
+        }
+
+        @Override
         public void alterTable(Identifier identifier, List<SchemaChange> changes, boolean ignoreIfNotExists)
         {
             assertThat(identifier.getFullName()).isEqualTo("schema.table");
@@ -6402,6 +6430,13 @@ public class PaimonMetadataTableModeTest
         public Catalog forSession(ConnectorSession connectorSession)
         {
             return this;
+        }
+
+        @Override
+        public Table getTable(Identifier identifier)
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            return schemaOptionsFileStoreTable(Map.of(CoreOptions.BUCKET.key(), "4"));
         }
 
         @Override
