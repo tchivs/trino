@@ -2486,6 +2486,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
         catch (TrinoException e) {
             throw e;
         }
+        catch (UnsupportedOperationException e) {
+            String detail = e.getMessage();
+            throw new TrinoException(NOT_SUPPORTED,
+                    detail == null || detail.isBlank()
+                            ? "Paimon " + operation + " uses features which are not supported by the Trino connector"
+                            : "Paimon " + operation + " uses features which are not supported by the Trino connector: " + detail,
+                    e);
+        }
         catch (Exception e) {
             throw paimonMetadataException(
                     format("Failed to %s Paimon table '%s'", failureOperation, paimonTableHandle.getTableName()),

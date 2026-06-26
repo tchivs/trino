@@ -2385,6 +2385,61 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testTruncateUnsupportedCommitFailuresUseNotSupported()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        RuntimeException truncateFailure = new UnsupportedOperationException("truncate is unsupported by catalog");
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated,
+                new AtomicReference<>(), truncateFailure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertTrinoError(() -> metadata.truncateTable(SESSION, new PaimonTableHandle("schema", "table", Map.of())),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon truncate table uses features which are not supported by the Trino connector: truncate is unsupported by catalog");
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testPartitionDeleteUnsupportedCommitFailuresUseNotSupported()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        RuntimeException truncateFailure = new UnsupportedOperationException("partition truncate is unsupported");
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                DataTypes.FIELD(1, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType, List.of("dt"), Map.of(CoreOptions.BUCKET.key(), "1"), truncateFailure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(dt, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-06-26")))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        ConnectorTableHandle deleteHandle = metadata.applyDelete(SESSION, tableHandle).orElseThrow();
+        assertTrinoError(() -> metadata.executeDelete(SESSION, deleteHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon delete uses features which are not supported by the Trino connector: partition truncate is unsupported");
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
     public void testExecuteDeleteRejectsFilteredTableHandle()
     {
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED)),
@@ -6347,8 +6402,15 @@ public class PaimonMetadataTableModeTest
     private static FileStoreTable truncateFileStoreTable(AtomicBoolean copiedWithLatestSchema, AtomicBoolean truncated,
             AtomicReference<List<Map<String, String>>> truncatedPartitions)
     {
+        return truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions, null);
+    }
+
+    private static FileStoreTable truncateFileStoreTable(AtomicBoolean copiedWithLatestSchema, AtomicBoolean truncated,
+            AtomicReference<List<Map<String, String>>> truncatedPartitions, RuntimeException truncateFailure)
+    {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
-        return truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions, rowType, List.of("id"));
+        return truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions, rowType, List.of("id"),
+                Map.of(CoreOptions.BUCKET.key(), "1"), truncateFailure);
     }
 
     private static FileStoreTable truncateFileStoreTable(
@@ -6375,16 +6437,35 @@ public class PaimonMetadataTableModeTest
             List<String> partitionKeys,
             Map<String, String> options)
     {
+        return truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions, rowType,
+                partitionKeys, options, null);
+    }
+
+    private static FileStoreTable truncateFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicBoolean truncated,
+            AtomicReference<List<Map<String, String>>> truncatedPartitions,
+            org.apache.paimon.types.RowType rowType,
+            List<String> partitionKeys,
+            Map<String, String> options,
+            RuntimeException truncateFailure)
+    {
         AtomicReference<FileStoreTable> latestTableRef = new AtomicReference<>();
         BatchTableCommit commit = (BatchTableCommit) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
                 new Class<?>[] {BatchTableCommit.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "truncateTable" -> {
+                        if (truncateFailure != null) {
+                            throw truncateFailure;
+                        }
                         truncated.set(true);
                         yield null;
                     }
                     case "truncatePartitions" -> {
+                        if (truncateFailure != null) {
+                            throw truncateFailure;
+                        }
                         @SuppressWarnings("unchecked")
                         List<Map<String, String>> partitions = (List<Map<String, String>>) args[0];
                         truncatedPartitions.set(partitions);
