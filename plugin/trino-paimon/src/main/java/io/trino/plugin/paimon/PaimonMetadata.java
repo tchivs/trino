@@ -1186,6 +1186,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Catalog sessionCatalog = catalog.forSession(session);
         Optional<Map<String, String>> existingOptions = Optional.empty();
         List<SchemaChange> changes = new ArrayList<>();
+        Set<String> updatedPaimonOptionKeys = new HashSet<>();
 
         // Handle both setting and removing options
         // When SET PROPERTIES x = DEFAULT is used, the value will be Optional.empty()
@@ -1193,6 +1194,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
             String propertyName = requireNonNull(entry.getKey(), "properties contains null property name");
             checkArgument(!StringUtils.isNullOrWhitespaceOnly(propertyName), "properties contains blank property name");
             String key = PaimonTableOptionUtils.toPaimonOptionKey(propertyName);
+            if (!updatedPaimonOptionKeys.add(key)) {
+                throw new TrinoException(INVALID_TABLE_PROPERTY,
+                        "Multiple table properties map to Paimon option '%s'".formatted(key));
+            }
             Optional<Object> value = requireNonNull(entry.getValue(),
                     "properties contains null value for property '%s'".formatted(propertyName));
 

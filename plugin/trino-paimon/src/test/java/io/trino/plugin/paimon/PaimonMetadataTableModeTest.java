@@ -4925,6 +4925,21 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetTablePropertiesRejectsDuplicatePaimonOptionKeys()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of(
+                        "vector_file_format", Optional.of("lance"),
+                        CoreOptions.VECTOR_FILE_FORMAT.key(), Optional.empty())),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Multiple table properties map to Paimon option '" + CoreOptions.VECTOR_FILE_FORMAT.key() + "'");
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testSetTablePropertiesRejectsLayoutProperties()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
