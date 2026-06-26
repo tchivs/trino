@@ -909,7 +909,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Map<String, Object> result = new HashMap<>();
         copySchemaProperty(properties, result, LOCATION_PROPERTY);
         copySchemaProperty(properties, result, COMMENT_PROPERTY);
-        copySchemaProperty(properties, result, OWNER_PROPERTY);
         return Map.copyOf(result);
     }
 

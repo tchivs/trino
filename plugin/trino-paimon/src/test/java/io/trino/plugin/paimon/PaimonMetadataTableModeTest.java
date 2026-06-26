@@ -5216,14 +5216,13 @@ public class PaimonMetadataTableModeTest
 
         assertThat(metadata.getSchemaProperties(SESSION, "schema")).containsExactlyInAnyOrderEntriesOf(Map.of(
                 LOCATION_PROPERTY, "s3://warehouse/schema",
-                COMMENT_PROPERTY, "schema comment",
-                OWNER_PROPERTY, "schema_owner"));
+                COMMENT_PROPERTY, "schema comment"));
         assertThat(metadata.getSchemaOwner(SESSION, "schema"))
                 .contains(new TrinoPrincipal(PrincipalType.USER, "schema_owner"));
         assertThat(metadata.getSchemaOwner(SESSION, "schema_with_role_owner"))
                 .contains(new TrinoPrincipal(PrincipalType.ROLE, "schema_role"));
         assertThat(metadata.getSchemaProperties(SESSION, "schema_with_role_owner"))
-                .containsExactlyInAnyOrderEntriesOf(Map.of(OWNER_PROPERTY, "schema_role"));
+                .isEmpty();
         assertThat(metadata.getSchemaOwner(SESSION, "schema_without_owner"))
                 .isEmpty();
         assertThat(metadata.getSchemaOwner(SESSION, "schema_with_blank_owner"))
