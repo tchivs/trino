@@ -133,6 +133,36 @@ public class TestTrinoPaimonFileFormatProvider
     }
 
     @Test
+    void testStatsExtractorRejectsMismatchedWriterMetadataAsIoFailure()
+            throws Exception
+    {
+        RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "name", DataTypes.STRING()));
+        Path file = new Path(tempDir.resolve("stats-mismatch.parquet").toUri().toString());
+        LocalFileIO fileIO = LocalFileIO.create();
+        FileFormat trinoFormat = FileFormat.fromIdentifier("parquet", trinoFormatOptions());
+        Object writerMetadata;
+        try (PositionOutputStream out = fileIO.newOutputStream(file, false)) {
+            FormatWriter writer = trinoFormat.createWriterFactory(rowType).create(out, "snappy");
+            writer.addElement(GenericRow.of(1, BinaryString.fromString("alpha")));
+            writer.close();
+            writerMetadata = writer.writerMetadata();
+        }
+
+        SimpleStatsExtractor mismatchedStatsExtractor = trinoFormat.createStatsExtractor(
+                DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())),
+                new SimpleColStatsCollector.Factory[] {
+                        SimpleColStatsCollector.from("FULL"),
+                })
+                .orElseThrow();
+
+        assertThatThrownBy(() -> mismatchedStatsExtractor.extract(fileIO, file, 0, writerMetadata))
+                .isInstanceOf(IOException.class)
+                .hasMessage("Trino Paimon writer metadata column stats count 2 does not match stats collector count 1");
+    }
+
+    @Test
     void testPaimonTableWriteStoresFormatColumnStatsInDataFileMeta()
             throws Exception
     {

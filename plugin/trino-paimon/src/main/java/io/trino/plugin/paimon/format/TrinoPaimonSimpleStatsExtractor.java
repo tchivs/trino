@@ -58,11 +58,11 @@ class TrinoPaimonSimpleStatsExtractor
     {
         if (writerMetadata instanceof TrinoPaimonFormatWriter.WriterMetadata metadata) {
             SimpleColStats[] fullStats = metadata.simpleColStats();
-            checkArgument(
-                    fullStats.length == statsCollectors.length,
-                    "writer stats count %s does not match stats collector count %s",
-                    fullStats.length,
-                    statsCollectors.length);
+            if (fullStats.length != statsCollectors.length) {
+                throw new IOException(
+                        "Trino Paimon writer metadata column stats count " + fullStats.length
+                                + " does not match stats collector count " + statsCollectors.length);
+            }
             SimpleColStats[] result = new SimpleColStats[fullStats.length];
             for (int i = 0; i < result.length; i++) {
                 result[i] = statsCollectors[i].convert(fullStats[i]);
