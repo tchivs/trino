@@ -3673,6 +3673,54 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDdlRejectsCaseInsensitiveDuplicateColumnTargets()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "Id", DataTypes.INT()),
+                DataTypes.FIELD(1, "Payload", DataTypes.STRING()));
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType,
+                List.of(), List.of(), "");
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.addColumn(SESSION, tableHandle, new ColumnMetadata("payload", VARCHAR)),
+                COLUMN_ALREADY_EXISTS.toErrorCode(),
+                "Column 'payload' already exists in Paimon schema scope 'schema.table'");
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle,
+                        PaimonColumnHandle.of("id", DataTypes.INT()), "payload"),
+                COLUMN_ALREADY_EXISTS.toErrorCode(),
+                "Column 'payload' already exists in Paimon schema scope 'schema.table'");
+
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
+    public void testNestedDdlRejectsCaseInsensitiveDuplicateFieldTargets()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "Payload", DataTypes.ROW(
+                        DataTypes.FIELD(1, "Zip", DataTypes.INT()),
+                        DataTypes.FIELD(2, "City", DataTypes.STRING()))));
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType,
+                List.of(), List.of(), "");
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.addField(SESSION, tableHandle, List.of("payload"), "zip", INTEGER, false),
+                COLUMN_ALREADY_EXISTS.toErrorCode(),
+                "Column 'zip' already exists in Paimon schema scope 'Payload.zip'");
+        assertTrinoError(() -> metadata.renameField(SESSION, tableHandle, List.of("payload", "city"), "zip"),
+                COLUMN_ALREADY_EXISTS.toErrorCode(),
+                "Column 'zip' already exists in Paimon schema scope 'Payload.City'");
+        assertThatCode(() -> metadata.addField(SESSION, tableHandle, List.of("payload"), "zip", INTEGER, true))
+                .doesNotThrowAnyException();
+
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testDdlProtectsKeyColumnsCaseInsensitively()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
