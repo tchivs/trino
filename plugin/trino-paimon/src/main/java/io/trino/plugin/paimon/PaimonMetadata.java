@@ -45,6 +45,7 @@ import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.ComputedStatistics;
@@ -856,7 +857,26 @@ public record PaimonMetadata(PaimonCatalog catalog,
     @Override
     public Optional<TrinoPrincipal> getSchemaOwner(ConnectorSession session, String schemaName)
     {
-        return Optional.empty();
+        requireNonNull(session, "session is null");
+        checkArgument(!StringUtils.isNullOrWhitespaceOnly(schemaName), "schemaName cannot be null or empty");
+        if (SYSTEM_DATABASE_NAME.equals(schemaName)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon schema owner is not supported for the system schema '" + SYSTEM_DATABASE_NAME + "'");
+        }
+        try {
+            Catalog sessionCatalog = catalog.forSession(session);
+            String owner = sessionCatalog.getDatabase(schemaName).options().get(OWNER_PROPERTY);
+            if (owner == null || owner.isBlank()) {
+                return Optional.empty();
+            }
+            return Optional.of(new TrinoPrincipal(PrincipalType.USER, owner));
+        }
+        catch (Catalog.DatabaseNotExistException e) {
+            throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schemaName), e);
+        }
+        catch (Exception e) {
+            throw paimonMetadataException(format("Failed to get Paimon schema owner for '%s'", schemaName), e);
+        }
     }
 
     @Override
