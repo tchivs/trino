@@ -354,6 +354,39 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return match;
     }
 
+    private static void validateNoCaseInsensitiveDuplicateColumnName(
+            FileStoreTable table,
+            SchemaTableName tableName,
+            String columnName,
+            Optional<String> existingColumnName)
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(tableName, "tableName is null");
+        validateNoCaseInsensitiveDuplicateFieldName(table.rowType().getFields(), tableName.toString(), columnName,
+                existingColumnName);
+    }
+
+    private static void validateNoCaseInsensitiveDuplicateFieldName(
+            List<DataField> fields,
+            String scopeName,
+            String fieldName,
+            Optional<String> existingFieldName)
+    {
+        requireNonNull(fields, "fields is null");
+        requireNonNull(scopeName, "scopeName is null");
+        validateFieldName("fieldName", fieldName);
+        requireNonNull(existingFieldName, "existingFieldName is null");
+        String lowerFieldName = FieldNameUtils.toLowerCase(fieldName);
+        Optional<String> lowerExistingFieldName = existingFieldName.map(FieldNameUtils::toLowerCase);
+        for (DataField field : fields) {
+            String lowerExistingName = FieldNameUtils.toLowerCase(field.name());
+            if (lowerExistingName.equals(lowerFieldName) && !lowerExistingFieldName.equals(Optional.of(lowerExistingName))) {
+                throw new TrinoException(COLUMN_ALREADY_EXISTS,
+                        "Column '%s' already exists in Paimon schema scope '%s'".formatted(fieldName, scopeName));
+            }
+        }
+    }
+
     @Override
     public Optional<ConnectorOutputMetadata> finishCreateTable(ConnectorSession session,
             ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments,
@@ -622,6 +655,22 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 throw new TrinoException(TABLE_NOT_FOUND,
                         format("Table '%s' does not exist", schemaTableName(tableHandle)),
                         e.getCause() != null ? e.getCause() : e);
+            }
+            throw e;
+        }
+    }
+
+    private static Optional<FileStoreTable> tryLatestWriteFileStoreTable(
+            PaimonTableHandle tableHandle,
+            Catalog sessionCatalog,
+            String operation)
+    {
+        try {
+            return Optional.of(latestWriteFileStoreTable(tableHandle, sessionCatalog, operation));
+        }
+        catch (TrinoException e) {
+            if (e.getErrorCode().equals(TABLE_NOT_FOUND.toErrorCode())) {
+                return Optional.empty();
             }
             throw e;
         }
@@ -1485,6 +1534,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return paimonMetadataException(format("Failed to alter Paimon table '%s'", tableName), exception);
     }
 
+    private static boolean isColumnAlreadyExistsException(Exception exception)
+    {
+        return exception instanceof Catalog.ColumnAlreadyExistException
+                || (exception instanceof TrinoException trinoException
+                && trinoException.getErrorCode().equals(COLUMN_ALREADY_EXISTS.toErrorCode()));
+    }
+
     private static SchemaTableName schemaTableName(PaimonTableHandle tableHandle)
     {
         return new SchemaTableName(tableHandle.getSchemaName(), tableHandle.getTableName());
@@ -1669,9 +1725,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.addColumn(column.getName(), toPaimonType(column), column.getComment(), null));
         try {
             Catalog sessionCatalog = catalog.forSession(session);
+            tryLatestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "add column")
+                    .ifPresent(table -> validateNoCaseInsensitiveDuplicateColumnName(
+                            table, schemaTableName(paimonTableHandle), column.getName(), Optional.empty()));
+            changes.add(SchemaChange.addColumn(column.getName(), toPaimonType(column), column.getComment(), null));
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1696,6 +1755,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
         String sourceColumnName = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle).name();
         PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(table);
         rejectPartitionKeyChange("rename column", "rename", paimonColumnHandle, schemaEvolutionKeys);
+        validateNoCaseInsensitiveDuplicateColumnName(table, schemaTableName(paimonTableHandle), target,
+                Optional.of(sourceColumnName));
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.renameColumn(sourceColumnName, target));
         try {
@@ -1853,14 +1914,24 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            if (fieldNames.length > 1) {
-                fieldNames = canonicalNestedFieldNames(sessionCatalog, paimonTableHandle, fieldNames, false);
+            Optional<FileStoreTable> table = tryLatestWriteFileStoreTable(paimonTableHandle, sessionCatalog,
+                    "nested field schema change");
+            if (table.isPresent()) {
+                if (fieldNames.length > 1) {
+                    fieldNames = canonicalNestedFieldNames(table.get(), paimonTableHandle, fieldNames, false);
+                    validateNoCaseInsensitiveDuplicateNestedFieldName(table.get(), paimonTableHandle, fieldNames,
+                            fieldName, Optional.empty());
+                }
+                else {
+                    validateNoCaseInsensitiveDuplicateColumnName(table.get(), schemaTableName(paimonTableHandle),
+                            fieldName, Optional.empty());
+                }
             }
             changes.add(SchemaChange.addColumn(fieldNames, paimonType, null, null));
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
-            if (ignoreExisting && e instanceof Catalog.ColumnAlreadyExistException) {
+            if (ignoreExisting && isColumnAlreadyExistsException(e)) {
                 return;
             }
             throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
@@ -1886,7 +1957,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            fieldNames = canonicalNestedFieldNames(sessionCatalog, paimonTableHandle, fieldNames, true);
+            FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog,
+                    "nested field schema change");
+            fieldNames = canonicalNestedFieldNames(table, paimonTableHandle, fieldNames, true);
             changes.add(SchemaChange.dropColumn(fieldNames));
             sessionCatalog.alterTable(identifier, changes, false);
         }
@@ -1914,7 +1987,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            fieldNames = canonicalNestedFieldNames(sessionCatalog, paimonTableHandle, fieldNames, true);
+            FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog,
+                    "nested field schema change");
+            fieldNames = canonicalNestedFieldNames(table, paimonTableHandle, fieldNames, true);
+            if (fieldNames.length == 1) {
+                validateNoCaseInsensitiveDuplicateColumnName(table, schemaTableName(paimonTableHandle), target,
+                        Optional.of(fieldNames[0]));
+            }
+            else {
+                validateNoCaseInsensitiveDuplicateNestedFieldName(table, paimonTableHandle, fieldNames, target,
+                        Optional.of(fieldNames[fieldNames.length - 1]));
+            }
             changes.add(SchemaChange.renameColumn(fieldNames, target));
             sessionCatalog.alterTable(identifier, changes, false);
         }
@@ -1944,7 +2027,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            fieldNames = canonicalNestedFieldNames(sessionCatalog, paimonTableHandle, fieldNames, true);
+            FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog,
+                    "nested field schema change");
+            fieldNames = canonicalNestedFieldNames(table, paimonTableHandle, fieldNames, true);
             changes.add(SchemaChange.updateColumnType(fieldNames, paimonType, true));
             sessionCatalog.alterTable(identifier, changes, false);
         }
@@ -1960,13 +2045,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
     }
 
     private static String[] canonicalNestedFieldNames(
-            Catalog sessionCatalog,
+            FileStoreTable table,
             PaimonTableHandle tableHandle,
             String[] fieldNames,
             boolean includeLeaf)
-            throws Catalog.TableNotExistException, Catalog.ColumnNotExistException
+            throws Catalog.ColumnNotExistException
     {
-        FileStoreTable table = latestWriteFileStoreTable(tableHandle, sessionCatalog, "nested field schema change");
+        requireNonNull(table, "table is null");
         String[] canonicalFieldNames = fieldNames.clone();
         DataType currentType = table.rowType();
         int limit = includeLeaf ? canonicalFieldNames.length : canonicalFieldNames.length - 1;
@@ -1976,6 +2061,34 @@ public record PaimonMetadata(PaimonCatalog catalog,
             currentType = nestedType(field.type());
         }
         return canonicalFieldNames;
+    }
+
+    private static void validateNoCaseInsensitiveDuplicateNestedFieldName(
+            FileStoreTable table,
+            PaimonTableHandle tableHandle,
+            String[] fieldNames,
+            String fieldName,
+            Optional<String> existingFieldName)
+            throws Catalog.ColumnNotExistException
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(fieldNames, "fieldNames is null");
+        if (fieldNames.length < 2) {
+            throw new IllegalArgumentException("fieldNames must contain a parent path and field name");
+        }
+
+        DataType currentType = table.rowType();
+        for (int index = 0; index < fieldNames.length - 1; index++) {
+            DataField field = canonicalNestedField(tableHandle, currentType, fieldNames, index);
+            currentType = nestedType(field.type());
+        }
+        if (!(currentType instanceof RowType rowType)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon nested field schema change is not supported for non-row field path '"
+                            + String.join(".", fieldNames) + "'");
+        }
+        validateNoCaseInsensitiveDuplicateFieldName(rowType.getFields(), String.join(".", fieldNames), fieldName,
+                existingFieldName);
     }
 
     private static DataField canonicalNestedField(
