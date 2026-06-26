@@ -482,6 +482,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
             if (e instanceof TrinoException trinoException) {
                 throw trinoException;
             }
+            if (e instanceof UnsupportedOperationException unsupportedOperationException) {
+                String detail = unsupportedOperationException.getMessage();
+                throw new TrinoException(NOT_SUPPORTED,
+                        detail == null || detail.isBlank()
+                                ? "Paimon commit uses features which are not supported by the Trino connector"
+                                : "Paimon commit uses features which are not supported by the Trino connector: " + detail,
+                        unsupportedOperationException);
+            }
             if (e instanceof IllegalArgumentException || e instanceof IllegalStateException) {
                 throw (RuntimeException) e;
             }

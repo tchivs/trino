@@ -2574,6 +2574,27 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testFinishInsertUnsupportedCommitFailuresUseNotSupported()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        RuntimeException commitFailure = new UnsupportedOperationException("commit feature is unsupported");
+        FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(),
+                commitFailure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        Slice fragment = commitFragment();
+
+        assertTrinoError(() -> metadata.finishInsert(SESSION, tableHandle, List.of(fragment), List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon commit uses features which are not supported by the Trino connector: commit feature is unsupported");
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(committed).isFalse();
+    }
+
+    @Test
     public void testApplyLimitInitializesCatalogBeforeFilteredTableLookup()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED));
