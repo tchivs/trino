@@ -2644,9 +2644,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
         try {
             Catalog sessionCatalog = catalog.forSession(session);
             if (replace) {
+                Optional<org.apache.paimon.view.View> existingView = existingView(sessionCatalog, identifier);
                 sessionCatalog.dropView(identifier, true);
+                try {
+                    sessionCatalog.createView(identifier, paimonView, false);
+                }
+                catch (Exception e) {
+                    restoreReplacedView(sessionCatalog, identifier, existingView, e);
+                    throw e;
+                }
             }
-            sessionCatalog.createView(identifier, paimonView, false);
+            else {
+                sessionCatalog.createView(identifier, paimonView, false);
+            }
         }
         catch (Catalog.ViewAlreadyExistException e) {
             throw new TrinoException(io.trino.spi.StandardErrorCode.ALREADY_EXISTS,
@@ -2661,6 +2671,36 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         catch (Exception e) {
             throw paimonViewException(format("Failed to create view '%s'", viewName), e);
+        }
+    }
+
+    private static Optional<org.apache.paimon.view.View> existingView(Catalog catalog, Identifier identifier)
+    {
+        try {
+            return Optional.of(catalog.getView(identifier));
+        }
+        catch (Catalog.ViewNotExistException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static void restoreReplacedView(
+            Catalog catalog,
+            Identifier identifier,
+            Optional<org.apache.paimon.view.View> existingView,
+            Exception failure)
+    {
+        if (existingView.isEmpty()) {
+            return;
+        }
+        try {
+            catalog.createView(identifier, existingView.get(), true);
+        }
+        catch (Exception restoreFailure) {
+            failure.addSuppressed(restoreFailure);
+            if (failure.getCause() instanceof Exception nestedFailure) {
+                nestedFailure.addSuppressed(restoreFailure);
+            }
         }
     }
 
