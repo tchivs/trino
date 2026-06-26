@@ -5039,6 +5039,22 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetTablePropertiesRejectsImmutablePaimonOptions()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of(
+                "merge_engine", Optional.of("partial-update"),
+                "sequence_snapshot_ordering", Optional.of("true"),
+                "blob_external_storage_path", Optional.empty())),
+                NOT_SUPPORTED.toErrorCode(),
+                "The following properties cannot be updated: blob_external_storage_path, merge_engine, sequence_snapshot_ordering");
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testSetTablePropertiesRejectsRuntimeReadSelectors()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
