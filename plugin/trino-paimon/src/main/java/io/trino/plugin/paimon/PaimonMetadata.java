@@ -326,6 +326,34 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 tableName, columnName));
     }
 
+    private static DataField canonicalColumn(
+            FileStoreTable table,
+            SchemaTableName tableName,
+            PaimonColumnHandle columnHandle)
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(columnHandle, "columnHandle is null");
+        String lowerColumnName = FieldNameUtils.toLowerCase(columnHandle.getColumnName());
+        DataField match = null;
+        for (DataField field : table.rowType().getFields()) {
+            if (FieldNameUtils.toLowerCase(field.name()).equals(lowerColumnName)) {
+                if (match != null) {
+                    throw new TrinoException(NOT_SUPPORTED,
+                            "Paimon schema change is ambiguous for case-insensitive column name '"
+                                    + lowerColumnName + "'");
+                }
+                match = field;
+            }
+        }
+        if (match == null) {
+            throw new TrinoException(COLUMN_NOT_FOUND,
+                    format("Column '%s' does not exist in table '%s'",
+                            columnHandle.getColumnName(),
+                            tableName));
+        }
+        return match;
+    }
+
     @Override
     public Optional<ConnectorOutputMetadata> finishCreateTable(ConnectorSession session,
             ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments,
@@ -1663,12 +1691,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectPaimonSystemColumn(paimonColumnHandle, "rename column");
         validateFieldName("target", target);
         rejectPaimonSystemColumnName("rename column", target);
-        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(session, paimonTableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "rename column");
+        String sourceColumnName = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle).name();
+        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(table);
         rejectPartitionKeyChange("rename column", "rename", paimonColumnHandle, schemaEvolutionKeys);
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.renameColumn(paimonColumnHandle.getColumnName(), target));
+        changes.add(SchemaChange.renameColumn(sourceColumnName, target));
         try {
-            Catalog sessionCatalog = catalog.forSession(session);
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1685,12 +1715,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop column", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "drop column");
-        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(session, paimonTableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "drop column");
+        String columnName = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle).name();
+        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(table);
         rejectPartitionOrPrimaryKeyDrop(paimonColumnHandle, schemaEvolutionKeys);
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.dropColumn(paimonColumnHandle.getColumnName()));
+        changes.add(SchemaChange.dropColumn(columnName));
         try {
-            Catalog sessionCatalog = catalog.forSession(session);
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1728,10 +1760,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("set column comment", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "set column comment");
         requireNonNull(comment, "comment is null");
+        Catalog sessionCatalog = catalog.forSession(session);
+        FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "set column comment");
+        String columnName = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle).name();
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.updateColumnComment(paimonColumnHandle.getColumnName(), comment.orElse(null)));
+        changes.add(SchemaChange.updateColumnComment(columnName, comment.orElse(null)));
         try {
-            Catalog sessionCatalog = catalog.forSession(session);
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1750,18 +1784,21 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("set column type", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "set column type");
         requireNonNull(type, "type is null");
-        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(session, paimonTableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "set column type");
+        DataField field = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle);
+        String columnName = field.name();
+        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(table);
         rejectPartitionKeyChange("set column type", "update", paimonColumnHandle, schemaEvolutionKeys);
         rejectPrimaryKeyChange("set column type", "update", paimonColumnHandle, schemaEvolutionKeys);
 
         DataType paimonType = PaimonTypeUtils.toPaimonType(type)
-                .copy(paimonColumnHandle.logicalType().isNullable());
+                .copy(field.type().isNullable());
 
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.updateColumnType(paimonColumnHandle.getColumnName(), paimonType, true));
+        changes.add(SchemaChange.updateColumnType(columnName, paimonType, true));
 
         try {
-            Catalog sessionCatalog = catalog.forSession(session);
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1778,15 +1815,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop not null constraint", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "drop not null constraint");
-        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(session, paimonTableHandle);
+        Catalog sessionCatalog = catalog.forSession(session);
+        FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "drop not null constraint");
+        String columnName = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle).name();
+        PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(table);
         rejectPrimaryKeyChange("drop not null constraint", "change nullability of", paimonColumnHandle,
                 schemaEvolutionKeys);
 
         List<SchemaChange> changes = new ArrayList<>();
-        changes.add(SchemaChange.updateColumnNullability(paimonColumnHandle.getColumnName(), true));
+        changes.add(SchemaChange.updateColumnNullability(columnName, true));
 
         try {
-            Catalog sessionCatalog = catalog.forSession(session);
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {
@@ -1914,10 +1953,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
-    private PaimonSchemaEvolutionKeys schemaEvolutionKeys(ConnectorSession session, PaimonTableHandle tableHandle)
+    private static PaimonSchemaEvolutionKeys schemaEvolutionKeys(FileStoreTable table)
     {
-        Catalog sessionCatalog = catalog.forSession(session);
-        Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
+        requireNonNull(table, "table is null");
         return new PaimonSchemaEvolutionKeys(table.partitionKeys(), table.primaryKeys());
     }
 
@@ -2022,17 +2060,18 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         private PaimonSchemaEvolutionKeys(List<String> partitionKeys, List<String> primaryKeys)
         {
-            this(Set.copyOf(partitionKeys), Set.copyOf(primaryKeys));
+            this(FieldNameUtils.toLowerCase(partitionKeys).stream().collect(Collectors.toUnmodifiableSet()),
+                    FieldNameUtils.toLowerCase(primaryKeys).stream().collect(Collectors.toUnmodifiableSet()));
         }
 
         private boolean isPartitionKey(PaimonColumnHandle columnHandle)
         {
-            return partitionKeys.contains(columnHandle.getColumnName());
+            return partitionKeys.contains(FieldNameUtils.toLowerCase(columnHandle.getColumnName()));
         }
 
         private boolean isPrimaryKey(PaimonColumnHandle columnHandle)
         {
-            return primaryKeys.contains(columnHandle.getColumnName());
+            return primaryKeys.contains(FieldNameUtils.toLowerCase(columnHandle.getColumnName()));
         }
     }
 
