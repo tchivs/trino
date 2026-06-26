@@ -738,6 +738,18 @@ public class PaimonPageSinkProviderTest
 
         assertThat(PaimonPageSink.wrapWriterCloseException(contractViolation)).isSameAs(contractViolation);
         assertThat(PaimonPageSink.wrapWriterCloseException(alreadyMapped)).isSameAs(alreadyMapped);
+        assertThat(PaimonPageSink.wrapWriterCloseException(unsupported))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon writer close uses features which are not supported by the Trino connector: unsupported nested type");
+                    assertThat(exception.getCause()).isSameAs(unsupported);
+                });
+        assertThat(PaimonPageSink.wrapWriterCloseException(unsupportedWithoutMessage))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon writer close uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(unsupportedWithoutMessage);
+                });
         assertThat(PaimonPageSink.wrapWriterCloseException(writeFailure))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_CLOSE_ERROR.toErrorCode());
