@@ -105,6 +105,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -147,6 +148,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 {
     private static final int MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE = 1000;
     private static final int MAX_PARTITION_DELETE_SPECS = 1024;
+    private static final String TRINO_SCHEMA_OWNER_TYPE_PROPERTY = "trino.owner-type";
     private static final Set<String> UNSUPPORTED_PAIMON_OPTION_UPDATES = Set.of(
             CoreOptions.BUCKET_KEY.key(),
             CoreOptions.BUCKET_FUNCTION_TYPE.key(),
@@ -865,11 +867,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            String owner = sessionCatalog.getDatabase(schemaName).options().get(OWNER_PROPERTY);
+            Map<String, String> properties = sessionCatalog.getDatabase(schemaName).options();
+            String owner = properties.get(OWNER_PROPERTY);
             if (owner == null || owner.isBlank()) {
                 return Optional.empty();
             }
-            return Optional.of(new TrinoPrincipal(PrincipalType.USER, owner));
+            return Optional.of(new TrinoPrincipal(schemaOwnerType(properties), owner));
         }
         catch (Catalog.DatabaseNotExistException e) {
             throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schemaName), e);
@@ -889,8 +892,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            sessionCatalog.alterDatabase(schemaName, List.of(PropertyChange.setProperty(OWNER_PROPERTY,
-                    principal.getName())), false);
+            sessionCatalog.alterDatabase(schemaName, List.of(
+                    PropertyChange.setProperty(OWNER_PROPERTY, principal.getName()),
+                    PropertyChange.setProperty(TRINO_SCHEMA_OWNER_TYPE_PROPERTY, principal.getType().name())), false);
         }
         catch (Catalog.DatabaseNotExistException e) {
             throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schemaName), e);
@@ -920,9 +924,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
     private static Map<String, String> schemaProperties(Map<String, Object> properties, TrinoPrincipal owner)
     {
         Map<String, String> result = new HashMap<>();
+        boolean ownerPropertyProvided = false;
         for (Map.Entry<String, Object> entry : properties.entrySet()) {
             String propertyName = requireNonNull(entry.getKey(), "properties contains null property name");
             checkArgument(!StringUtils.isNullOrWhitespaceOnly(propertyName), "properties contains blank property name");
+            if (OWNER_PROPERTY.equals(propertyName)) {
+                ownerPropertyProvided = true;
+            }
             Object value = entry.getValue();
             if (value == null) {
                 continue;
@@ -937,8 +945,26 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         if (owner != null) {
             result.putIfAbsent(OWNER_PROPERTY, owner.getName());
+            if (!ownerPropertyProvided || owner.getName().equals(result.get(OWNER_PROPERTY))) {
+                result.put(TRINO_SCHEMA_OWNER_TYPE_PROPERTY, owner.getType().name());
+            }
         }
         return Map.copyOf(result);
+    }
+
+    private static PrincipalType schemaOwnerType(Map<String, String> properties)
+    {
+        String ownerType = properties.get(TRINO_SCHEMA_OWNER_TYPE_PROPERTY);
+        if (ownerType == null || ownerType.isBlank()) {
+            return PrincipalType.USER;
+        }
+        try {
+            return PrincipalType.valueOf(ownerType.toUpperCase(Locale.ENGLISH));
+        }
+        catch (IllegalArgumentException e) {
+            throw new TrinoException(PAIMON_METADATA_ERROR,
+                    "Invalid Paimon schema owner type '%s'".formatted(ownerType), e);
+        }
     }
 
     @Override

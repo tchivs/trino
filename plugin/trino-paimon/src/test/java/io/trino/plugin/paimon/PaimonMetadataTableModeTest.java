@@ -154,6 +154,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class PaimonMetadataTableModeTest
 {
+    private static final String TRINO_SCHEMA_OWNER_TYPE_PROPERTY = "trino.owner-type";
     private static final ConnectorSession SESSION = TestingConnectorSession.builder()
             .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
             .build();
@@ -5172,7 +5173,20 @@ public class PaimonMetadataTableModeTest
         assertThat(catalog.createdDatabaseProperties).containsExactlyInAnyOrderEntriesOf(Map.of(
                 LOCATION_PROPERTY, "s3://warehouse/schema",
                 COMMENT_PROPERTY, "schema comment",
-                OWNER_PROPERTY, "schema_owner"));
+                OWNER_PROPERTY, "schema_owner",
+                TRINO_SCHEMA_OWNER_TYPE_PROPERTY, PrincipalType.USER.name()));
+
+        metadata.createSchema(SESSION, "role_schema", Map.of(
+                        LOCATION_PROPERTY, "s3://warehouse/role_schema",
+                        COMMENT_PROPERTY, "role schema comment"),
+                new TrinoPrincipal(PrincipalType.ROLE, "schema_role"));
+
+        assertThat(catalog.createdDatabase).isEqualTo("role_schema");
+        assertThat(catalog.createdDatabaseProperties).containsExactlyInAnyOrderEntriesOf(Map.of(
+                LOCATION_PROPERTY, "s3://warehouse/role_schema",
+                COMMENT_PROPERTY, "role schema comment",
+                OWNER_PROPERTY, "schema_role",
+                TRINO_SCHEMA_OWNER_TYPE_PROPERTY, PrincipalType.ROLE.name()));
     }
 
     @Test
@@ -5206,10 +5220,16 @@ public class PaimonMetadataTableModeTest
                 OWNER_PROPERTY, "schema_owner"));
         assertThat(metadata.getSchemaOwner(SESSION, "schema"))
                 .contains(new TrinoPrincipal(PrincipalType.USER, "schema_owner"));
+        assertThat(metadata.getSchemaOwner(SESSION, "schema_with_role_owner"))
+                .contains(new TrinoPrincipal(PrincipalType.ROLE, "schema_role"));
+        assertThat(metadata.getSchemaProperties(SESSION, "schema_with_role_owner"))
+                .containsExactlyInAnyOrderEntriesOf(Map.of(OWNER_PROPERTY, "schema_role"));
         assertThat(metadata.getSchemaOwner(SESSION, "schema_without_owner"))
                 .isEmpty();
         assertThat(metadata.getSchemaOwner(SESSION, "schema_with_blank_owner"))
                 .isEmpty();
+        assertTrinoError(() -> metadata.getSchemaOwner(SESSION, "schema_with_invalid_owner_type"),
+                PAIMON_METADATA_ERROR.toErrorCode(), "Invalid Paimon schema owner type 'GROUP'");
 
         assertTrinoError(() -> metadata.getSchemaProperties(SESSION, SYSTEM_DATABASE_NAME),
                 NOT_SUPPORTED.toErrorCode(),
@@ -5226,15 +5246,20 @@ public class PaimonMetadataTableModeTest
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
 
-        metadata.setSchemaAuthorization(SESSION, "schema", new TrinoPrincipal(PrincipalType.USER, "new_owner"));
+        metadata.setSchemaAuthorization(SESSION, "schema", new TrinoPrincipal(PrincipalType.ROLE, "new_role"));
 
         assertThat(catalog.alteredDatabase).isEqualTo("schema");
         assertThat(catalog.alterDatabaseIgnoreIfNotExists).isFalse();
-        assertThat(catalog.lastDatabasePropertyChanges)
-                .singleElement()
+        assertThat(catalog.lastDatabasePropertyChanges).hasSize(2);
+        assertThat(catalog.lastDatabasePropertyChanges.get(0))
                 .isInstanceOfSatisfying(PropertyChange.SetProperty.class, change -> {
                     assertThat(change.property()).isEqualTo(OWNER_PROPERTY);
-                    assertThat(change.value()).isEqualTo("new_owner");
+                    assertThat(change.value()).isEqualTo("new_role");
+                });
+        assertThat(catalog.lastDatabasePropertyChanges.get(1))
+                .isInstanceOfSatisfying(PropertyChange.SetProperty.class, change -> {
+                    assertThat(change.property()).isEqualTo(TRINO_SCHEMA_OWNER_TYPE_PROPERTY);
+                    assertThat(change.value()).isEqualTo(PrincipalType.ROLE.name());
                 });
         assertThat(catalog.initialized).isTrue();
     }
@@ -7598,7 +7623,8 @@ public class PaimonMetadataTableModeTest
         {
             assertThat(name).isEqualTo("schema");
             assertThat(ignoreIfNotExists).isFalse();
-            assertThat(changes).singleElement().isInstanceOf(PropertyChange.SetProperty.class);
+            assertThat(changes).hasSize(2);
+            assertThat(changes).allMatch(PropertyChange.SetProperty.class::isInstance);
             throw new RuntimeException(failure);
         }
     }
@@ -7852,6 +7878,14 @@ public class PaimonMetadataTableModeTest
                             COMMENT_PROPERTY, "schema comment",
                             OWNER_PROPERTY, "schema_owner",
                             "unregistered-paimon-property", "hidden"), "schema comment");
+                case "schema_with_role_owner":
+                    return Database.of(name, Map.of(
+                            OWNER_PROPERTY, "schema_role",
+                            TRINO_SCHEMA_OWNER_TYPE_PROPERTY, PrincipalType.ROLE.name()), null);
+                case "schema_with_invalid_owner_type":
+                    return Database.of(name, Map.of(
+                            OWNER_PROPERTY, "schema_owner",
+                            TRINO_SCHEMA_OWNER_TYPE_PROPERTY, "GROUP"), null);
                 case "schema_without_owner":
                     return Database.of(name, Map.of(
                             LOCATION_PROPERTY, "s3://warehouse/schema_without_owner"), null);
