@@ -1194,7 +1194,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 dynamicOptions);
         Catalog sessionCatalog = catalog.forSession(session);
         try {
-            sessionCatalog.getTable(Identifier.create(tableName.getSchemaName(), tableName.getTableName()));
+            PaimonTableSupport.requireSupportedTable(
+                    sessionCatalog.getTable(Identifier.create(tableName.getSchemaName(), tableName.getTableName())));
             return tableHandle;
         }
         catch (Catalog.TableNotExistException e) {
