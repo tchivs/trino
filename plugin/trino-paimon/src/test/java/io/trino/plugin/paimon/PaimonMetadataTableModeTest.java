@@ -2328,6 +2328,45 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testApplyDeleteDoesNotExpandTooManyPartitionFilters()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                DataTypes.FIELD(1, "region", DataTypes.INT()),
+                DataTypes.FIELD(2, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType, List.of("dt", "region"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        PaimonColumnHandle region = PaimonColumnHandle.of("region", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(
+                        dt, Domain.multipleValues(VARCHAR, IntStream.range(0, 33)
+                                .mapToObj(index -> Slices.utf8Slice("2026-06-" + index))
+                                .toList()),
+                        region, Domain.multipleValues(INTEGER, IntStream.range(0, 32)
+                                .mapToObj(Integer::toUnsignedLong)
+                                .toList()))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThat(metadata.applyDelete(SESSION, tableHandle)).isEmpty();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
     public void testExecuteDeleteUsesPaimonTruncateFastPath()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
@@ -2381,6 +2420,94 @@ public class PaimonMetadataTableModeTest
         assertThat(truncatedPartitions.get()).containsExactly(Map.of(
                 "dt", "2026-06-26",
                 "region", "7"));
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testExecuteDeleteNormalizesPartitionDeleteSpecsBeforeTruncate()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.DATE()),
+                DataTypes.FIELD(1, "region", DataTypes.INT()),
+                DataTypes.FIELD(2, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType,
+                List.of("dt", "region"),
+                Map.of(
+                        CoreOptions.BUCKET.key(), "1",
+                        CoreOptions.PARTITION_GENERATE_LEGACY_NAME.key(), "false"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.DATE());
+        PaimonColumnHandle region = PaimonColumnHandle.of("region", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(
+                        dt, Domain.singleValue(DATE, LocalDate.of(2026, 6, 26).toEpochDay()),
+                        region, Domain.singleValue(INTEGER, 7L))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+        Map<String, String> reversedPartitionSpec = new LinkedHashMap<>();
+        reversedPartitionSpec.put("region", "7");
+        reversedPartitionSpec.put("dt", "2026-06-26");
+
+        assertThat(metadata.executeDelete(SESSION, tableHandle.withDeletePartitionSpecs(List.of(reversedPartitionSpec))))
+                .isEmpty();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).containsExactly(Map.of(
+                "dt", "2026-06-26",
+                "region", "7"));
+        assertThat(truncatedPartitions.get().get(0).keySet()).containsExactly("dt", "region");
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testExecuteDeleteAcceptsPartitionDeleteSpecsInDifferentOrder()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                DataTypes.FIELD(1, "region", DataTypes.INT()),
+                DataTypes.FIELD(2, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType, List.of("dt", "region"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        PaimonColumnHandle region = PaimonColumnHandle.of("region", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(
+                        dt, Domain.multipleValues(VARCHAR, List.of(
+                                Slices.utf8Slice("2026-06-26"),
+                                Slices.utf8Slice("2026-06-27"))),
+                        region, Domain.singleValue(INTEGER, 7L))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty())
+                .withDeletePartitionSpecs(List.of(
+                        Map.of("dt", "2026-06-27", "region", "7"),
+                        Map.of("dt", "2026-06-26", "region", "7")));
+
+        assertThat(metadata.executeDelete(SESSION, tableHandle)).isEmpty();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).containsExactly(
+                Map.of("dt", "2026-06-27", "region", "7"),
+                Map.of("dt", "2026-06-26", "region", "7"));
         assertThat(catalog.initialized).isTrue();
     }
 
@@ -2491,6 +2618,116 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> metadata.executeDelete(SESSION, baseHandle.withDeletePartitionSpecs(tooManyPartitionSpecs)),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon partition delete requires between 1 and 1024 partition specs");
+    }
+
+    @Test
+    public void testExecuteDeleteRejectsInvalidPartitionDeleteSpecs()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                DataTypes.FIELD(1, "region", DataTypes.INT()),
+                DataTypes.FIELD(2, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType, List.of("dt", "region"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle baseHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertTrinoError(() -> metadata.executeDelete(SESSION, baseHandle.withDeletePartitionSpecs(List.of(Map.of(
+                        "dt", "2026-06-26")))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon partition delete requires complete partition specs for keys: [dt, region]");
+        assertTrinoError(() -> metadata.executeDelete(SESSION, baseHandle.withDeletePartitionSpecs(List.of(Map.of(
+                        "dt", "2026-06-26",
+                        "region", "not-an-int")))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon partition delete requires valid Paimon partition values");
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testExecuteDeleteRejectsPartitionDeleteSpecsMismatchedWithFilter()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                DataTypes.FIELD(1, "region", DataTypes.INT()),
+                DataTypes.FIELD(2, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType, List.of("dt", "region"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        PaimonColumnHandle region = PaimonColumnHandle.of("region", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(
+                        dt, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-06-26")),
+                        region, Domain.singleValue(INTEGER, 7L))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty())
+                .withDeletePartitionSpecs(List.of(Map.of(
+                        "dt", "2026-06-27",
+                        "region", "7")));
+
+        assertTrinoError(() -> metadata.executeDelete(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon delete requires partition delete specs to match the table handle filter");
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testExecuteDeleteRejectsPartitionDeleteSpecsForUnpartitionedTable()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType, List.of());
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle baseHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertTrinoError(() -> metadata.executeDelete(SESSION, baseHandle.withDeletePartitionSpecs(List.of(Map.of(
+                        "id", "1")))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon partition delete requires a partitioned table");
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
     }
 
     @Test
