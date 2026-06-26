@@ -256,6 +256,9 @@ public class PaimonMetadataTableModeTest
                         new TrinoPrincipal(PrincipalType.USER, "schema_owner")),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon set schema authorization is not supported for the system schema 'sys'");
+        assertTrinoError(() -> metadata.getSchemaOwner(SESSION, SYSTEM_DATABASE_NAME),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon schema owner is not supported for the system schema 'sys'");
         assertTrinoError(() -> metadata.setTableAuthorization(SESSION,
                         new SchemaTableName(SYSTEM_DATABASE_NAME, "all_tables"),
                         new TrinoPrincipal(PrincipalType.USER, "table_owner")),
@@ -4456,6 +4459,9 @@ public class PaimonMetadataTableModeTest
                         new TrinoPrincipal(PrincipalType.USER, "schema_owner")))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("session is null");
+        assertThatThrownBy(() -> metadata.getSchemaOwner(null, "schema"))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("session is null");
         assertThatThrownBy(() -> metadata.createSchema(SESSION, "schema", null, null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("properties is null");
@@ -4467,6 +4473,9 @@ public class PaimonMetadataTableModeTest
                 .hasMessage("principal is null");
         assertThatThrownBy(() -> metadata.setSchemaAuthorization(SESSION, " ",
                         new TrinoPrincipal(PrincipalType.USER, "schema_owner")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("schemaName cannot be null or empty");
+        assertThatThrownBy(() -> metadata.getSchemaOwner(SESSION, " "))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("schemaName cannot be null or empty");
         assertThatThrownBy(() -> metadata.dropSchema(null, "schema", false))
@@ -5196,12 +5205,18 @@ public class PaimonMetadataTableModeTest
                 COMMENT_PROPERTY, "schema comment",
                 OWNER_PROPERTY, "schema_owner"));
         assertThat(metadata.getSchemaOwner(SESSION, "schema"))
+                .contains(new TrinoPrincipal(PrincipalType.USER, "schema_owner"));
+        assertThat(metadata.getSchemaOwner(SESSION, "schema_without_owner"))
+                .isEmpty();
+        assertThat(metadata.getSchemaOwner(SESSION, "schema_with_blank_owner"))
                 .isEmpty();
 
         assertTrinoError(() -> metadata.getSchemaProperties(SESSION, SYSTEM_DATABASE_NAME),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon schema properties are not supported for the system schema 'sys'");
         assertTrinoError(() -> metadata.getSchemaProperties(SESSION, "missing"),
+                SCHEMA_NOT_FOUND.toErrorCode(), "Schema 'missing' does not exist");
+        assertTrinoError(() -> metadata.getSchemaOwner(SESSION, "missing"),
                 SCHEMA_NOT_FOUND.toErrorCode(), "Schema 'missing' does not exist");
     }
 
@@ -7830,14 +7845,22 @@ public class PaimonMetadataTableModeTest
         public Database getDatabase(String name)
                 throws Catalog.DatabaseNotExistException
         {
-            if (name.equals("schema")) {
-                return Database.of(name, Map.of(
-                        LOCATION_PROPERTY, "s3://warehouse/schema",
-                        COMMENT_PROPERTY, "schema comment",
-                        OWNER_PROPERTY, "schema_owner",
-                        "unregistered-paimon-property", "hidden"), "schema comment");
+            switch (name) {
+                case "schema":
+                    return Database.of(name, Map.of(
+                            LOCATION_PROPERTY, "s3://warehouse/schema",
+                            COMMENT_PROPERTY, "schema comment",
+                            OWNER_PROPERTY, "schema_owner",
+                            "unregistered-paimon-property", "hidden"), "schema comment");
+                case "schema_without_owner":
+                    return Database.of(name, Map.of(
+                            LOCATION_PROPERTY, "s3://warehouse/schema_without_owner"), null);
+                case "schema_with_blank_owner":
+                    return Database.of(name, Map.of(
+                            OWNER_PROPERTY, " "), null);
+                default:
+                    throw new Catalog.DatabaseNotExistException(name);
             }
-            throw new Catalog.DatabaseNotExistException(name);
         }
     }
 
