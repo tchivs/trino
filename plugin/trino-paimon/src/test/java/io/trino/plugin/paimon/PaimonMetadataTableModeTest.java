@@ -2581,6 +2581,35 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testApplyLimitMatchesPartitionFilterColumnsCaseInsensitively()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED,
+                new AtomicBoolean(),
+                DataTypes.ROW(DataTypes.FIELD(0, "dt", DataTypes.STRING())),
+                DataTypes.ROW(DataTypes.FIELD(0, "dt", DataTypes.STRING())),
+                List.of("dt"),
+                List.of("dt")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("DT", DataTypes.STRING());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(dt, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-06-26")))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertThat(metadata.applyLimit(SESSION, tableHandle, 10))
+                .isPresent()
+                .get()
+                .extracting(result -> (PaimonTableHandle) result.getHandle())
+                .satisfies(handle -> assertThat(handle.getLimit()).hasValue(10));
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
     public void testApplyLimitShortCircuitsExistingLimitBeforeCatalogInitialization()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
