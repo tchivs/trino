@@ -117,6 +117,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.IntStream;
 
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
@@ -2249,6 +2250,30 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testPartitionDeleteHandleCopiesPartitionSpecs()
+    {
+        Map<String, String> partitionSpec = new LinkedHashMap<>();
+        partitionSpec.put("dt", "2026-06-26");
+        List<Map<String, String>> partitionSpecs = new ArrayList<>();
+        partitionSpecs.add(partitionSpec);
+        PaimonTableHandle handle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty())
+                .withDeletePartitionSpecs(partitionSpecs);
+
+        partitionSpec.put("dt", "2026-06-27");
+        partitionSpecs.add(Map.of("dt", "2026-06-28"));
+
+        assertThat(handle.getDeletePartitionSpecs())
+                .contains(List.of(Map.of("dt", "2026-06-26")));
+    }
+
+    @Test
     public void testApplyDeleteDoesNotAcceptUnsafeFilteredTableHandle()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
@@ -2389,6 +2414,28 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> metadata.executeDelete(SESSION, systemTableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon delete is not supported for the system schema 'sys'");
+    }
+
+    @Test
+    public void testExecuteDeleteRejectsTooManyPartitionDeleteSpecs()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED)),
+                TESTING_TYPE_MANAGER);
+        PaimonTableHandle baseHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        List<Map<String, String>> tooManyPartitionSpecs = IntStream.rangeClosed(0, 1024)
+                .mapToObj(index -> Map.of("dt", "2026-06-" + index))
+                .toList();
+        assertTrinoError(() -> metadata.executeDelete(SESSION, baseHandle.withDeletePartitionSpecs(tooManyPartitionSpecs)),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon partition delete requires between 1 and 1024 partition specs");
     }
 
     @Test

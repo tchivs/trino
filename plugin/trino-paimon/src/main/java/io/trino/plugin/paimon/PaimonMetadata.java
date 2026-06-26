@@ -2323,9 +2323,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
             throw new TrinoException(NOT_SUPPORTED,
                     "Paimon delete requires an unfiltered table handle or a validated partition delete handle");
         }
+        paimonTableHandle.getDeletePartitionSpecs().ifPresent(PaimonMetadata::validateDeletePartitionSpecs);
         truncatePaimonTable(session, paimonTableHandle, "delete", "delete rows from",
                 paimonTableHandle.getDeletePartitionSpecs());
         return OptionalLong.empty();
+    }
+
+    private static void validateDeletePartitionSpecs(List<Map<String, String>> deletePartitionSpecs)
+    {
+        requireNonNull(deletePartitionSpecs, "deletePartitionSpecs is null");
+        if (deletePartitionSpecs.isEmpty() || deletePartitionSpecs.size() > MAX_PARTITION_DELETE_SPECS) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon partition delete requires between 1 and " + MAX_PARTITION_DELETE_SPECS + " partition specs");
+        }
     }
 
     private static boolean isSafeFullTableDeleteHandle(PaimonTableHandle tableHandle)
