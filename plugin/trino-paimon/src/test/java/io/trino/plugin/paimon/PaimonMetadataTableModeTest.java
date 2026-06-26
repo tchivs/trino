@@ -1995,6 +1995,47 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testApplyDeleteMatchesPartitionFilterColumnsCaseInsensitively()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                DataTypes.FIELD(1, "region", DataTypes.INT()),
+                DataTypes.FIELD(2, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType, List.of("dt", "region"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("DT", DataTypes.STRING());
+        PaimonColumnHandle region = PaimonColumnHandle.of("REGION", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(
+                        dt, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-06-26")),
+                        region, Domain.singleValue(INTEGER, 7L))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        Optional<ConnectorTableHandle> deleteHandle = metadata.applyDelete(SESSION, tableHandle);
+
+        assertThat(deleteHandle).isPresent();
+        PaimonTableHandle partitionDeleteHandle = (PaimonTableHandle) deleteHandle.orElseThrow();
+        assertThat(partitionDeleteHandle.getDeletePartitionSpecs())
+                .contains(List.of(Map.of(
+                        "dt", "2026-06-26",
+                        "region", "7")));
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
     public void testApplyDeleteAcceptsDiscretePartitionFilters()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();

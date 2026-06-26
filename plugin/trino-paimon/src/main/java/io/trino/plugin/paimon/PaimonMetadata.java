@@ -2355,7 +2355,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Map<String, Domain> domainsByName = new HashMap<>();
         Map<String, PaimonColumnHandle> columnsByName = new HashMap<>();
         for (Map.Entry<PaimonColumnHandle, Domain> entry : domains.get().entrySet()) {
-            String columnName = entry.getKey().getColumnName();
+            String columnName = FieldNameUtils.toLowerCase(entry.getKey().getColumnName());
             domainsByName.put(columnName, entry.getValue());
             columnsByName.put(columnName, entry.getKey());
         }
@@ -2370,8 +2370,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 fileStoreTable.coreOptions().legacyPartitionName());
         List<List<Object>> partitionValueRows = List.of(List.of());
         for (String partitionKey : fileStoreTable.partitionKeys()) {
-            Domain domain = domainsByName.get(partitionKey);
-            PaimonColumnHandle columnHandle = columnsByName.get(partitionKey);
+            String lowerPartitionKey = FieldNameUtils.toLowerCase(partitionKey);
+            Domain domain = domainsByName.get(lowerPartitionKey);
+            PaimonColumnHandle columnHandle = columnsByName.get(lowerPartitionKey);
             if (domain == null || columnHandle == null || !domain.isNullableDiscreteSet()) {
                 return Optional.empty();
             }
