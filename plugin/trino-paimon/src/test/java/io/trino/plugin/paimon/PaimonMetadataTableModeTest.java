@@ -488,6 +488,10 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata vectorSearchMetadata = new PaimonMetadata(new TestingPaimonCatalog(VectorSearchTable.create(
                 innerTable(),
                 new VectorSearch(new float[] {1.0f}, 1, "embedding"))), TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> vectorSearchMetadata.getTableHandle(SESSION, new SchemaTableName("schema", "table"),
+                        Map.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon vector search tables are not supported by the Trino connector");
         assertTrinoError(() -> vectorSearchMetadata.getRowChangeParadigm(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon vector search tables are not supported by the Trino connector");
@@ -516,6 +520,10 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata fullTextSearchMetadata = new PaimonMetadata(new TestingPaimonCatalog(FullTextSearchTable.create(
                 innerTable(),
                 new FullTextSearch(FullTextQuery.match("paimon", "content"), 1))), TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> fullTextSearchMetadata.getTableHandle(SESSION, new SchemaTableName("schema", "table"),
+                        Map.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon full-text search tables are not supported by the Trino connector");
         assertTrinoError(() -> fullTextSearchMetadata.getRowChangeParadigm(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon full-text search tables are not supported by the Trino connector");
