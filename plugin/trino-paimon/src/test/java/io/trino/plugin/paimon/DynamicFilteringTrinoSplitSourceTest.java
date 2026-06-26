@@ -367,6 +367,35 @@ public class DynamicFilteringTrinoSplitSourceTest
     }
 
     @Test
+    public void testDynamicSplitPlanningMapsUnexpectedRuntimeFailuresToCannotOpenSplit()
+    {
+        RecordingCatalog catalog = new RecordingCatalog(false, failingRuntimePlanningTable());
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Collections.emptyMap(),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.empty()),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                dynamicFilter(TupleDomain.all(), false),
+                new Duration(0, MILLISECONDS));
+
+        assertThatThrownBy(() -> splitSource.getNextBatch(100))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to plan Paimon splits");
+                    assertThat(exception.getCause()).isInstanceOf(IndexOutOfBoundsException.class)
+                            .hasMessage("Index 1 out of bounds for length 1");
+                });
+    }
+
+    @Test
     public void testDynamicTableChangesSplitPlanningMapsWrappedRuntimeIoFailuresToCannotOpenSplit()
     {
         RecordingCatalog catalog = new RecordingCatalog(false, failingPlanningTable("dynamic table_changes planning failed"));
@@ -783,6 +812,20 @@ public class DynamicFilteringTrinoSplitSourceTest
                 });
     }
 
+    private static Table failingRuntimePlanningTable()
+    {
+        return (Table) Proxy.newProxyInstance(
+                DynamicFilteringTrinoSplitSourceTest.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
+                    case "newReadBuilder" -> failingRuntimePlanningReadBuilder();
+                    case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+                    case "toString" -> "runtime-failing-dynamic-planning-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
     private static ReadBuilder unsupportedPlanningReadBuilder()
     {
         return (ReadBuilder) Proxy.newProxyInstance(
@@ -809,6 +852,21 @@ public class DynamicFilteringTrinoSplitSourceTest
                     case "readType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
                     case "tableName" -> "failing-dynamic-planning-table";
                     case "toString" -> "failing-dynamic-planning-read-builder";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder failingRuntimePlanningReadBuilder()
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                DynamicFilteringTrinoSplitSourceTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "dropStats", "withFilter", "withLimit" -> proxy;
+                    case "newScan" -> throw new IndexOutOfBoundsException("Index 1 out of bounds for length 1");
+                    case "readType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+                    case "tableName" -> "runtime-failing-dynamic-planning-table";
+                    case "toString" -> "runtime-failing-dynamic-planning-read-builder";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

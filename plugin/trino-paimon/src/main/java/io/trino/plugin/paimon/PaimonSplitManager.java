@@ -34,12 +34,15 @@ import org.apache.paimon.table.Table;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
@@ -197,10 +200,23 @@ public class PaimonSplitManager
         requireNonNull(tableHandle, "tableHandle is null");
         requireNonNull(cause, "cause is null");
 
+        if (cause instanceof TrinoException trinoException) {
+            return trinoException;
+        }
+
         String message = tableHandle.hasIncrementalReadMode()
                 ? "Failed to plan Paimon table_changes splits"
                 : "Failed to plan Paimon splits";
-        return PaimonPageSourceProvider.wrapPaimonReadException(message, cause);
+        if (cause instanceof UncheckedIOException uncheckedIOException) {
+            return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, uncheckedIOException.getCause());
+        }
+        if (cause instanceof IOException ioException) {
+            return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, ioException);
+        }
+        if (cause.getCause() instanceof IOException ioException) {
+            return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, ioException);
+        }
+        return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, cause);
     }
 
     static void pushLimit(ReadBuilder readBuilder, PaimonTableHandle tableHandle)
