@@ -35,8 +35,7 @@ public class PaimonSchemaProperties
     {
         schemaProperties = ImmutableList.of(
                 stringProperty(LOCATION_PROPERTY, "Schema location.", null, false),
-                stringProperty(COMMENT_PROPERTY, "Schema comment.", null, false),
-                stringProperty(OWNER_PROPERTY, "Schema owner.", null, false));
+                stringProperty(COMMENT_PROPERTY, "Schema comment.", null, false));
     }
 
     public List<PropertyMetadata<?>> getSchemaProperties()
