@@ -2331,19 +2331,58 @@ public record PaimonMetadata(PaimonCatalog catalog,
             throw new TrinoException(NOT_SUPPORTED,
                     "Paimon delete requires an unfiltered table handle or a validated partition delete handle");
         }
-        paimonTableHandle.getDeletePartitionSpecs().ifPresent(PaimonMetadata::validateDeletePartitionSpecs);
         truncatePaimonTable(session, paimonTableHandle, "delete", "delete rows from",
                 paimonTableHandle.getDeletePartitionSpecs());
         return OptionalLong.empty();
     }
 
-    private static void validateDeletePartitionSpecs(List<Map<String, String>> deletePartitionSpecs)
+    private static List<Map<String, String>> validatedDeletePartitionSpecs(
+            PaimonTableHandle tableHandle,
+            FileStoreTable fileStoreTable,
+            List<Map<String, String>> deletePartitionSpecs)
     {
+        requireNonNull(tableHandle, "tableHandle is null");
+        requireNonNull(fileStoreTable, "fileStoreTable is null");
         requireNonNull(deletePartitionSpecs, "deletePartitionSpecs is null");
         if (deletePartitionSpecs.isEmpty() || deletePartitionSpecs.size() > MAX_PARTITION_DELETE_SPECS) {
             throw new TrinoException(NOT_SUPPORTED,
                     "Paimon partition delete requires between 1 and " + MAX_PARTITION_DELETE_SPECS + " partition specs");
         }
+        if (fileStoreTable.partitionKeys().isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon partition delete requires a partitioned table");
+        }
+
+        RowType partitionType = partitionType(fileStoreTable);
+        InternalRowPartitionComputer partitionComputer = partitionComputer(fileStoreTable, partitionType);
+        Set<String> partitionKeys = new LinkedHashSet<>(fileStoreTable.partitionKeys());
+        List<Map<String, String>> normalizedSpecs = new ArrayList<>(deletePartitionSpecs.size());
+        for (Map<String, String> partitionSpec : deletePartitionSpecs) {
+            if (!partitionSpec.keySet().equals(partitionKeys)) {
+                throw new TrinoException(NOT_SUPPORTED,
+                        "Paimon partition delete requires complete partition specs for keys: " + partitionKeys);
+            }
+            try {
+                GenericRow partitionRow = InternalRowPartitionComputer.convertSpecToInternalRow(
+                        partitionSpec,
+                        partitionType,
+                        fileStoreTable.coreOptions().partitionDefaultName());
+                normalizedSpecs.add(partitionComputer.generatePartValues(partitionRow));
+            }
+            catch (RuntimeException e) {
+                throw new TrinoException(NOT_SUPPORTED,
+                        "Paimon partition delete requires valid Paimon partition values", e);
+            }
+        }
+        List<Map<String, String>> normalizedDeletePartitionSpecs = List.copyOf(normalizedSpecs);
+        Optional<List<Map<String, String>>> expectedDeletePartitionSpecs = partitionDeleteSpecs(tableHandle, fileStoreTable);
+        Set<Map<String, String>> actualPartitions = new LinkedHashSet<>(normalizedDeletePartitionSpecs);
+        if (expectedDeletePartitionSpecs.isEmpty()
+                || !actualPartitions.equals(new LinkedHashSet<>(expectedDeletePartitionSpecs.orElseThrow()))) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon delete requires partition delete specs to match the table handle filter");
+        }
+        return List.copyOf(actualPartitions);
     }
 
     private static boolean isSafeFullTableDeleteHandle(PaimonTableHandle tableHandle)
@@ -2378,14 +2417,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
             columnsByName.put(columnName, entry.getKey());
         }
 
-        RowType partitionType = new RowType(fileStoreTable.partitionKeys().stream()
-                .map(partitionKey -> fileStoreTable.rowType().getField(partitionKey))
-                .collect(toList()));
-        InternalRowPartitionComputer partitionComputer = new InternalRowPartitionComputer(
-                fileStoreTable.coreOptions().partitionDefaultName(),
-                partitionType,
-                fileStoreTable.partitionKeys().toArray(new String[0]),
-                fileStoreTable.coreOptions().legacyPartitionName());
+        RowType partitionType = partitionType(fileStoreTable);
+        InternalRowPartitionComputer partitionComputer = partitionComputer(fileStoreTable, partitionType);
         List<List<Object>> partitionValueRows = List.of(List.of());
         for (String partitionKey : fileStoreTable.partitionKeys()) {
             String lowerPartitionKey = FieldNameUtils.toLowerCase(partitionKey);
@@ -2408,6 +2441,25 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return Optional.of(partitionValueRows.stream()
                 .map(values -> partitionComputer.generatePartValues(GenericRow.of(values.toArray())))
                 .collect(toList()));
+    }
+
+    private static RowType partitionType(FileStoreTable fileStoreTable)
+    {
+        requireNonNull(fileStoreTable, "fileStoreTable is null");
+        return new RowType(fileStoreTable.partitionKeys().stream()
+                .map(partitionKey -> fileStoreTable.rowType().getField(partitionKey))
+                .collect(toList()));
+    }
+
+    private static InternalRowPartitionComputer partitionComputer(FileStoreTable fileStoreTable, RowType partitionType)
+    {
+        requireNonNull(fileStoreTable, "fileStoreTable is null");
+        requireNonNull(partitionType, "partitionType is null");
+        return new InternalRowPartitionComputer(
+                fileStoreTable.coreOptions().partitionDefaultName(),
+                partitionType,
+                fileStoreTable.partitionKeys().toArray(new String[0]),
+                fileStoreTable.coreOptions().legacyPartitionName());
     }
 
     private static Optional<List<Object>> partitionValues(PaimonColumnHandle columnHandle, Domain domain)
@@ -2472,7 +2524,33 @@ public record PaimonMetadata(PaimonCatalog catalog,
         try {
             Catalog sessionCatalog = catalog.forSession(session);
             FileStoreTable fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, operation);
+            Optional<List<Map<String, String>>> validatedDeletePartitionSpecs = deletePartitionSpecs
+                    .map(specs -> validatedDeletePartitionSpecs(paimonTableHandle, fileStoreTable, specs));
+            truncatePaimonTable(fileStoreTable, paimonTableHandle, operation, failureOperation,
+                    validatedDeletePartitionSpecs);
+        }
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (UnsupportedOperationException e) {
+            String detail = e.getMessage();
+            throw new TrinoException(NOT_SUPPORTED,
+                    detail == null || detail.isBlank()
+                            ? "Paimon " + operation + " uses features which are not supported by the Trino connector"
+                            : "Paimon " + operation + " uses features which are not supported by the Trino connector: " + detail,
+                    e);
+        }
+        catch (Exception e) {
+            throw paimonMetadataException(
+                    format("Failed to %s Paimon table '%s'", failureOperation, paimonTableHandle.getTableName()),
+                    e);
+        }
+    }
 
+    private static void truncatePaimonTable(FileStoreTable fileStoreTable, PaimonTableHandle paimonTableHandle, String operation,
+            String failureOperation, Optional<List<Map<String, String>>> deletePartitionSpecs)
+    {
+        try {
             // Use BatchTableCommit to truncate the table
             try (BatchTableCommit commit = fileStoreTable.newBatchWriteBuilder().newCommit()) {
                 if (deletePartitionSpecs.isPresent()) {
