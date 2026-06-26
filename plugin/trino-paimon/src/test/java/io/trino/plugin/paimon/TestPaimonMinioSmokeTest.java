@@ -79,7 +79,7 @@ public class TestPaimonMinioSmokeTest
     }
 
     @Test
-    public void testMinioWarehouseReadWriteSmoke()
+    public void testMinioWarehouseCrudDdlSmoke()
     {
         String tableName = "orders_" + randomNameSuffix();
         String qualifiedSchemaName = CATALOG + "." + SCHEMA;
@@ -89,12 +89,18 @@ public class TestPaimonMinioSmokeTest
         try {
             assertThat(computeActual("SHOW SCHEMAS FROM " + CATALOG).getOnlyColumnAsSet()).contains(SCHEMA);
 
-            assertUpdate("CREATE TABLE " + qualifiedTableName + " (orderkey bigint, status varchar)");
+            assertUpdate("CREATE TABLE " + qualifiedTableName + " ("
+                    + "orderkey bigint, "
+                    + "status varchar COMMENT 'order status') "
+                    + "COMMENT 'orders smoke table'");
             assertUpdate("INSERT INTO " + qualifiedTableName + " VALUES (1, 'ok'), (2, 'ready')", 2);
 
             assertQuery(
                     "SELECT * FROM " + qualifiedTableName + " ORDER BY orderkey",
                     "VALUES (CAST(1 AS BIGINT), CAST('ok' AS VARCHAR)), (CAST(2 AS BIGINT), CAST('ready' AS VARCHAR))");
+            assertThat((String) computeScalar("SHOW CREATE TABLE " + qualifiedTableName))
+                    .contains("COMMENT 'orders smoke table'")
+                    .contains("COMMENT 'order status'");
 
             try (MinioClient minioClient = minio.createMinioClient()) {
                 List<String> warehouseObjects = minioClient.listObjects(bucketName, WAREHOUSE_PREFIX + "/" + SCHEMA + ".db/" + tableName);
@@ -103,6 +109,21 @@ public class TestPaimonMinioSmokeTest
                         .anyMatch(path -> !path.endsWith("_trino_paimon_directory_marker"));
                 assertThat(warehouseObjects).allMatch(path -> path.startsWith(WAREHOUSE_PREFIX + "/" + SCHEMA + ".db/" + tableName));
             }
+
+            assertUpdate("ALTER TABLE " + qualifiedTableName + " RENAME COLUMN status TO state");
+            assertUpdate("COMMENT ON COLUMN " + qualifiedTableName + ".state IS 'current state'");
+            assertThat((String) computeScalar("SHOW CREATE TABLE " + qualifiedTableName))
+                    .contains("state varchar COMMENT 'current state'");
+            assertQuery(
+                    "SELECT orderkey, state FROM " + qualifiedTableName + " ORDER BY orderkey",
+                    "VALUES (CAST(1 AS BIGINT), CAST('ok' AS VARCHAR)), (CAST(2 AS BIGINT), CAST('ready' AS VARCHAR))");
+
+            assertUpdate("DELETE FROM " + qualifiedTableName);
+            assertQuery("SELECT count(*) FROM " + qualifiedTableName, "VALUES BIGINT '0'");
+
+            assertUpdate("INSERT INTO " + qualifiedTableName + " VALUES (3, 'shipped'), (4, 'closed')", 2);
+            assertUpdate("TRUNCATE TABLE " + qualifiedTableName);
+            assertQuery("SELECT count(*) FROM " + qualifiedTableName, "VALUES BIGINT '0'");
         }
         finally {
             assertUpdate("DROP TABLE IF EXISTS " + qualifiedTableName);
