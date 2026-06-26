@@ -2602,10 +2602,15 @@ public record PaimonMetadata(PaimonCatalog catalog,
             HashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
             new PaimonFilterConverter(PaimonTableHandle.effectiveReadRowType(paimonTable)).convert(
                     table.getFilter(), acceptedDomains, unsupportedDomains);
-            Set<String> acceptedFields = acceptedDomains.keySet().stream().map(PaimonColumnHandle::getColumnName)
+            Set<String> acceptedFields = acceptedDomains.keySet().stream()
+                    .map(PaimonColumnHandle::getColumnName)
+                    .map(FieldNameUtils::toLowerCase)
+                    .collect(Collectors.toSet());
+            Set<String> partitionKeys = paimonTable.partitionKeys().stream()
+                    .map(FieldNameUtils::toLowerCase)
                     .collect(Collectors.toSet());
             if (!unsupportedDomains.isEmpty()
-                    || !new HashSet<>(paimonTable.partitionKeys()).containsAll(acceptedFields)) {
+                    || !partitionKeys.containsAll(acceptedFields)) {
                 return Optional.empty();
             }
         }
