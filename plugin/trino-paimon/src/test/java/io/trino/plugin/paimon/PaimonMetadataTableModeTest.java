@@ -4050,6 +4050,78 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testNestedFieldDdlPreservesArrayAndMapMarkers()
+    {
+        org.apache.paimon.types.RowType valueType = DataTypes.ROW(
+                DataTypes.FIELD(2, "Code", DataTypes.INT()),
+                DataTypes.FIELD(3, "City", DataTypes.STRING()));
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "Payload", DataTypes.ARRAY(DataTypes.MAP(DataTypes.INT(), valueType))));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle rowColumn = PaimonColumnHandle.of("Payload", rowType.getField("Payload").type());
+
+        metadata.addField(SESSION, tableHandle, List.of("payload", "ELEMENT", "VALUE"), "postal_code", INTEGER,
+                false);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.AddColumn.class, change ->
+                        assertThat(change.fieldNames()).containsExactly("Payload", "element", "value",
+                                "postal_code"));
+
+        metadata.dropField(SESSION, tableHandle, rowColumn, List.of("ELEMENT", "VALUE", "City"));
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.DropColumn.class, change ->
+                        assertThat(change.fieldNames()).containsExactly("Payload", "element", "value", "City"));
+
+        metadata.renameField(SESSION, tableHandle, List.of("payload", "ELEMENT", "VALUE", "Code"), "zip_code");
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.RenameColumn.class, change -> {
+                    assertThat(change.fieldNames()).containsExactly("Payload", "element", "value", "Code");
+                    assertThat(change.newName()).isEqualTo("zip_code");
+                });
+
+        metadata.setFieldType(SESSION, tableHandle, List.of("payload", "ELEMENT", "VALUE", "Code"), BIGINT);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.UpdateColumnType.class, change -> {
+                    assertThat(change.fieldNames()).containsExactly("Payload", "element", "value", "Code");
+                    assertThat(change.newDataType().getTypeRoot()).isEqualTo(DataTypeRoot.BIGINT);
+                });
+    }
+
+    @Test
+    public void testNestedFieldDdlRejectsMissingArrayAndMapMarkers()
+    {
+        org.apache.paimon.types.RowType valueType = DataTypes.ROW(
+                DataTypes.FIELD(2, "Code", DataTypes.INT()));
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "Payload", DataTypes.ARRAY(DataTypes.MAP(DataTypes.INT(), valueType))));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle rowColumn = PaimonColumnHandle.of("Payload", rowType.getField("Payload").type());
+
+        assertTrinoError(() -> metadata.addField(SESSION, tableHandle, List.of("payload", "value"), "new_code",
+                        INTEGER, false),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon nested field schema change for array element must use 'element' in field path 'Payload.value.new_code'");
+        assertTrinoError(() -> metadata.dropField(SESSION, tableHandle, rowColumn, List.of("element", "Code")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon nested field schema change for map value must use 'value' in field path 'Payload.element.Code'");
+        assertTrinoError(() -> metadata.setFieldType(SESSION, tableHandle, List.of("payload", "element"), BIGINT),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon nested field schema change must target a row field, not collection marker 'element' in field path 'Payload.element'");
+
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testTopLevelDdlCanonicalizesPaimonColumnName()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
