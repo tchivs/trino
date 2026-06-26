@@ -2320,7 +2320,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonTableHandle paimonTableHandle = getTableHandle("delete", handle);
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "delete");
         if (!paimonTableHandle.getFilter().isAll() && paimonTableHandle.getDeletePartitionSpecs().isEmpty()) {
-            throw new IllegalStateException(
+            throw new TrinoException(NOT_SUPPORTED,
                     "Paimon delete requires an unfiltered table handle or a validated partition delete handle");
         }
         truncatePaimonTable(session, paimonTableHandle, "delete", "delete rows from",

@@ -2333,9 +2333,9 @@ public class PaimonMetadataTableModeTest
                 Optional.empty(),
                 OptionalLong.empty());
 
-        assertThatThrownBy(() -> metadata.executeDelete(SESSION, tableHandle))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("Paimon delete requires an unfiltered table handle or a validated partition delete handle");
+        assertTrinoError(() -> metadata.executeDelete(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon delete requires an unfiltered table handle or a validated partition delete handle");
 
         PaimonTableHandle systemTableHandle = new PaimonTableHandle(
                 SYSTEM_DATABASE_NAME,
