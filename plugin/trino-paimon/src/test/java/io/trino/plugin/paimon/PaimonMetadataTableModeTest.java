@@ -4252,6 +4252,9 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, partitionKey, "event_date"),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon rename column is not supported: Cannot rename partition column: [dt]");
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, primaryKey, "new_id"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported: Cannot rename primary key");
         assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, partitionKey),
                 NOT_SUPPORTED.toErrorCode(),
                 "Cannot drop partition key or primary key: [dt]");
@@ -4289,6 +4292,9 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, partitionKey, "event_date"),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon rename column is not supported: Cannot rename partition column: [dt]");
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, primaryKey, "new_id"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported: Cannot rename primary key");
         assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, partitionKey),
                 NOT_SUPPORTED.toErrorCode(),
                 "Cannot drop partition key or primary key: [dt]");
@@ -4309,7 +4315,7 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testRenamePrimaryKeyColumnFollowsPaimonSchemaEvolution()
+    public void testRenamePrimaryKeyColumnIsRejectedBeforeCatalogAlter()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
                 DataTypes.FIELD(0, "id", DataTypes.INT().notNull()),
@@ -4320,15 +4326,12 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
-        metadata.renameColumn(SESSION, tableHandle, PaimonColumnHandle.of("id", DataTypes.INT().notNull()), "new_id");
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle,
+                        PaimonColumnHandle.of("id", DataTypes.INT().notNull()), "new_id"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported: Cannot rename primary key");
 
-        assertThat(catalog.alterCalls).isEqualTo(1);
-        assertThat(catalog.lastAlterChanges)
-                .singleElement()
-                .isInstanceOfSatisfying(SchemaChange.RenameColumn.class, change -> {
-                    assertThat(change.fieldNames()).containsExactly("id");
-                    assertThat(change.newName()).isEqualTo("new_id");
-                });
+        assertThat(catalog.alterCalls).isEqualTo(0);
     }
 
     @Test
