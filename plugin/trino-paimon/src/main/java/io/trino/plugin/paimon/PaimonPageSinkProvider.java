@@ -27,6 +27,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.index.BucketAssigner;
@@ -48,18 +49,23 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
+import static java.util.Arrays.fill;
 import static java.util.Objects.requireNonNull;
+import static org.apache.paimon.utils.DefaultValueUtils.convertDefaultValue;
 
 public class PaimonPageSinkProvider
         implements
         ConnectorPageSinkProvider
 {
     private final PaimonCatalog paimonCatalog;
+    private final TypeManager typeManager;
 
     @Inject
     public PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory)
     {
-        this.paimonCatalog = requireNonNull(paimonMetadataFactory, "trinoMetadataFactory is null").create().catalog();
+        requireNonNull(paimonMetadataFactory, "trinoMetadataFactory is null");
+        this.paimonCatalog = paimonMetadataFactory.create().catalog();
+        this.typeManager = paimonMetadataFactory.typeManager();
     }
 
     static void validateWriteBucketMode(Table table)
@@ -119,8 +125,7 @@ public class PaimonPageSinkProvider
                     "writes");
             validateWriteBucketMode(table);
             validateWriteColumns(table, writeColumns);
-            return createPageSink(table, false, getWriteColumnTypes(writeColumns),
-                    getWriteLogicalTypes(writeColumns));
+            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager));
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -138,8 +143,7 @@ public class PaimonPageSinkProvider
             if (overwrite) {
                 PaimonTableSupport.validateInsertOverwrite(table);
             }
-            return createPageSink(table, overwrite, getWriteColumnTypes(writeColumns),
-                    getWriteLogicalTypes(writeColumns));
+            return createPageSink(table, overwrite, writeLayout(table, writeColumns, typeManager));
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -154,8 +158,7 @@ public class PaimonPageSinkProvider
             validateMergeBucketMode(table);
             PaimonTableSupport.validateRowLevelDelete(table, "merge writes");
             validateMergeWriteColumns(table, writeColumns);
-            return createPageSink(table, false, getWriteColumnTypes(writeColumns),
-                    getWriteLogicalTypes(writeColumns));
+            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager));
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -195,20 +198,6 @@ public class PaimonPageSinkProvider
         return paimonColumnHandle;
     }
 
-    private static List<Type> getWriteColumnTypes(List<PaimonColumnHandle> writeColumns)
-    {
-        return writeColumns.stream()
-                .map(PaimonColumnHandle::getTrinoType)
-                .collect(Collectors.toList());
-    }
-
-    private static List<DataType> getWriteLogicalTypes(List<PaimonColumnHandle> writeColumns)
-    {
-        return writeColumns.stream()
-                .map(PaimonColumnHandle::logicalType)
-                .collect(Collectors.toList());
-    }
-
     static void validateWriteColumns(FileStoreTable table, List<PaimonColumnHandle> writeColumns)
     {
         requireNonNull(table, "table is null");
@@ -233,21 +222,86 @@ public class PaimonPageSinkProvider
         }
     }
 
+    static WriteLayout writeLayout(FileStoreTable table, List<PaimonColumnHandle> writeColumns, TypeManager typeManager)
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(writeColumns, "writeColumns is null");
+        requireNonNull(typeManager, "typeManager is null");
+        validateWriteColumns(table, writeColumns);
+        List<DataField> fields = table.rowType().getFields();
+        int[] inputChannels = new int[fields.size()];
+        fill(inputChannels, -1);
+        for (int inputChannel = 0; inputChannel < writeColumns.size(); inputChannel++) {
+            PaimonColumnHandle column = requireNonNull(writeColumns.get(inputChannel), "writeColumns contains null column");
+            int fieldIndex = latestFieldIndex(fields, column.getColumnName());
+            inputChannels[fieldIndex] = inputChannel;
+        }
+        return new WriteLayout(
+                fields.stream()
+                        .map(field -> PaimonTypeUtils.fromPaimonType(field.type(), typeManager))
+                        .collect(Collectors.toList()),
+                fields.stream()
+                        .map(DataField::type)
+                        .collect(Collectors.toList()),
+                inputChannels,
+                fields.stream()
+                        .map(PaimonPageSinkProvider::defaultValue)
+                        .toArray());
+    }
+
+    private static Object defaultValue(DataField field)
+    {
+        String defaultValue = field.defaultValue();
+        if (defaultValue == null) {
+            return null;
+        }
+        return convertDefaultValue(field.type(), defaultValue);
+    }
+
+    record WriteLayout(List<Type> columnTypes, List<DataType> logicalTypes, int[] inputChannels, Object[] defaultValues)
+    {
+        WriteLayout
+        {
+            columnTypes = List.copyOf(requireNonNull(columnTypes, "columnTypes is null"));
+            logicalTypes = List.copyOf(requireNonNull(logicalTypes, "logicalTypes is null"));
+            inputChannels = requireNonNull(inputChannels, "inputChannels is null").clone();
+            defaultValues = requireNonNull(defaultValues, "defaultValues is null").clone();
+        }
+
+        @Override
+        public int[] inputChannels()
+        {
+            return inputChannels.clone();
+        }
+
+        @Override
+        public Object[] defaultValues()
+        {
+            return defaultValues.clone();
+        }
+    }
+
     private static DataField latestField(List<DataField> fields, String columnName)
     {
+        return fields.get(latestFieldIndex(fields, columnName));
+    }
+
+    private static int latestFieldIndex(List<DataField> fields, String columnName)
+    {
         String lowerColumnName = FieldNameUtils.toLowerCase(columnName);
-        DataField match = null;
-        for (DataField field : fields) {
+        int match = -1;
+        for (int index = 0; index < fields.size(); index++) {
+            DataField field = fields.get(index);
             if (FieldNameUtils.toLowerCase(field.name()).equals(lowerColumnName)) {
-                if (match != null) {
+                if (match >= 0) {
                     throw new IllegalStateException(
                             "Latest Paimon table schema contains case-insensitive duplicate field name '%s'"
                                     .formatted(lowerColumnName));
                 }
-                match = field;
+                match = index;
             }
         }
-        if (match == null) {
+        if (match < 0) {
             throw new IllegalStateException("Write column '%s' is not present in latest Paimon table schema %s"
                     .formatted(columnName, fields.stream().map(DataField::name).collect(Collectors.toList())));
         }
@@ -282,8 +336,7 @@ public class PaimonPageSinkProvider
         }
     }
 
-    private PaimonPageSink createPageSink(FileStoreTable table, boolean overwrite, List<Type> columnTypes,
-            List<DataType> logicalTypes)
+    private PaimonPageSink createPageSink(FileStoreTable table, boolean overwrite, WriteLayout writeLayout)
     {
         try {
             BatchWriteBuilder batchWriteBuilder = table.newBatchWriteBuilder();
@@ -292,9 +345,11 @@ public class PaimonPageSinkProvider
             }
             BatchTableWrite write = batchWriteBuilder.newWrite();
             if (table.bucketMode() == BucketMode.HASH_DYNAMIC) {
-                return new PaimonPageSink(write, columnTypes, logicalTypes, dynamicBucketWriter(table, overwrite));
+                return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
+                        writeLayout.inputChannels(), writeLayout.defaultValues(), dynamicBucketWriter(table, overwrite));
             }
-            return new PaimonPageSink(write, columnTypes, logicalTypes);
+            return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
+                    writeLayout.inputChannels(), writeLayout.defaultValues(), null);
         }
         catch (Exception e) {
             throw PaimonPageSink.wrapWriteException(e);

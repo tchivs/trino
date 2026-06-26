@@ -20,7 +20,15 @@ import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.type.Type;
 import jakarta.annotation.Nullable;
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.Blob;
+import org.apache.paimon.data.Decimal;
+import org.apache.paimon.data.InternalArray;
+import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.data.InternalVector;
+import org.apache.paimon.data.Timestamp;
+import org.apache.paimon.data.variant.Variant;
 import org.apache.paimon.index.BucketAssigner;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
@@ -31,6 +39,7 @@ import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.IllegalFormatException;
 import java.util.List;
@@ -51,24 +60,54 @@ public class PaimonPageSink
     private final BatchTableWrite writer;
     private final List<Type> columnTypes;
     private final List<DataType> logicalTypes;
+    private final int[] inputChannels;
+    private final List<Type> inputColumnTypes;
+    private final List<DataType> inputLogicalTypes;
+    private final Object[] defaultValues;
+    private final int inputChannelCount;
+    private final boolean allColumnsPresent;
     @Nullable
     private final DynamicBucketWriter dynamicBucketWriter;
 
     public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes)
     {
-        this(writer, columnTypes, logicalTypes, null);
+        this(writer, columnTypes, logicalTypes, identityChannels(columnTypes), null);
     }
 
     public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes,
             @Nullable DynamicBucketWriter dynamicBucketWriter)
     {
+        this(writer, columnTypes, logicalTypes, identityChannels(columnTypes), dynamicBucketWriter);
+    }
+
+    public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes,
+            int[] inputChannels, @Nullable DynamicBucketWriter dynamicBucketWriter)
+    {
+        this(writer, columnTypes, logicalTypes, inputChannels, emptyDefaultValues(columnTypes), dynamicBucketWriter);
+    }
+
+    public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes,
+            int[] inputChannels, Object[] defaultValues, @Nullable DynamicBucketWriter dynamicBucketWriter)
+    {
         this.writer = requireNonNull(writer, "writer is null");
         this.columnTypes = copyColumnTypes(columnTypes);
         this.logicalTypes = copyLogicalTypes(logicalTypes);
-        this.dynamicBucketWriter = dynamicBucketWriter;
         checkArgument(this.columnTypes.size() == this.logicalTypes.size(),
                 "columnTypes and logicalTypes size mismatch: %s != %s",
                 this.columnTypes.size(), this.logicalTypes.size());
+        this.inputChannels = copyInputChannels(inputChannels);
+        checkArgument(this.inputChannels.length == this.columnTypes.size(),
+                "inputChannels and columnTypes size mismatch: %s != %s",
+                this.inputChannels.length, this.columnTypes.size());
+        this.inputColumnTypes = inputPageTypes(this.columnTypes, this.inputChannels);
+        this.inputLogicalTypes = inputPageTypes(this.logicalTypes, this.inputChannels);
+        this.defaultValues = copyDefaultValues(defaultValues);
+        checkArgument(this.defaultValues.length == this.columnTypes.size(),
+                "defaultValues and columnTypes size mismatch: %s != %s",
+                this.defaultValues.length, this.columnTypes.size());
+        this.inputChannelCount = inputChannelCount(this.inputChannels);
+        this.allColumnsPresent = allColumnsPresent(this.inputChannels);
+        this.dynamicBucketWriter = dynamicBucketWriter;
     }
 
     private static List<Type> copyColumnTypes(List<Type> columnTypes)
@@ -83,6 +122,75 @@ public class PaimonPageSink
         requireNonNull(logicalTypes, "logicalTypes is null").forEach(logicalType ->
                 requireNonNull(logicalType, "logicalTypes contains null type"));
         return List.copyOf(logicalTypes);
+    }
+
+    private static Object[] copyDefaultValues(Object[] defaultValues)
+    {
+        return requireNonNull(defaultValues, "defaultValues is null").clone();
+    }
+
+    private static Object[] emptyDefaultValues(List<?> columns)
+    {
+        requireNonNull(columns, "columns is null");
+        return new Object[columns.size()];
+    }
+
+    private static int[] copyInputChannels(int[] inputChannels)
+    {
+        int[] channels = requireNonNull(inputChannels, "inputChannels is null").clone();
+        for (int channel : channels) {
+            checkArgument(channel >= -1, "inputChannels contains invalid channel: %s", channel);
+            checkArgument(channel < channels.length, "inputChannels contains channel outside field range: %s", channel);
+        }
+        boolean[] seenChannels = new boolean[inputChannelCount(channels)];
+        for (int channel : channels) {
+            if (channel >= 0) {
+                checkArgument(!seenChannels[channel], "inputChannels contains duplicate channel: %s", channel);
+                seenChannels[channel] = true;
+            }
+        }
+        for (int channel = 0; channel < seenChannels.length; channel++) {
+            checkArgument(seenChannels[channel], "inputChannels does not contain input page channel: %s", channel);
+        }
+        return channels;
+    }
+
+    private static <T> List<T> inputPageTypes(List<T> fullFieldTypes, int[] inputChannels)
+    {
+        List<T> inputPageTypes = new ArrayList<>();
+        for (int fullField = 0; fullField < inputChannels.length; fullField++) {
+            int channel = inputChannels[fullField];
+            if (channel >= 0) {
+                while (inputPageTypes.size() <= channel) {
+                    inputPageTypes.add(null);
+                }
+                inputPageTypes.set(channel, fullFieldTypes.get(fullField));
+            }
+        }
+        for (int channel = 0; channel < inputPageTypes.size(); channel++) {
+            if (inputPageTypes.get(channel) == null) {
+                throw new IllegalArgumentException("Input page channel %s is not mapped to a Paimon field"
+                        .formatted(channel));
+            }
+        }
+        return List.copyOf(inputPageTypes);
+    }
+
+    private static int inputChannelCount(int[] inputChannels)
+    {
+        int maxChannel = -1;
+        for (int inputChannel : inputChannels) {
+            maxChannel = Math.max(maxChannel, inputChannel);
+        }
+        return maxChannel + 1;
+    }
+
+    private static int[] identityChannels(List<?> columns)
+    {
+        requireNonNull(columns, "columns is null");
+        int[] channels = new int[columns.size()];
+        Arrays.setAll(channels, index -> index);
+        return channels;
     }
 
     @Override
@@ -101,12 +209,10 @@ public class PaimonPageSink
     {
         requireNonNull(page, "page is null");
         requireNonNull(rowKind, "rowKind is null");
-        checkArgument(page.getChannelCount() == columnTypes.size(),
-                "page channel count (%s) must match write column count (%s)",
-                page.getChannelCount(), columnTypes.size());
+        validatePageShape(page);
         try {
             for (int i = 0; i < page.getPositionCount(); i++) {
-                PaimonRow row = new PaimonRow(page, i, rowKind, columnTypes, logicalTypes);
+                InternalRow row = row(page, i, rowKind);
                 if (dynamicBucketWriter == null) {
                     writer.write(row);
                 }
@@ -118,6 +224,34 @@ public class PaimonPageSink
         catch (Exception e) {
             throw wrapWriteException(e);
         }
+    }
+
+    private void validatePageShape(Page page)
+    {
+        int pageChannelCount = page.getChannelCount();
+        if (pageChannelCount != inputChannelCount) {
+            throw new IllegalArgumentException("page channel count (%s) must match write column count (%s)"
+                    .formatted(pageChannelCount, inputChannelCount));
+        }
+    }
+
+    private InternalRow row(Page page, int position, RowKind rowKind)
+    {
+        if (allColumnsPresent) {
+            return new PaimonRow(page, position, rowKind, columnTypes, logicalTypes);
+        }
+        return new MappedPaimonRow(page, position, rowKind, inputColumnTypes, inputLogicalTypes, inputChannels,
+                defaultValues);
+    }
+
+    private static boolean allColumnsPresent(int[] inputChannels)
+    {
+        for (int index = 0; index < inputChannels.length; index++) {
+            if (inputChannels[index] != index) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
@@ -249,6 +383,185 @@ public class PaimonPageSink
         void prepareCommit()
         {
             bucketAssigner.prepareCommit(BatchWriteBuilder.COMMIT_IDENTIFIER);
+        }
+    }
+
+    private static class MappedPaimonRow
+            implements InternalRow
+    {
+        private final PaimonRow inputRow;
+        private final int[] inputChannels;
+        private final Object[] defaultValues;
+        private RowKind rowKind;
+
+        MappedPaimonRow(
+                Page page,
+                int position,
+                RowKind rowKind,
+                List<Type> inputColumnTypes,
+                List<DataType> inputLogicalTypes,
+                int[] inputChannels,
+                Object[] defaultValues)
+        {
+            this.inputRow = new PaimonRow(page, position, rowKind, inputColumnTypes, inputLogicalTypes);
+            this.inputChannels = inputChannels;
+            this.defaultValues = defaultValues;
+            this.rowKind = rowKind;
+        }
+
+        @Override
+        public int getFieldCount()
+        {
+            return inputChannels.length;
+        }
+
+        @Override
+        public RowKind getRowKind()
+        {
+            return rowKind;
+        }
+
+        @Override
+        public void setRowKind(RowKind rowKind)
+        {
+            this.rowKind = requireNonNull(rowKind, "rowKind is null");
+            inputRow.setRowKind(rowKind);
+        }
+
+        @Override
+        public boolean isNullAt(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            if (inputChannel >= 0) {
+                return inputRow.isNullAt(inputChannel);
+            }
+            return defaultValues[pos] == null;
+        }
+
+        @Override
+        public boolean getBoolean(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getBoolean(inputChannel) : (boolean) defaultValue(pos);
+        }
+
+        @Override
+        public byte getByte(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getByte(inputChannel) : (byte) defaultValue(pos);
+        }
+
+        @Override
+        public short getShort(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getShort(inputChannel) : (short) defaultValue(pos);
+        }
+
+        @Override
+        public int getInt(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getInt(inputChannel) : (int) defaultValue(pos);
+        }
+
+        @Override
+        public long getLong(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getLong(inputChannel) : (long) defaultValue(pos);
+        }
+
+        @Override
+        public float getFloat(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getFloat(inputChannel) : (float) defaultValue(pos);
+        }
+
+        @Override
+        public double getDouble(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getDouble(inputChannel) : (double) defaultValue(pos);
+        }
+
+        @Override
+        public BinaryString getString(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getString(inputChannel) : (BinaryString) defaultValue(pos);
+        }
+
+        @Override
+        public Decimal getDecimal(int pos, int precision, int scale)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getDecimal(inputChannel, precision, scale) : (Decimal) defaultValue(pos);
+        }
+
+        @Override
+        public Timestamp getTimestamp(int pos, int precision)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getTimestamp(inputChannel, precision) : (Timestamp) defaultValue(pos);
+        }
+
+        @Override
+        public byte[] getBinary(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getBinary(inputChannel) : (byte[]) defaultValue(pos);
+        }
+
+        @Override
+        public Variant getVariant(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getVariant(inputChannel) : (Variant) defaultValue(pos);
+        }
+
+        @Override
+        public Blob getBlob(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getBlob(inputChannel) : (Blob) defaultValue(pos);
+        }
+
+        @Override
+        public InternalArray getArray(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getArray(inputChannel) : (InternalArray) defaultValue(pos);
+        }
+
+        @Override
+        public InternalVector getVector(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getVector(inputChannel) : (InternalVector) defaultValue(pos);
+        }
+
+        @Override
+        public InternalMap getMap(int pos)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getMap(inputChannel) : (InternalMap) defaultValue(pos);
+        }
+
+        @Override
+        public InternalRow getRow(int pos, int numFields)
+        {
+            int inputChannel = inputChannels[pos];
+            return inputChannel >= 0 ? inputRow.getRow(inputChannel, numFields) : (InternalRow) defaultValue(pos);
+        }
+
+        private Object defaultValue(int pos)
+        {
+            Object defaultValue = defaultValues[pos];
+            checkArgument(defaultValue != null, "Column %s is not present in the input page and has no default value", pos);
+            return defaultValue;
         }
     }
 }
