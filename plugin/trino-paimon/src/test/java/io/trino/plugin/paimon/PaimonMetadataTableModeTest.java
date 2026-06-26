@@ -3620,6 +3620,96 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testTopLevelDdlCanonicalizesPaimonColumnName()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "Id", DataTypes.INT().notNull()),
+                DataTypes.FIELD(1, "Payload", DataTypes.STRING().notNull()));
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType,
+                List.of(), List.of("Id"), "Id");
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle payloadColumn = PaimonColumnHandle.of("payload", DataTypes.STRING().notNull());
+
+        metadata.renameColumn(SESSION, tableHandle, payloadColumn, "renamed_payload");
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.RenameColumn.class, change -> {
+                    assertThat(change.fieldNames()).containsExactly("Payload");
+                    assertThat(change.newName()).isEqualTo("renamed_payload");
+                });
+
+        metadata.dropColumn(SESSION, tableHandle, payloadColumn);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.DropColumn.class, change ->
+                        assertThat(change.fieldNames()).containsExactly("Payload"));
+
+        metadata.setColumnComment(SESSION, tableHandle, payloadColumn, Optional.of("payload comment"));
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.UpdateColumnComment.class, change -> {
+                    assertThat(change.fieldNames()).containsExactly("Payload");
+                    assertThat(change.newDescription()).isEqualTo("payload comment");
+                });
+
+        metadata.setColumnType(SESSION, tableHandle, payloadColumn, BIGINT);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.UpdateColumnType.class, change -> {
+                    assertThat(change.fieldNames()).containsExactly("Payload");
+                    assertThat(change.newDataType().getTypeRoot()).isEqualTo(DataTypeRoot.BIGINT);
+                    assertThat(change.newDataType().isNullable()).isFalse();
+                });
+
+        metadata.dropNotNullConstraint(SESSION, tableHandle, payloadColumn);
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.UpdateColumnNullability.class, change -> {
+                    assertThat(change.fieldNames()).containsExactly("Payload");
+                    assertThat(change.newNullability()).isTrue();
+                });
+    }
+
+    @Test
+    public void testDdlProtectsKeyColumnsCaseInsensitively()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "Id", DataTypes.INT().notNull()),
+                DataTypes.FIELD(1, "Dt", DataTypes.STRING()),
+                DataTypes.FIELD(2, "Payload", DataTypes.STRING()));
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType,
+                List.of("Dt"), List.of("Id"), "Id");
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle primaryKey = PaimonColumnHandle.of("id", DataTypes.INT().notNull());
+        PaimonColumnHandle partitionKey = PaimonColumnHandle.of("dt", DataTypes.STRING());
+
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, partitionKey, "event_date"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported: Cannot rename partition column: [dt]");
+        assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, partitionKey),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot drop partition key or primary key: [dt]");
+        assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, primaryKey),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot drop partition key or primary key: [id]");
+        assertTrinoError(() -> metadata.setColumnType(SESSION, tableHandle, partitionKey, VARCHAR),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set column type is not supported: Cannot update partition column: [dt]");
+        assertTrinoError(() -> metadata.setColumnType(SESSION, tableHandle, primaryKey, VARCHAR),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set column type is not supported: Cannot update primary key");
+        assertTrinoError(() -> metadata.dropNotNullConstraint(SESSION, tableHandle, primaryKey),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop not null constraint is not supported: Cannot change nullability of primary key");
+
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testDdlRejectsUnsupportedPaimonKeyColumnEvolutionBeforeCatalogAlter()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
@@ -3682,7 +3772,9 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testSetColumnCommentUsesPaimonCommentSchemaChange()
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.BYTES()));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
         PaimonColumnHandle column = PaimonColumnHandle.of("payload", DataTypes.BYTES());
@@ -5231,7 +5323,9 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testRenameColumnUsesPaimonRenameSchemaChange()
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "old_name", DataTypes.STRING()));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
         PaimonColumnHandle columnHandle = PaimonColumnHandle.of("old_name", DataTypes.STRING());
@@ -5250,7 +5344,10 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testDropColumnUsesPaimonDropSchemaChange()
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "obsolete_col", DataTypes.STRING()));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
         PaimonColumnHandle columnHandle = PaimonColumnHandle.of("obsolete_col", DataTypes.STRING());
@@ -5296,7 +5393,9 @@ public class PaimonMetadataTableModeTest
     private static void assertSetColumnTypePreservesExistingPaimonNullability(org.apache.paimon.types.DataType existingType,
             boolean expectedNullable)
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", existingType));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
@@ -5312,6 +5411,24 @@ public class PaimonMetadataTableModeTest
                     assertThat(change.newDataType().isNullable()).isEqualTo(expectedNullable);
                     assertThat(change.keepNullability()).isTrue();
                 });
+    }
+
+    @Test
+    public void testSetColumnTypeUsesLatestPaimonNullabilityInsteadOfStaleColumnHandle()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT().notNull()));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        metadata.setColumnType(SESSION, tableHandle, PaimonColumnHandle.of("id", DataTypes.INT()),
+                io.trino.spi.type.BigintType.BIGINT);
+
+        assertThat(catalog.lastAlterChanges)
+                .singleElement()
+                .isInstanceOfSatisfying(SchemaChange.UpdateColumnType.class, change ->
+                        assertThat(change.newDataType().isNullable()).isFalse());
     }
 
     @Test
