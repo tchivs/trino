@@ -106,7 +106,7 @@ public class PaimonSplitManagerTest
     }
 
     @Test
-    public void testEffectivePredicateReturnsHandleFilterWhenLimitPreventsDynamicFilter()
+    public void testEffectivePredicateIgnoresDynamicDomainsWhenLimitPreventsDynamicFilter()
     {
         TupleDomain<PaimonColumnHandle> staticPredicate = TupleDomain.withColumnDomains(Map.of(
                 ID_COLUMN, Domain.singleValue(BIGINT, 1L)));
@@ -118,6 +118,51 @@ public class PaimonSplitManagerTest
                 handle, dynamicFilter(TupleDomain.withColumnDomains(Map.of(ID_COLUMN, Domain.singleValue(BIGINT, 2L))), false));
 
         assertThat(result).isEqualTo(staticPredicate);
+    }
+
+    @Test
+    public void testEffectivePredicateKeepsDynamicNoneWhenLimitPreventsDynamicFilter()
+    {
+        TupleDomain<PaimonColumnHandle> staticPredicate = TupleDomain.withColumnDomains(Map.of(
+                ID_COLUMN, Domain.singleValue(BIGINT, 1L)));
+        PaimonTableHandle handle = new PaimonTableHandle(
+                "schema", "table", Collections.emptyMap(),
+                staticPredicate, Optional.empty(), Optional.empty(), OptionalLong.of(10));
+
+        TupleDomain<PaimonColumnHandle> result = PaimonSplitManager.effectivePredicate(
+                handle, dynamicFilter(TupleDomain.none(), false));
+
+        assertThat(result).isEqualTo(TupleDomain.none());
+    }
+
+    @Test
+    public void testEffectivePredicateIgnoresDynamicDomains()
+    {
+        TupleDomain<PaimonColumnHandle> staticPredicate = TupleDomain.withColumnDomains(Map.of(
+                ID_COLUMN, Domain.singleValue(BIGINT, 1L)));
+        PaimonTableHandle handle = new PaimonTableHandle(
+                "schema", "table", Collections.emptyMap(),
+                staticPredicate, Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        TupleDomain<PaimonColumnHandle> result = PaimonSplitManager.effectivePredicate(
+                handle, dynamicFilter(TupleDomain.withColumnDomains(Map.of(ID_COLUMN, Domain.singleValue(BIGINT, 2L))), false));
+
+        assertThat(result).isEqualTo(staticPredicate);
+    }
+
+    @Test
+    public void testEffectivePredicateKeepsDynamicNone()
+    {
+        TupleDomain<PaimonColumnHandle> staticPredicate = TupleDomain.withColumnDomains(Map.of(
+                ID_COLUMN, Domain.singleValue(BIGINT, 1L)));
+        PaimonTableHandle handle = new PaimonTableHandle(
+                "schema", "table", Collections.emptyMap(),
+                staticPredicate, Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        TupleDomain<PaimonColumnHandle> result = PaimonSplitManager.effectivePredicate(
+                handle, dynamicFilter(TupleDomain.none(), false));
+
+        assertThat(result).isEqualTo(TupleDomain.none());
     }
 
     @Test

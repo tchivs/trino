@@ -464,7 +464,36 @@ public class DynamicFilteringTrinoSplitSourceTest
     }
 
     @Test
-    public void testAcceptedLimitSkipsAwaitingDynamicFilter()
+    public void testAcceptedLimitShortCircuitsCurrentNoneDynamicFilter()
+            throws Exception
+    {
+        RecordingCatalog catalog = new RecordingCatalog(true);
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Collections.emptyMap(),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.of(5)),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                blockingDynamicFilter(TupleDomain.none()),
+                new Duration(1, SECONDS));
+
+        ConnectorSplitSource.ConnectorSplitBatch batch = splitSource.getNextBatch(100).get();
+
+        assertThat(catalog.initialized()).isFalse();
+        assertThat(catalog.tableLoaded()).isFalse();
+        assertThat(batch.getSplits()).isEmpty();
+        assertThat(batch.isNoMoreSplits()).isTrue();
+    }
+
+    @Test
+    public void testAcceptedLimitSkipsAwaitingNonNoneDynamicFilter()
             throws Exception
     {
         RecordingCatalog catalog = new RecordingCatalog(false);
@@ -481,7 +510,7 @@ public class DynamicFilteringTrinoSplitSourceTest
                         .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
                         .build(),
                 catalog,
-                blockingDynamicFilter(TupleDomain.none()),
+                blockingDynamicFilter(TupleDomain.all()),
                 new Duration(1, SECONDS));
 
         ConnectorSplitSource.ConnectorSplitBatch batch = splitSource.getNextBatch(100).get();
