@@ -1832,6 +1832,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         String sourceColumnName = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle).name();
         PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(table);
         rejectPartitionKeyChange("rename column", "rename", paimonColumnHandle, schemaEvolutionKeys);
+        rejectPrimaryKeyChange("rename column", "rename", paimonColumnHandle, schemaEvolutionKeys);
         validateNoCaseInsensitiveDuplicateColumnName(table, schemaTableName(paimonTableHandle), target,
                 Optional.of(sourceColumnName));
         List<SchemaChange> changes = new ArrayList<>();
