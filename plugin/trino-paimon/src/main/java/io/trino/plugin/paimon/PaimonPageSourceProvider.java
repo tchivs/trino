@@ -327,12 +327,12 @@ public class PaimonPageSourceProvider
                                     dataSchemaFields);
                         }
 
-                        if (canSkipDirectReadFile(dataFileColumns, filterDomains, dataSchemaFields)) {
-                            continue;
-                        }
                         if (!directReaderSupportsSchemaEvolution(projectedFields, rowType.getFields(), dataSchemaFields)) {
                             return createPaimonReaderPageSource(table, refreshToLatestSchema, readerFilter, paimonSplit,
                                     columns, limit, projectedFields);
+                        }
+                        if (canSkipDirectReadFile(dataFileColumns, filterDomains, dataSchemaFields)) {
+                            continue;
                         }
 
                         Optional<DeletionFile> deletionFile = deletionFileAt(deletionFiles, i);
@@ -538,7 +538,13 @@ public class PaimonPageSourceProvider
                         .formatted(projectedField, tableFields.stream().map(DataField::name).toList()));
             }
             DataField dataField = dataFieldById.get(tableField.id());
-            if (dataField != null && !dataField.type().equalsIgnoreNullable(tableField.type())) {
+            if (dataField == null) {
+                if (tableField.defaultValue() != null || !tableField.type().isNullable()) {
+                    return false;
+                }
+                continue;
+            }
+            if (!dataField.type().equalsIgnoreNullable(tableField.type())) {
                 return false;
             }
         }
