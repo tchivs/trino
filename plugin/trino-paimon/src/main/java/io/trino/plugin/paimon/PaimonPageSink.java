@@ -211,6 +211,14 @@ public class PaimonPageSink
         if (exception instanceof TrinoException trinoException) {
             return trinoException;
         }
+        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+            String detail = unsupportedOperationException.getMessage();
+            return new TrinoException(NOT_SUPPORTED,
+                    detail == null || detail.isBlank()
+                            ? "Paimon writer close uses features which are not supported by the Trino connector"
+                            : "Paimon writer close uses features which are not supported by the Trino connector: " + detail,
+                    unsupportedOperationException);
+        }
         if (exception instanceof RuntimeException runtimeException) {
             return runtimeException;
         }
