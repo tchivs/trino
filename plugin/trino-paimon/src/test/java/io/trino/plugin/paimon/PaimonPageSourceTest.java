@@ -332,6 +332,26 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectReaderSchemaEvolutionFallsBackForMissingProjectedFieldsWithPaimonDefaults()
+    {
+        List<DataField> dataFields = List.of(
+                new DataField(1, "id", DataTypes.INT()));
+        DataField nullableAddedField = new DataField(2, "added_nullable", DataTypes.STRING());
+        DataField defaultAddedField = nullableAddedField.newDefaultValue("'unknown'");
+        DataField requiredAddedField = new DataField(3, "added_required", DataTypes.STRING().notNull());
+
+        assertThat(PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(
+                List.of("added_nullable"), List.of(nullableAddedField), dataFields))
+                .isTrue();
+        assertThat(PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(
+                List.of("added_nullable"), List.of(defaultAddedField), dataFields))
+                .isFalse();
+        assertThat(PaimonPageSourceProvider.directReaderSupportsSchemaEvolution(
+                List.of("added_required"), List.of(requiredAddedField), dataFields))
+                .isFalse();
+    }
+
+    @Test
     void testOrcTimeColumnsFallBackFromDirectPageSource()
     {
         assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(rawFile("orc")), List.of(
