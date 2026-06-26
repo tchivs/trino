@@ -149,10 +149,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
     private static final int MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE = 1000;
     private static final int MAX_PARTITION_DELETE_SPECS = 1024;
     private static final String TRINO_SCHEMA_OWNER_TYPE_PROPERTY = "trino.owner-type";
-    private static final Set<String> UNSUPPORTED_PAIMON_OPTION_UPDATES = Set.of(
-            CoreOptions.BUCKET_KEY.key(),
-            CoreOptions.BUCKET_FUNCTION_TYPE.key(),
-            CoreOptions.ROW_TRACKING_ENABLED.key());
     private static final Set<String> PAIMON_OPTION_UPDATES_REQUIRING_EXISTING_OPTIONS = Set.of(
             CoreOptions.BUCKET.key(),
             CoreOptions.DELETION_VECTORS_ENABLED.key(),
@@ -1339,8 +1335,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                         || PaimonTableOptions.PARTITIONED_BY_PROPERTY.equals(property)
                         || CoreOptions.PRIMARY_KEY.key().equals(property)
                         || CoreOptions.PARTITION.key().equals(property)
-                        || UNSUPPORTED_PAIMON_OPTION_UPDATES.contains(
-                                PaimonTableOptionUtils.toPaimonOptionKey(property))
+                        || CoreOptions.IMMUTABLE_OPTIONS.contains(PaimonTableOptionUtils.toPaimonOptionKey(property))
                         || PaimonTableOptionUtils.isRuntimeOnlyTableProperty(property))
                 .sorted()
                 .toList();
