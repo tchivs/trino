@@ -4049,6 +4049,15 @@ public class PaimonMetadataTableModeTest
                 INVALID_TABLE_PROPERTY.toErrorCode(),
                 "Paimon primary_key must not contain duplicate columns: [id]");
 
+        ConnectorTableMetadata duplicatePrimaryKeyCaseInsensitive = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("Id", INTEGER)),
+                Map.of(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("id", "ID")));
+        assertTrinoError(() -> metadata.createTable(SESSION, duplicatePrimaryKeyCaseInsensitive,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Paimon primary_key must not contain duplicate columns: [id]");
+
         ConnectorTableMetadata missingPrimaryKey = new ConnectorTableMetadata(
                 new SchemaTableName("schema", "table"),
                 List.of(new ColumnMetadata("id", INTEGER)),
@@ -4067,6 +4076,15 @@ public class PaimonMetadataTableModeTest
                 INVALID_TABLE_PROPERTY.toErrorCode(),
                 "Paimon partitioned_by must not contain duplicate columns: [dt]");
 
+        ConnectorTableMetadata duplicatePartitionKeyCaseInsensitive = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("Dt", VARCHAR)),
+                Map.of(PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("dt", "DT")));
+        assertTrinoError(() -> metadata.createTable(SESSION, duplicatePartitionKeyCaseInsensitive,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Paimon partitioned_by must not contain duplicate columns: [dt]");
+
         ConnectorTableMetadata missingPartitionKey = new ConnectorTableMetadata(
                 new SchemaTableName("schema", "table"),
                 List.of(new ColumnMetadata("dt", VARCHAR)),
@@ -4075,6 +4093,14 @@ public class PaimonMetadataTableModeTest
                         io.trino.spi.connector.SaveMode.FAIL),
                 INVALID_TABLE_PROPERTY.toErrorCode(),
                 "Paimon partitioned_by columns not present in schema: [missing]");
+
+        ConnectorTableMetadata duplicateColumnsCaseInsensitive = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("Id", INTEGER), new ColumnMetadata("id", BIGINT)));
+        assertTrinoError(() -> metadata.createTable(SESSION, duplicateColumnsCaseInsensitive,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Paimon table columns must not contain case-insensitive duplicate columns: [id]");
 
         ConnectorTableMetadata systemColumn = new ConnectorTableMetadata(
                 new SchemaTableName("schema", "table"),
@@ -4115,6 +4141,26 @@ public class PaimonMetadataTableModeTest
         assertThat(catalog.createdSchema).isNull();
         assertThat(catalog.createdDatabase).isNull();
         assertThat(catalog.droppedDatabase).isNull();
+    }
+
+    @Test
+    public void testCreateTableCanonicalizesKeyPropertyColumns()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(
+                        new ColumnMetadata("id", INTEGER),
+                        new ColumnMetadata("dt", VARCHAR)),
+                Map.of(
+                        PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("ID"),
+                        PaimonTableOptions.PARTITIONED_BY_PROPERTY, List.of("DT")));
+
+        metadata.createTable(SESSION, tableMetadata, io.trino.spi.connector.SaveMode.FAIL);
+
+        assertThat(catalog.createdSchema.primaryKeys()).containsExactly("id");
+        assertThat(catalog.createdSchema.partitionKeys()).containsExactly("dt");
     }
 
     @Test

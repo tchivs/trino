@@ -1451,8 +1451,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         List<String> columnNames = tableMetadata.getColumns().stream()
                 .map(ColumnMetadata::getName)
                 .collect(toList());
-        validateKeyColumns(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, primaryKeys, columnNames);
-        validateKeyColumns(PaimonTableOptions.PARTITIONED_BY_PROPERTY, partitionKeys, columnNames);
+        Map<String, String> canonicalColumnNames = canonicalColumnNames(columnNames);
+        primaryKeys = canonicalKeyColumns(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, primaryKeys, canonicalColumnNames);
+        partitionKeys = canonicalKeyColumns(PaimonTableOptions.PARTITIONED_BY_PROPERTY, partitionKeys, canonicalColumnNames);
         Schema.Builder builder = Schema.newBuilder().primaryKey(primaryKeys)
                 .partitionKeys(partitionKeys)
                 .comment(tableMetadata.getComment().orElse(null));
@@ -1467,29 +1468,51 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return builder.build();
     }
 
-    private static void validateKeyColumns(String propertyName, List<String> keyColumns, List<String> columnNames)
+    private static Map<String, String> canonicalColumnNames(List<String> columnNames)
+    {
+        requireNonNull(columnNames, "columnNames is null");
+        Map<String, String> canonicalColumnNames = new LinkedHashMap<>();
+        Set<String> duplicateColumns = new LinkedHashSet<>();
+        for (String columnName : columnNames) {
+            String lowerColumnName = FieldNameUtils.toLowerCase(columnName);
+            if (canonicalColumnNames.putIfAbsent(lowerColumnName, columnName) != null) {
+                duplicateColumns.add(lowerColumnName);
+            }
+        }
+        if (!duplicateColumns.isEmpty()) {
+            throw new TrinoException(INVALID_TABLE_PROPERTY,
+                    "Paimon table columns must not contain case-insensitive duplicate columns: " + duplicateColumns);
+        }
+        return canonicalColumnNames;
+    }
+
+    private static List<String> canonicalKeyColumns(String propertyName, List<String> keyColumns,
+            Map<String, String> canonicalColumnNames)
     {
         requireNonNull(propertyName, "propertyName is null");
         requireNonNull(keyColumns, "keyColumns is null");
-        requireNonNull(columnNames, "columnNames is null");
+        requireNonNull(canonicalColumnNames, "canonicalColumnNames is null");
         if (keyColumns.isEmpty()) {
-            return;
+            return List.of();
         }
 
-        Set<String> duplicateColumns = duplicates(keyColumns);
+        Set<String> duplicateColumns = duplicates(FieldNameUtils.toLowerCase(keyColumns));
         if (!duplicateColumns.isEmpty()) {
             throw new TrinoException(INVALID_TABLE_PROPERTY,
                     "Paimon " + propertyName + " must not contain duplicate columns: " + duplicateColumns);
         }
 
-        Set<String> tableColumns = new LinkedHashSet<>(columnNames);
         List<String> missingColumns = keyColumns.stream()
-                .filter(column -> !tableColumns.contains(column))
+                .filter(column -> !canonicalColumnNames.containsKey(FieldNameUtils.toLowerCase(column)))
                 .toList();
         if (!missingColumns.isEmpty()) {
             throw new TrinoException(INVALID_TABLE_PROPERTY,
                     "Paimon " + propertyName + " columns not present in schema: " + missingColumns);
         }
+
+        return keyColumns.stream()
+                .map(column -> canonicalColumnNames.get(FieldNameUtils.toLowerCase(column)))
+                .collect(toList());
     }
 
     private static Set<String> duplicates(List<String> values)
