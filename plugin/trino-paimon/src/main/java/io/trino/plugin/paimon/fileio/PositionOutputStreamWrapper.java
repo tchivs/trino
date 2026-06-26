@@ -18,6 +18,8 @@ import org.apache.paimon.fs.PositionOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 
+import static java.util.Objects.requireNonNull;
+
 public class PositionOutputStreamWrapper
         extends
         PositionOutputStream
@@ -33,7 +35,7 @@ public class PositionOutputStreamWrapper
 
     public PositionOutputStreamWrapper(OutputStream outputStream, long startPosition)
     {
-        this.outputStream = outputStream;
+        this.outputStream = requireNonNull(outputStream, "outputStream is null");
         this.position = startPosition;
     }
 
@@ -47,24 +49,24 @@ public class PositionOutputStreamWrapper
     public void write(int b)
             throws IOException
     {
-        position++;
         outputStream.write(b);
+        position++;
     }
 
     @Override
     public void write(byte[] bytes)
             throws IOException
     {
-        position += bytes.length;
         outputStream.write(bytes);
+        position += bytes.length;
     }
 
     @Override
     public void write(byte[] bytes, int off, int len)
             throws IOException
     {
-        position += len;
         outputStream.write(bytes, off, len);
+        position += len;
     }
 
     @Override
