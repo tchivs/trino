@@ -120,8 +120,10 @@ public class PaimonFilterExtractor
         }
 
         LinkedHashMap<PaimonColumnHandle, Domain> unenforcedDomains = new LinkedHashMap<>();
+        Set<String> partitionKeyNames = FieldNameUtils.toLowerCase(partitionKeys).stream()
+                .collect(Collectors.toUnmodifiableSet());
         acceptedDomains.forEach((columnHandle, domain) -> {
-            if (!partitionKeys.contains(columnHandle.getColumnName())) {
+            if (!partitionKeyNames.contains(FieldNameUtils.toLowerCase(columnHandle.getColumnName()))) {
                 unenforcedDomains.put(columnHandle, domain);
             }
         });

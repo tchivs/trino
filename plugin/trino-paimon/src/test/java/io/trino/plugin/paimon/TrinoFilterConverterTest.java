@@ -523,6 +523,27 @@ public class TrinoFilterConverterTest
     }
 
     @Test
+    public void testPartitionFilterExtractionMatchesPartitionKeysCaseInsensitively()
+    {
+        RowType rowType = new RowType(List.of(
+                new DataField(0, "region", DataTypes.INT()),
+                new DataField(1, "id", DataTypes.INT())));
+        PaimonTableHandle table = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle region = PaimonColumnHandle.of("REGION", DataTypes.INT());
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(
+                region, Domain.singleValue(INTEGER, 7L))));
+
+        PaimonFilterExtractor.TrinoFilter filter = PaimonFilterExtractor
+                .extract(table, constraint, rowType, List.of("region"))
+                .orElseThrow();
+
+        assertThat(filter.filter().getDomains().orElseThrow()).containsOnly(Map.entry(region,
+                Domain.singleValue(INTEGER, 7L)));
+        assertThat(filter.remainFilter()).isEqualTo(TupleDomain.all());
+        assertThat(filter.remainingExpression()).isEqualTo(Constant.TRUE);
+    }
+
+    @Test
     public void testFilterExtractionSummaryRequiresPaimonColumnHandles()
     {
         RowType rowType = new RowType(Collections.singletonList(new DataField(0, "id", new IntType())));
