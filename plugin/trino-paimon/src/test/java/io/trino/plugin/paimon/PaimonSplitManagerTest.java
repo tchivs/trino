@@ -40,6 +40,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.DynamicFilter.NOT_BLOCKED;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -334,6 +335,8 @@ public class PaimonSplitManagerTest
 
         RuntimeException exception = PaimonSplitManager.splitPlanningException(handle, cause);
 
+        assertThat(exception).isInstanceOf(TrinoException.class);
+        assertThat(((TrinoException) exception).getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
         assertThat(exception).hasMessageContaining("Failed to plan Paimon splits");
         assertThat(exception.getCause()).isSameAs(cause);
     }
@@ -348,15 +351,32 @@ public class PaimonSplitManagerTest
 
         RuntimeException exception = PaimonSplitManager.splitPlanningException(handle, cause);
 
+        assertThat(exception).isInstanceOf(TrinoException.class);
+        assertThat(((TrinoException) exception).getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
         assertThat(exception).hasMessageContaining("Failed to plan Paimon table_changes splits");
         assertThat(exception.getCause()).isSameAs(cause);
     }
 
     @Test
-    public void testSplitPlanningExceptionReturnsRuntimeExceptionAsIs()
+    public void testSplitPlanningExceptionWrapsRuntimeException()
     {
         PaimonTableHandle handle = new PaimonTableHandle("schema", "table", Collections.emptyMap());
-        RuntimeException cause = new RuntimeException("planning failed");
+        RuntimeException cause = new IndexOutOfBoundsException("Index 1 out of bounds for length 1");
+
+        RuntimeException exception = PaimonSplitManager.splitPlanningException(handle, cause);
+
+        assertThat(exception).isInstanceOfSatisfying(TrinoException.class, trinoException -> {
+            assertThat(trinoException.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+            assertThat(trinoException).hasMessage("Failed to plan Paimon splits");
+            assertThat(trinoException.getCause()).isSameAs(cause);
+        });
+    }
+
+    @Test
+    public void testSplitPlanningExceptionReturnsTrinoExceptionAsIs()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("schema", "table", Collections.emptyMap());
+        TrinoException cause = new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, "already wrapped");
 
         RuntimeException exception = PaimonSplitManager.splitPlanningException(handle, cause);
 
