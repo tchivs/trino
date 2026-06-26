@@ -26,6 +26,8 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
@@ -39,6 +41,7 @@ import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.table.sink.CommitMessage;
+import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
@@ -60,6 +63,7 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -476,6 +480,35 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testWriteLayoutUsesLatestTableSchemaOrder()
+    {
+        DataField defaultZipField = new DataField(2, "zip", DataTypes.STRING()).newDefaultValue("'00000'");
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "name", DataTypes.STRING()),
+                defaultZipField));
+        List<PaimonColumnHandle> writeColumns = List.of(
+                PaimonColumnHandle.of("name", DataTypes.STRING()),
+                PaimonColumnHandle.of("id", DataTypes.INT()));
+
+        PaimonPageSinkProvider.WriteLayout layout = PaimonPageSinkProvider.writeLayout(table, writeColumns,
+                TESTING_TYPE_MANAGER);
+
+        assertThat(layout.columnTypes()).containsExactly(INTEGER, VARCHAR, VARCHAR);
+        assertThat(layout.logicalTypes()).containsExactly(DataTypes.INT(), DataTypes.STRING(), DataTypes.STRING());
+        assertThat(layout.inputChannels()).containsExactly(1, 0, -1);
+        assertThat(layout.defaultValues()).containsExactly(null, null, BinaryString.fromString("00000"));
+
+        int[] inputChannels = layout.inputChannels();
+        inputChannels[0] = 99;
+        assertThat(layout.inputChannels()).containsExactly(1, 0, -1);
+
+        Object[] defaultValues = layout.defaultValues();
+        defaultValues[2] = null;
+        assertThat(layout.defaultValues()).containsExactly(null, null, BinaryString.fromString("00000"));
+    }
+
+    @Test
     public void testWriteColumnsMatchLatestTableSchemaCaseInsensitively()
     {
         FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, DataTypes.ROW(
@@ -632,6 +665,21 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> new PaimonPageSink(writer(), List.of(INTEGER), List.of()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("columnTypes and logicalTypes size mismatch: 1 != 0");
+
+        assertThatThrownBy(() -> new PaimonPageSink(writer(), List.of(INTEGER), List.of(DataTypes.INT()),
+                new int[] {1}, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("inputChannels contains channel outside field range: 1");
+
+        assertThatThrownBy(() -> new PaimonPageSink(writer(), List.of(INTEGER, INTEGER), List.of(DataTypes.INT(), DataTypes.INT()),
+                new int[] {1, -1}, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("inputChannels does not contain input page channel: 0");
+
+        assertThatThrownBy(() -> new PaimonPageSink(writer(), List.of(INTEGER), List.of(DataTypes.INT()),
+                new int[] {0}, new Object[0], null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("defaultValues and columnTypes size mismatch: 0 != 1");
     }
 
     @Test
@@ -645,6 +693,33 @@ public class PaimonPageSinkProviderTest
                 writeNativeValue(INTEGER, 2L))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("page channel count (2) must match write column count (1)");
+    }
+
+    @Test
+    public void testPageSinkMapsInputColumnsIntoLatestSchemaRow()
+    {
+        AtomicReference<Object[]> writeArguments = new AtomicReference<>();
+        PaimonPageSink pageSink = new PaimonPageSink(
+                writer(List.of(), writeArguments),
+                List.of(INTEGER, VARCHAR, VARCHAR, VARCHAR),
+                List.of(DataTypes.INT(), DataTypes.STRING(), DataTypes.STRING(), DataTypes.STRING()),
+                new int[] {1, 0, -1, -1},
+                new Object[] {null, null, BinaryString.fromString("00000"), null},
+                null);
+
+        pageSink.appendPage(new io.trino.spi.Page(
+                1,
+                writeNativeValue(VARCHAR, Slices.utf8Slice("alice")),
+                writeNativeValue(INTEGER, 7L)));
+
+        assertThat(writeArguments.get()).hasSize(1);
+        InternalRow row = (InternalRow) writeArguments.get()[0];
+        assertThat(row.getFieldCount()).isEqualTo(4);
+        assertThat(row.getInt(0)).isEqualTo(7);
+        assertThat(row.getString(1).toString()).isEqualTo("alice");
+        assertThat(row.isNullAt(2)).isFalse();
+        assertThat(row.getString(2).toString()).isEqualTo("00000");
+        assertThat(row.isNullAt(3)).isTrue();
     }
 
     @Test

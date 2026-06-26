@@ -40,4 +40,9 @@ public class PaimonMetadataFactory
     {
         return new PaimonMetadata(catalog, typeManager);
     }
+
+    public TypeManager typeManager()
+    {
+        return typeManager;
+    }
 }
