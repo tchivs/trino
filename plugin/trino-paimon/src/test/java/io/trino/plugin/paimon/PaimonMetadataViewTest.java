@@ -418,6 +418,26 @@ public class PaimonMetadataViewTest
     }
 
     @Test
+    public void testCreateOrReplaceViewRestoresExistingViewWhenCreateFails()
+    {
+        View oldView = view(Map.of("trino", "SELECT old_value"));
+        IOException failure = new IOException("view create metastore I/O failed");
+        RestoreTrackingCreateViewFailureCatalog catalog = new RestoreTrackingCreateViewFailureCatalog(oldView, failure);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, VIEW_NAME, viewDefinition("SELECT new_value"), true))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to create view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+
+        assertThat(catalog.dropViewCalls).isEqualTo(1);
+        assertThat(catalog.createAttempts).isEqualTo(2);
+        assertThat(catalog.currentView).isSameAs(oldView);
+    }
+
+    @Test
     public void testDropViewSuccess()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT id FROM table")));
@@ -735,11 +755,11 @@ public class PaimonMetadataViewTest
     private static class TestingPaimonCatalog
             extends PaimonCatalog
     {
-        private final View view;
+        protected View currentView;
         private View createdView;
         private boolean initialized;
         private boolean createdIgnoreIfExists;
-        private int dropViewCalls;
+        protected int dropViewCalls;
         private boolean droppedIgnoreIfNotExists;
         private Identifier renamedSource;
         private Identifier renamedTarget;
@@ -751,7 +771,7 @@ public class PaimonMetadataViewTest
         private TestingPaimonCatalog(View view)
         {
             super(new Options(), unsupportedFileSystemFactory());
-            this.view = view;
+            this.currentView = view;
         }
 
         @Override
@@ -769,10 +789,14 @@ public class PaimonMetadataViewTest
 
         @Override
         public View getView(Identifier identifier)
+                throws Catalog.ViewNotExistException
         {
             assertThat(identifier.getDatabaseName()).isEqualTo(VIEW_NAME.getSchemaName());
             assertThat(identifier.getObjectName()).isEqualTo(VIEW_NAME.getTableName());
-            return view;
+            if (currentView == null) {
+                throw new Catalog.ViewNotExistException(identifier);
+            }
+            return currentView;
         }
 
         @Override
@@ -784,11 +808,16 @@ public class PaimonMetadataViewTest
 
         @Override
         public void dropView(Identifier identifier, boolean ignoreIfNotExists)
+                throws Catalog.ViewNotExistException
         {
             assertThat(identifier.getDatabaseName()).isEqualTo(VIEW_NAME.getSchemaName());
             assertThat(identifier.getObjectName()).isEqualTo(VIEW_NAME.getTableName());
+            if (currentView == null && !ignoreIfNotExists) {
+                throw new Catalog.ViewNotExistException(identifier);
+            }
             dropViewCalls++;
             droppedIgnoreIfNotExists = ignoreIfNotExists;
+            currentView = null;
         }
 
         @Override
@@ -797,10 +826,11 @@ public class PaimonMetadataViewTest
         {
             assertThat(identifier.getDatabaseName()).isEqualTo(VIEW_NAME.getSchemaName());
             assertThat(identifier.getObjectName()).isEqualTo(VIEW_NAME.getTableName());
-            if (this.view != null && dropViewCalls == 0 && !ignoreIfExists) {
+            if (currentView != null && !ignoreIfExists) {
                 throw new org.apache.paimon.catalog.Catalog.ViewAlreadyExistException(identifier);
             }
             createdView = view;
+            currentView = view;
             createdIgnoreIfExists = ignoreIfExists;
         }
 
@@ -853,6 +883,30 @@ public class PaimonMetadataViewTest
                 throw e;
             }
             throw new AssertionError("Unexpected checked rename failure", failure);
+        }
+    }
+
+    private static class RestoreTrackingCreateViewFailureCatalog
+            extends TestingPaimonCatalog
+    {
+        private final IOException failure;
+        private int createAttempts;
+
+        private RestoreTrackingCreateViewFailureCatalog(View view, IOException failure)
+        {
+            super(view);
+            this.failure = failure;
+        }
+
+        @Override
+        public void createView(Identifier identifier, View view, boolean ignoreIfExists)
+                throws Catalog.ViewAlreadyExistException
+        {
+            createAttempts++;
+            if (createAttempts == 1) {
+                throw new RuntimeException(failure);
+            }
+            super.createView(identifier, view, ignoreIfExists);
         }
     }
 
