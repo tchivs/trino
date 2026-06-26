@@ -2091,10 +2091,41 @@ public record PaimonMetadata(PaimonCatalog catalog,
         String[] canonicalFieldNames = fieldNames.clone();
         DataType currentType = table.rowType();
         int limit = includeLeaf ? canonicalFieldNames.length : canonicalFieldNames.length - 1;
+        boolean lastSegmentWasCollectionMarker = false;
         for (int index = 0; index < limit; index++) {
-            DataField field = canonicalNestedField(tableHandle, currentType, canonicalFieldNames, index);
-            canonicalFieldNames[index] = field.name();
-            currentType = nestedType(field.type());
+            switch (currentType.getTypeRoot()) {
+                case ROW -> {
+                    DataField field = canonicalNestedField(tableHandle, currentType, canonicalFieldNames, index);
+                    canonicalFieldNames[index] = field.name();
+                    currentType = field.type();
+                    lastSegmentWasCollectionMarker = false;
+                }
+                case ARRAY -> {
+                    canonicalFieldNames[index] = canonicalNestedCollectionField(
+                            canonicalFieldNames,
+                            index,
+                            "element",
+                            "array element");
+                    currentType = ((ArrayType) currentType).getElementType();
+                    lastSegmentWasCollectionMarker = true;
+                }
+                case MAP -> {
+                    canonicalFieldNames[index] = canonicalNestedCollectionField(
+                            canonicalFieldNames,
+                            index,
+                            "value",
+                            "map value");
+                    currentType = ((MapType) currentType).getValueType();
+                    lastSegmentWasCollectionMarker = true;
+                }
+                default -> throw unsupportedNestedFieldPath(canonicalFieldNames);
+            }
+        }
+        if (includeLeaf && lastSegmentWasCollectionMarker) {
+            throw new TrinoException(NOT_SUPPORTED, format(
+                    "Paimon nested field schema change must target a row field, not collection marker '%s' in field path '%s'",
+                    canonicalFieldNames[canonicalFieldNames.length - 1],
+                    String.join(".", canonicalFieldNames)));
         }
         return canonicalFieldNames;
     }
@@ -2115,16 +2146,34 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         DataType currentType = table.rowType();
         for (int index = 0; index < fieldNames.length - 1; index++) {
-            DataField field = canonicalNestedField(tableHandle, currentType, fieldNames, index);
-            currentType = nestedType(field.type());
+            currentType = nextNestedType(tableHandle, currentType, fieldNames, index);
         }
         if (!(currentType instanceof RowType rowType)) {
-            throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon nested field schema change is not supported for non-row field path '"
-                            + String.join(".", fieldNames) + "'");
+            throw unsupportedNestedFieldPath(fieldNames);
         }
         validateNoCaseInsensitiveDuplicateFieldName(rowType.getFields(), String.join(".", fieldNames), fieldName,
                 existingFieldName);
+    }
+
+    private static DataType nextNestedType(
+            PaimonTableHandle tableHandle,
+            DataType currentType,
+            String[] fieldNames,
+            int index)
+            throws Catalog.ColumnNotExistException
+    {
+        return switch (currentType.getTypeRoot()) {
+            case ROW -> canonicalNestedField(tableHandle, currentType, fieldNames, index).type();
+            case ARRAY -> {
+                canonicalNestedCollectionField(fieldNames, index, "element", "array element");
+                yield ((ArrayType) currentType).getElementType();
+            }
+            case MAP -> {
+                canonicalNestedCollectionField(fieldNames, index, "value", "map value");
+                yield ((MapType) currentType).getValueType();
+            }
+            default -> throw unsupportedNestedFieldPath(fieldNames);
+        };
     }
 
     private static DataField canonicalNestedField(
@@ -2135,9 +2184,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             throws Catalog.ColumnNotExistException
     {
         if (!(currentType instanceof RowType rowType)) {
-            throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon nested field schema change is not supported for non-row field path '"
-                            + String.join(".", fieldNames) + "'");
+            throw unsupportedNestedFieldPath(fieldNames);
         }
 
         String requestedFieldName = fieldNames[index];
@@ -2160,13 +2207,28 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return matchedField;
     }
 
-    private static DataType nestedType(DataType type)
+    private static String canonicalNestedCollectionField(
+            String[] fieldNames,
+            int index,
+            String expectedName,
+            String fieldDescription)
     {
-        return switch (type.getTypeRoot()) {
-            case ARRAY -> ((ArrayType) type).getElementType();
-            case MAP -> ((MapType) type).getValueType();
-            default -> type;
-        };
+        String requestedFieldName = fieldNames[index];
+        if (expectedName.equalsIgnoreCase(requestedFieldName)) {
+            return expectedName;
+        }
+        throw new TrinoException(NOT_SUPPORTED, format(
+                "Paimon nested field schema change for %s must use '%s' in field path '%s'",
+                fieldDescription,
+                expectedName,
+                String.join(".", fieldNames)));
+    }
+
+    private static TrinoException unsupportedNestedFieldPath(String[] fieldNames)
+    {
+        return new TrinoException(NOT_SUPPORTED,
+                "Paimon nested field schema change is not supported for non-row field path '"
+                        + String.join(".", fieldNames) + "'");
     }
 
     private static void rejectPartitionOrPrimaryKeyDrop(
