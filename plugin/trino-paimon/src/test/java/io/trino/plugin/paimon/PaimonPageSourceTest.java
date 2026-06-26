@@ -869,7 +869,7 @@ public class PaimonPageSourceTest
                             "Paimon page read uses features which are not supported by the Trino connector");
                     assertThat(exception.getCause()).isSameAs(readFailure);
                 });
-        assertThat(copyOptions.get()).isEmpty();
+        assertThat(copyOptions.get()).isNull();
     }
 
     @Test
