@@ -58,6 +58,17 @@ public class TestPaimonFileIO
     }
 
     @Test
+    public void testFileIOLoaderRejectsNullDependencies()
+    {
+        assertThatThrownBy(() -> new PaimonFileIOLoader(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("trinoFileSystem is null");
+        assertThatThrownBy(() -> new PaimonFileIOLoader(new MemoryFileSystem()).load(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("path is null");
+    }
+
+    @Test
     public void testObjectStoreMkdirsCreatesDirectoryMarker()
             throws IOException
     {
@@ -170,11 +181,12 @@ public class TestPaimonFileIO
     public void testListStatusOnFileDoesNotProbeFileAsDirectory()
             throws IOException
     {
-        PaimonFileIO fileIO = objectStoreFileIO(new StrictFileListingFileSystem());
+        PaimonFileIO fileIO = objectStoreFileIO(new StrictDirectoryProbeFileSystem());
         Path file = new Path("memory:///warehouse/minio_smoke.db/orders/schema-0");
 
         fileIO.writeFile(file, "schema", false);
 
+        assertThat(fileIO.exists(file)).isTrue();
         assertThat(fileIO.getFileStatus(file).isDir()).isFalse();
         assertThat(fileIO.listStatus(file))
                 .singleElement()
@@ -522,6 +534,20 @@ public class TestPaimonFileIO
                 throw new IOException("Cannot list directories under regular file: " + location);
             }
             return super.listDirectories(location);
+        }
+    }
+
+    private static class StrictDirectoryProbeFileSystem
+            extends StrictFileListingFileSystem
+    {
+        @Override
+        public Optional<Boolean> directoryExists(Location location)
+                throws IOException
+        {
+            if (newInputFile(location).exists()) {
+                throw new IOException("Cannot check directory for regular file: " + location);
+            }
+            return super.directoryExists(location);
         }
     }
 }

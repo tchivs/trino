@@ -105,13 +105,19 @@ public class PaimonFileIO
             throws IOException
     {
         Location location = Location.of(path.toString());
+        if (objectStore) {
+            if (existFile(location)) {
+                return fileStatus(location, path);
+            }
+            if (isDirectory(location, false)) {
+                return new PaimonDirectoryFileStatus(path);
+            }
+            return fileStatus(location, path);
+        }
         if (isDirectory(location)) {
             return new PaimonDirectoryFileStatus(path);
         }
-        else {
-            TrinoInputFile trinoInputFile = trinoFileSystem.newInputFile(location);
-            return new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().getEpochSecond());
-        }
+        return fileStatus(location, path);
     }
 
     @Override
@@ -120,22 +126,36 @@ public class PaimonFileIO
     {
         List<FileStatus> fileStatusList = new ArrayList<>();
         Location location = Location.of(path.toString());
-        if (isDirectory(location)) {
-            FileIterator fileIterator = trinoFileSystem.listFiles(location);
-            while (fileIterator.hasNext()) {
-                FileEntry fileEntry = fileIterator.next();
-                if (isDirectChild(location, fileEntry.location()) && !isDirectoryMarker(fileEntry.location())) {
-                    fileStatusList.add(new PaimonFileStatus(fileEntry.length(), new Path(fileEntry.location().toString()),
-                            fileEntry.lastModified().getEpochSecond()));
-                }
+        if (objectStore) {
+            if (existFile(location)) {
+                fileStatusList.add(fileStatus(location, path));
             }
-            trinoFileSystem.listDirectories(Location.of(path.toString()))
-                    .forEach(l -> fileStatusList.add(new PaimonDirectoryFileStatus(new Path(l.toString()))));
+            else if (isDirectory(location, false)) {
+                addDirectoryEntries(fileStatusList, location);
+            }
+        }
+        else if (isDirectory(location)) {
+            addDirectoryEntries(fileStatusList, location);
         }
         else if (existFile(location)) {
             fileStatusList.add(status(path));
         }
         return fileStatusList.toArray(new FileStatus[0]);
+    }
+
+    private void addDirectoryEntries(List<FileStatus> fileStatusList, Location location)
+            throws IOException
+    {
+        FileIterator fileIterator = trinoFileSystem.listFiles(location);
+        while (fileIterator.hasNext()) {
+            FileEntry fileEntry = fileIterator.next();
+            if (isDirectChild(location, fileEntry.location()) && !isDirectoryMarker(fileEntry.location())) {
+                fileStatusList.add(new PaimonFileStatus(fileEntry.length(), new Path(fileEntry.location().toString()),
+                        fileEntry.lastModified().getEpochSecond()));
+            }
+        }
+        trinoFileSystem.listDirectories(location)
+                .forEach(l -> fileStatusList.add(new PaimonDirectoryFileStatus(new Path(l.toString()))));
     }
 
     @Override
@@ -155,7 +175,20 @@ public class PaimonFileIO
             throws IOException
     {
         Location location = Location.of(path.toString());
+        if (objectStore) {
+            if (existFile(location)) {
+                return true;
+            }
+            return isDirectory(location, false);
+        }
         return isDirectory(location) || existFile(location);
+    }
+
+    private FileStatus fileStatus(Location location, Path path)
+            throws IOException
+    {
+        TrinoInputFile trinoInputFile = trinoFileSystem.newInputFile(location);
+        return new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().getEpochSecond());
     }
 
     private boolean existFile(Location location)
@@ -247,10 +280,19 @@ public class PaimonFileIO
     private boolean isDirectory(Location location)
             throws IOException
     {
+        return isDirectory(location, true);
+    }
+
+    private boolean isDirectory(Location location, boolean checkExactFile)
+            throws IOException
+    {
+        if (checkExactFile && objectStore && existFile(location)) {
+            return false;
+        }
         if (trinoFileSystem.directoryExists(location).orElse(false)) {
             return true;
         }
-        if (!objectStore || existFile(location)) {
+        if (!objectStore) {
             return false;
         }
         return directoryMarkerExists(location)

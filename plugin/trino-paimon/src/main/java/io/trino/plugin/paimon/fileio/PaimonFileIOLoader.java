@@ -18,6 +18,8 @@ import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.FileIOLoader;
 import org.apache.paimon.fs.Path;
 
+import static java.util.Objects.requireNonNull;
+
 public class PaimonFileIOLoader
         implements
         FileIOLoader
@@ -26,7 +28,7 @@ public class PaimonFileIOLoader
 
     public PaimonFileIOLoader(TrinoFileSystem trinoFileSystem)
     {
-        this.trinoFileSystem = trinoFileSystem;
+        this.trinoFileSystem = requireNonNull(trinoFileSystem, "trinoFileSystem is null");
     }
 
     @Override
