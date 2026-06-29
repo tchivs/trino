@@ -170,7 +170,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         requireNonNull(tableMetadata, "tableMetadata is null");
-        rejectSystemSchemaWrite(tableMetadata.getTable().getSchemaName(), "create table");
+        rejectSystemTableWrite(tableMetadata.getTable(), "create table");
         TableSchema tableSchema = newTableSchema(tableMetadata);
         return writeLayout(tableSchema, "new table layout", tableMetadata.getTable().toString());
     }
@@ -185,7 +185,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("insert layout", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "insert layout");
+        rejectSystemTableWrite(paimonTableHandle, "insert layout");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "insert layout");
         return writeLayout(storeTable.schema(), storeTable.bucketMode(), "insert layout",
@@ -278,6 +278,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(layout, "layout is null");
         requireNonNull(retryMode, "retryMode is null");
         validateNoQueryRetries(retryMode);
+        rejectSystemTableWrite(tableMetadata.getTable(), "create table");
         writeLayout(newTableSchema(tableMetadata), "create table", tableMetadata.getTable().toString());
         createTable(session, tableMetadata,
                 replace ? io.trino.spi.connector.SaveMode.REPLACE : io.trino.spi.connector.SaveMode.FAIL);
@@ -394,7 +395,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getOutputTableHandle(tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "finish create table");
+        rejectSystemTableWrite(paimonTableHandle, "finish create table");
         return commit(session, paimonTableHandle, fragments,
                 PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND,
                 paimonTableHandle.getCreateTableOperation());
@@ -408,7 +409,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(retryMode, "retryMode is null");
         validateNoQueryRetries(retryMode);
         PaimonTableHandle paimonTableHandle = getTableHandle("begin insert", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "begin insert");
+        rejectSystemTableWrite(paimonTableHandle, "begin insert");
         return paimonTableHandle.withWriteColumns(columns);
     }
 
@@ -427,7 +428,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getInsertTableHandle(insertHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "finish insert");
+        rejectSystemTableWrite(paimonTableHandle, "finish insert");
         return commit(session, paimonTableHandle, fragments,
                 PaimonSessionProperties.getInsertExistingPartitionsBehavior(session));
     }
@@ -590,7 +591,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("row change paradigm", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "row change paradigm");
+        rejectSystemTableWrite(paimonTableHandle, "row change paradigm");
         Catalog sessionCatalog = catalog.forSession(session);
         rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "row-level change");
         return DELETE_ROW_AND_INSERT_ROW;
@@ -601,7 +602,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("merge row id", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "merge row id");
+        rejectSystemTableWrite(paimonTableHandle, "merge row id");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge row id");
         try {
@@ -637,7 +638,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("update layout", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "update layout");
+        rejectSystemTableWrite(paimonTableHandle, "update layout");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "update layout");
         try {
@@ -748,7 +749,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(retryMode, "retryMode is null");
         validateNoQueryRetries(retryMode);
         PaimonTableHandle paimonTableHandle = getTableHandle("begin merge", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "begin merge");
+        rejectSystemTableWrite(paimonTableHandle, "begin merge");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge");
         try {
@@ -780,7 +781,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         PaimonMergeTableHandle paimonMergeTableHandle = getPaimonMergeTableHandle(mergeTableHandle);
         PaimonTableHandle paimonTableHandle = paimonMergeTableHandle.paimonTableHandle();
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "finish merge");
+        rejectSystemTableWrite(paimonTableHandle, "finish merge");
         if (paimonMergeTableHandle.isMetadataDeleteFallback()) {
             finishMetadataDeleteFallbackMerge(session, paimonTableHandle, fragments);
             return;
@@ -1365,7 +1366,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         requireNonNull(properties, "properties is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("set table properties", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "set table properties");
+        rejectSystemTableWrite(paimonTableHandle, "set table properties");
         if (properties.isEmpty()) {
             return;
         }
@@ -1497,7 +1498,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         requireNonNull(tableName, "tableName is null");
         requireNonNull(principal, "principal is null");
-        rejectSystemSchemaWrite(tableName.getSchemaName(), "set table authorization");
+        rejectSystemTableWrite(tableName, "set table authorization");
 
         Identifier identifier = new Identifier(tableName.getSchemaName(), tableName.getTableName());
         List<SchemaChange> changes = List.of(SchemaChange.setOption(OWNER_PROPERTY, principal.getName()));
@@ -1517,6 +1518,29 @@ public record PaimonMetadata(PaimonCatalog catalog,
         if (SYSTEM_DATABASE_NAME.equals(schemaName)) {
             throw new TrinoException(NOT_SUPPORTED,
                     "Paimon " + operation + " is not supported for the system schema '" + SYSTEM_DATABASE_NAME + "'");
+        }
+    }
+
+    private static void rejectSystemTableWrite(PaimonTableHandle tableHandle, String operation)
+    {
+        requireNonNull(tableHandle, "tableHandle is null");
+        rejectSystemTableWrite(schemaTableName(tableHandle), operation);
+    }
+
+    private static void rejectSystemTableWrite(SchemaTableName tableName, String operation)
+    {
+        requireNonNull(tableName, "tableName is null");
+        rejectSystemSchemaWrite(tableName.getSchemaName(), operation);
+        rejectSystemTableWrite(Identifier.create(tableName.getSchemaName(), tableName.getTableName()), operation);
+    }
+
+    private static void rejectSystemTableWrite(Identifier identifier, String operation)
+    {
+        requireNonNull(identifier, "identifier is null");
+        requireNonNull(operation, "operation is null");
+        if (identifier.isSystemTable()) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon " + operation + " is not supported for system table '" + identifier.getFullName() + "'");
         }
     }
 
@@ -1600,7 +1624,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(tableMetadata, "tableMetadata is null");
         requireNonNull(saveMode, "saveMode is null");
         SchemaTableName table = tableMetadata.getTable();
-        rejectSystemSchemaWrite(table.getSchemaName(), "create table");
+        rejectSystemTableWrite(table, "create table");
         Identifier identifier = Identifier.create(table.getSchemaName(), table.getTableName());
         Schema schema = prepareSchema(tableMetadata);
 
@@ -1775,8 +1799,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(session, "session is null");
         PaimonTableHandle oldTableHandle = getTableHandle("rename table", tableHandle);
         requireNonNull(newTableName, "newTableName is null");
-        rejectSystemSchemaWrite(oldTableHandle.getSchemaName(), "rename table");
-        rejectSystemSchemaWrite(newTableName.getSchemaName(), "rename table");
+        rejectSystemTableWrite(oldTableHandle, "rename table");
+        rejectSystemTableWrite(newTableName, "rename table");
         try {
             Catalog sessionCatalog = catalog.forSession(session);
             sessionCatalog.renameTable(new Identifier(oldTableHandle.getSchemaName(), oldTableHandle.getTableName()),
@@ -1803,7 +1827,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("drop table", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "drop table");
+        rejectSystemTableWrite(paimonTableHandle, "drop table");
         try {
             Catalog sessionCatalog = catalog.forSession(session);
             sessionCatalog.dropTable(new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName()), false);
@@ -1942,7 +1966,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("add column", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "add column");
+        rejectSystemTableWrite(paimonTableHandle, "add column");
         requireNonNull(column, "column is null");
         rejectPaimonSystemColumnName("add column", column.getName());
         if (!column.isNullable()) {
@@ -1970,7 +1994,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("rename column", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "rename column");
+        rejectSystemTableWrite(paimonTableHandle, "rename column");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("rename column", source);
         rejectPaimonSystemColumn(paimonColumnHandle, "rename column");
@@ -1999,7 +2023,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("drop column", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "drop column");
+        rejectSystemTableWrite(paimonTableHandle, "drop column");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop column", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "drop column");
@@ -2023,7 +2047,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("set table comment", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "set table comment");
+        rejectSystemTableWrite(paimonTableHandle, "set table comment");
         requireNonNull(comment, "comment is null");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         List<SchemaChange> changes = new ArrayList<>();
@@ -2043,7 +2067,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("set column comment", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "set column comment");
+        rejectSystemTableWrite(paimonTableHandle, "set column comment");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("set column comment", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "set column comment");
@@ -2067,7 +2091,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("set column type", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "set column type");
+        rejectSystemTableWrite(paimonTableHandle, "set column type");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("set column type", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "set column type");
@@ -2099,7 +2123,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("drop not null constraint", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "drop not null constraint");
+        rejectSystemTableWrite(paimonTableHandle, "drop not null constraint");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop not null constraint", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "drop not null constraint");
@@ -2127,7 +2151,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("add field", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "add field");
+        rejectSystemTableWrite(paimonTableHandle, "add field");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
 
         // Build field path: parentPath + fieldName
@@ -2171,7 +2195,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("drop field", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "drop field");
+        rejectSystemTableWrite(paimonTableHandle, "drop field");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         PaimonColumnHandle paimonColumnHandle = getColumnHandle("drop field", column);
         rejectPaimonSystemColumn(paimonColumnHandle, "drop field");
@@ -2201,7 +2225,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("rename field", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "rename field");
+        rejectSystemTableWrite(paimonTableHandle, "rename field");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         validateAbsoluteFieldPath("rename field", fieldPath);
         rejectPaimonSystemRootField("rename field", fieldPath.get(0));
@@ -2239,7 +2263,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("set field type", tableHandle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "set field type");
+        rejectSystemTableWrite(paimonTableHandle, "set field type");
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         validateAbsoluteFieldPath("set field type", fieldPath);
         rejectPaimonSystemRootField("set field type", fieldPath.get(0));
@@ -2567,7 +2591,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("delete", handle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "delete");
+        rejectSystemTableWrite(paimonTableHandle, "delete");
 
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "delete");
@@ -2584,7 +2608,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(session, "session is null");
         PaimonTableHandle paimonTableHandle = getTableHandle("delete", handle);
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "delete");
+        rejectSystemTableWrite(paimonTableHandle, "delete");
         if (!paimonTableHandle.getFilter().isAll() && paimonTableHandle.getDeletePartitionSpecs().isEmpty()) {
             throw new TrinoException(NOT_SUPPORTED,
                     "Paimon delete requires an unfiltered table handle or a validated partition delete handle");
@@ -2783,7 +2807,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     private void truncatePaimonTable(ConnectorSession session, PaimonTableHandle paimonTableHandle, String operation,
             String failureOperation, Optional<List<Map<String, String>>> deletePartitionSpecs)
     {
-        rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), operation);
+        rejectSystemTableWrite(paimonTableHandle, operation);
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);

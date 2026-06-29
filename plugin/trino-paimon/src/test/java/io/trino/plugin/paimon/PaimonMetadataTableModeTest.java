@@ -334,6 +334,99 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSystemTableWritesAreRejectedBeforeCatalogInitialization()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle systemTableHandle = new PaimonTableHandle("schema", "table$snapshots", Map.of());
+        PaimonColumnHandle columnHandle = PaimonColumnHandle.of("snapshot_id", DataTypes.BIGINT());
+        ConnectorTableMetadata systemTableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table$snapshots"),
+                List.of(new ColumnMetadata("snapshot_id", BIGINT)));
+
+        assertSystemTableWriteRejected(catalog, () -> metadata.beginCreateTable(SESSION, systemTableMetadata,
+                        Optional.empty(), RetryMode.NO_RETRIES),
+                "create table");
+        assertSystemTableWriteRejected(catalog, () -> metadata.beginCreateTable(SESSION, systemTableMetadata,
+                        Optional.empty(), RetryMode.NO_RETRIES, true),
+                "create table");
+        assertSystemTableWriteRejected(catalog, () -> metadata.getInsertLayout(SESSION, systemTableHandle),
+                "insert layout");
+        assertSystemTableWriteRejected(catalog, () -> metadata.beginInsert(SESSION, systemTableHandle,
+                        List.of(columnHandle), RetryMode.NO_RETRIES),
+                "begin insert");
+        assertSystemTableWriteRejected(catalog, () -> metadata.finishInsert(SESSION, systemTableHandle,
+                        List.of(), List.of()),
+                "finish insert");
+        assertSystemTableWriteRejected(catalog, () -> metadata.getRowChangeParadigm(SESSION, systemTableHandle),
+                "row change paradigm");
+        assertSystemTableWriteRejected(catalog, () -> metadata.getMergeRowIdColumnHandle(SESSION, systemTableHandle),
+                "merge row id");
+        assertSystemTableWriteRejected(catalog, () -> metadata.getUpdateLayout(SESSION, systemTableHandle),
+                "update layout");
+        assertSystemTableWriteRejected(catalog, () -> metadata.beginMerge(SESSION, systemTableHandle,
+                        RetryMode.NO_RETRIES),
+                "begin merge");
+        assertSystemTableWriteRejected(catalog, () -> metadata.finishMerge(SESSION,
+                        new PaimonMergeTableHandle(systemTableHandle), List.of(), List.of()),
+                "finish merge");
+        assertSystemTableWriteRejected(catalog, () -> metadata.setTableProperties(SESSION, systemTableHandle,
+                        Map.of("bucket", Optional.of("4"))),
+                "set table properties");
+        assertSystemTableWriteRejected(catalog, () -> metadata.setTableAuthorization(SESSION,
+                        new SchemaTableName("schema", "table$snapshots"),
+                        new TrinoPrincipal(PrincipalType.USER, "table_owner")),
+                "set table authorization");
+        assertSystemTableWriteRejected(catalog, () -> metadata.renameTable(SESSION, systemTableHandle,
+                        new SchemaTableName("schema", "renamed")),
+                "rename table");
+        assertSystemTableWriteRejected(catalog, () -> metadata.renameTable(SESSION,
+                        new PaimonTableHandle("schema", "table", Map.of()),
+                        new SchemaTableName("schema", "table$snapshots")),
+                "rename table");
+        assertSystemTableWriteRejected(catalog, () -> metadata.dropTable(SESSION, systemTableHandle),
+                "drop table");
+        assertSystemTableWriteRejected(catalog, () -> metadata.addColumn(SESSION, systemTableHandle,
+                        new ColumnMetadata("extra", INTEGER)),
+                "add column");
+        assertSystemTableWriteRejected(catalog, () -> metadata.renameColumn(SESSION, systemTableHandle,
+                        columnHandle, "renamed"),
+                "rename column");
+        assertSystemTableWriteRejected(catalog, () -> metadata.dropColumn(SESSION, systemTableHandle, columnHandle),
+                "drop column");
+        assertSystemTableWriteRejected(catalog, () -> metadata.setTableComment(SESSION, systemTableHandle,
+                        Optional.of("comment")),
+                "set table comment");
+        assertSystemTableWriteRejected(catalog, () -> metadata.setColumnComment(SESSION, systemTableHandle,
+                        columnHandle, Optional.of("comment")),
+                "set column comment");
+        assertSystemTableWriteRejected(catalog, () -> metadata.setColumnType(SESSION, systemTableHandle,
+                        columnHandle, VARCHAR),
+                "set column type");
+        assertSystemTableWriteRejected(catalog, () -> metadata.dropNotNullConstraint(SESSION, systemTableHandle,
+                        columnHandle),
+                "drop not null constraint");
+        assertSystemTableWriteRejected(catalog, () -> metadata.addField(SESSION, systemTableHandle,
+                        List.of("snapshot_id"), "nested", VARCHAR, false),
+                "add field");
+        assertSystemTableWriteRejected(catalog, () -> metadata.dropField(SESSION, systemTableHandle, columnHandle,
+                        List.of("nested")),
+                "drop field");
+        assertSystemTableWriteRejected(catalog, () -> metadata.renameField(SESSION, systemTableHandle,
+                        List.of("snapshot_id", "nested"), "renamed"),
+                "rename field");
+        assertSystemTableWriteRejected(catalog, () -> metadata.setFieldType(SESSION, systemTableHandle,
+                        List.of("snapshot_id", "nested"), VARCHAR),
+                "set field type");
+        assertSystemTableWriteRejected(catalog, () -> metadata.truncateTable(SESSION, systemTableHandle),
+                "truncate table");
+        assertSystemTableWriteRejected(catalog, () -> metadata.applyDelete(SESSION, systemTableHandle),
+                "delete");
+        assertSystemTableWriteRejected(catalog, () -> metadata.executeDelete(SESSION, systemTableHandle),
+                "delete");
+    }
+
+    @Test
     public void testTableStatisticsUsesPaimonSnapshotStats()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
@@ -6426,6 +6519,14 @@ public class PaimonMetadataTableModeTest
                     assertThat(exception.getErrorCode()).isEqualTo(errorCode);
                     assertThat(exception).hasMessage(message);
                 });
+    }
+
+    private static void assertSystemTableWriteRejected(TestingPaimonCatalog catalog, Runnable call, String operation)
+    {
+        assertTrinoError(call,
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon " + operation + " is not supported for system table 'schema.table$snapshots'");
+        assertThat(catalog.initialized).isFalse();
     }
 
     private static void assertMetadataDeleteRowId(ColumnHandle columnHandle)
