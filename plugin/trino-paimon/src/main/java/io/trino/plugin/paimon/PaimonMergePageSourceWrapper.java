@@ -16,8 +16,10 @@ package io.trino.plugin.paimon;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.RowBlock;
+import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.metrics.Metrics;
+import io.trino.spi.type.BigintType;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -36,6 +38,8 @@ public class PaimonMergePageSourceWrapper
         implements
         ConnectorPageSource
 {
+    static final String METADATA_DELETE_ROW_ID_FIELD = "_metadata_delete";
+
     private final ConnectorPageSource pageSource;
     private final List<String> rowIdFields;
     private final Map<String, Integer> fieldToIndex;
@@ -89,6 +93,9 @@ public class PaimonMergePageSourceWrapper
             }
         });
         for (String rowIdField : rowIdFields) {
+            if (METADATA_DELETE_ROW_ID_FIELD.equals(rowIdField)) {
+                continue;
+            }
             if (!fieldToIndex.containsKey(rowIdField)) {
                 throw new IllegalArgumentException("Missing row id field: " + rowIdField);
             }
@@ -138,6 +145,10 @@ public class PaimonMergePageSourceWrapper
             Block[] rowIdBlocks = new Block[rowIdFields.size()];
             for (int i = 0; i < rowIdFields.size(); i++) {
                 String fieldName = rowIdFields.get(i);
+                if (METADATA_DELETE_ROW_ID_FIELD.equals(fieldName)) {
+                    rowIdBlocks[i] = RunLengthEncodedBlock.create(BigintType.BIGINT, 0L, rowCount);
+                    continue;
+                }
                 int channelIndex = fieldToIndex.get(fieldName);
                 if (channelIndex >= nextPage.getChannelCount()) {
                     throw new IllegalStateException(

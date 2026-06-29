@@ -2019,6 +2019,47 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testMergePageSourceWrapperSynthesizesMetadataDeleteRowId()
+    {
+        TestingPageSource source = new TestingPageSource(new Page(2, bigintBlock(10, 20)));
+        PaimonMergePageSourceWrapper wrapper = PaimonMergePageSourceWrapper.wrap(
+                source,
+                List.of(PaimonMergePageSourceWrapper.METADATA_DELETE_ROW_ID_FIELD),
+                Map.of());
+        RowType rowIdType = RowType.from(List.of(RowType.field(
+                PaimonMergePageSourceWrapper.METADATA_DELETE_ROW_ID_FIELD,
+                BIGINT)));
+
+        Page page = wrapper.getNextPage();
+
+        assertThat(page.getChannelCount()).isEqualTo(2);
+        SqlRow firstRowId = rowIdType.getObject(page.getBlock(1), 0);
+        SqlRow secondRowId = rowIdType.getObject(page.getBlock(1), 1);
+        assertThat(BIGINT.getLong(firstRowId.getRawFieldBlock(0), firstRowId.getRawIndex())).isEqualTo(0);
+        assertThat(BIGINT.getLong(secondRowId.getRawFieldBlock(0), secondRowId.getRawIndex())).isEqualTo(0);
+    }
+
+    @Test
+    void testMergePageSourceWrapperSynthesizesMetadataDeleteRowIdWhenUserColumnHasSameName()
+    {
+        TestingPageSource source = new TestingPageSource(new Page(2, bigintBlock(10, 20)));
+        PaimonMergePageSourceWrapper wrapper = PaimonMergePageSourceWrapper.wrap(
+                source,
+                List.of(PaimonMergePageSourceWrapper.METADATA_DELETE_ROW_ID_FIELD),
+                Map.of(PaimonMergePageSourceWrapper.METADATA_DELETE_ROW_ID_FIELD, 0));
+        RowType rowIdType = RowType.from(List.of(RowType.field(
+                PaimonMergePageSourceWrapper.METADATA_DELETE_ROW_ID_FIELD,
+                BIGINT)));
+
+        Page page = wrapper.getNextPage();
+
+        SqlRow firstRowId = rowIdType.getObject(page.getBlock(1), 0);
+        SqlRow secondRowId = rowIdType.getObject(page.getBlock(1), 1);
+        assertThat(BIGINT.getLong(firstRowId.getRawFieldBlock(0), firstRowId.getRawIndex())).isEqualTo(0);
+        assertThat(BIGINT.getLong(secondRowId.getRawFieldBlock(0), secondRowId.getRawIndex())).isEqualTo(0);
+    }
+
+    @Test
     void testMergePageSourceWrapperDelegatesProgressBlockingAndMetrics()
     {
         DelegatingStatePageSource source = new DelegatingStatePageSource(new Page(1, bigintBlock(10)),

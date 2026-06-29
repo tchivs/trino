@@ -391,7 +391,11 @@ public class PaimonPageSinkProvider
             ConnectorMergeTableHandle mergeHandle, ConnectorPageSinkId pageSinkId)
     {
         requireNonNull(session, "session is null");
-        PaimonTableHandle paimonTableHandle = getMergeTableHandle(mergeHandle);
+        PaimonMergeTableHandle paimonMergeTableHandle = getPaimonMergeTableHandle(mergeHandle);
+        if (paimonMergeTableHandle.isMetadataDeleteFallback()) {
+            return new PaimonMetadataDeleteMergeSink();
+        }
+        PaimonTableHandle paimonTableHandle = paimonMergeTableHandle.paimonTableHandle();
         int dataColumnCount = getWriteColumns(paimonTableHandle).size();
         return runWithContextClassLoader(() -> new PaimonMergeSink(
                 createMergePageSink(paimonTableHandle, session),
@@ -400,11 +404,20 @@ public class PaimonPageSinkProvider
 
     static PaimonTableHandle getMergeTableHandle(ConnectorMergeTableHandle mergeHandle)
     {
+        return getPaimonMergeTableHandle(mergeHandle).paimonTableHandle();
+    }
+
+    static PaimonMergeTableHandle getPaimonMergeTableHandle(ConnectorMergeTableHandle mergeHandle)
+    {
         ConnectorTableHandle tableHandle = requireNonNull(mergeHandle, "mergeHandle is null").getTableHandle();
         if (!(requireNonNull(tableHandle, "mergeHandle tableHandle is null") instanceof PaimonTableHandle paimonTableHandle)) {
             throw new IllegalStateException("Paimon merge sink requires PaimonTableHandle, got: "
                     + tableHandle.getClass().getName());
         }
-        return paimonTableHandle;
+        if (!(mergeHandle instanceof PaimonMergeTableHandle paimonMergeTableHandle)) {
+            throw new IllegalStateException("Paimon merge sink requires PaimonMergeTableHandle, got: "
+                    + mergeHandle.getClass().getName());
+        }
+        return paimonMergeTableHandle;
     }
 }

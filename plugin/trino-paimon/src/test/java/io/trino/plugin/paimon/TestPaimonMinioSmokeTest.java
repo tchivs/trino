@@ -119,11 +119,11 @@ public class TestPaimonMinioSmokeTest
                     "VALUES (CAST(1 AS BIGINT), CAST('ok' AS VARCHAR)), (CAST(2 AS BIGINT), CAST('ready' AS VARCHAR))");
 
             assertUpdate("DELETE FROM " + qualifiedTableName);
-            assertQuery("SELECT count(*) FROM " + qualifiedTableName, "VALUES BIGINT '0'");
+            assertQuery("SELECT count(*) FROM " + qualifiedTableName, "VALUES CAST(0 AS BIGINT)");
 
             assertUpdate("INSERT INTO " + qualifiedTableName + " VALUES (3, 'shipped'), (4, 'closed')", 2);
             assertUpdate("TRUNCATE TABLE " + qualifiedTableName);
-            assertQuery("SELECT count(*) FROM " + qualifiedTableName, "VALUES BIGINT '0'");
+            assertQuery("SELECT count(*) FROM " + qualifiedTableName, "VALUES CAST(0 AS BIGINT)");
         }
         finally {
             assertUpdate("DROP TABLE IF EXISTS " + qualifiedTableName);

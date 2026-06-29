@@ -17,9 +17,12 @@ import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.CatalogSchemaName;
+import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.type.TypeId;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.catalog.Catalog;
@@ -33,6 +36,7 @@ import org.apache.paimon.view.ViewImpl;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -62,6 +66,20 @@ public class PaimonMetadataViewTest
     {
         PaimonMetadata metadata = new PaimonMetadata(
                 new TestingPaimonCatalog(view(Map.of("spark", "SELECT id FROM spark_table"))),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.getView(SESSION, VIEW_NAME))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon view 'test_schema.test_view' does not contain a Trino SQL dialect");
+                });
+    }
+
+    @Test
+    public void testGetViewRequiresNonBlankTrinoDialect()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(Map.of("trino", " "))),
                 TESTING_TYPE_MANAGER);
 
         assertThatThrownBy(() -> metadata.getView(SESSION, VIEW_NAME))
@@ -141,6 +159,71 @@ public class PaimonMetadataViewTest
                 TESTING_TYPE_MANAGER);
 
         assertThat(metadata.getViews(SESSION, Optional.of(VIEW_NAME.getSchemaName()))).isEmpty();
+    }
+
+    @Test
+    public void testListTableColumnsSkipsViewsWithoutTrinoDialect()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(Map.of("spark", "SELECT id FROM spark_table"))),
+                TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.listTableColumns(SESSION, new SchemaTablePrefix(
+                VIEW_NAME.getSchemaName(),
+                VIEW_NAME.getTableName())))
+                .isEmpty();
+
+        Iterator<TableColumnsMetadata> streamedColumns = metadata.streamTableColumns(SESSION, new SchemaTablePrefix(
+                VIEW_NAME.getSchemaName(),
+                VIEW_NAME.getTableName()));
+        assertThat(streamedColumns.hasNext()).isFalse();
+    }
+
+    @Test
+    public void testListTableColumnsSkipsViewsWithBlankTrinoDialect()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(Map.of("trino", " "))),
+                TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.listTableColumns(SESSION, new SchemaTablePrefix(
+                VIEW_NAME.getSchemaName(),
+                VIEW_NAME.getTableName())))
+                .isEmpty();
+    }
+
+    @Test
+    public void testListTableColumnsKeepsTrinoViewColumns()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(Map.of(
+                        "spark", "SELECT id FROM spark_table",
+                        "trino", "SELECT id FROM trino_table"))),
+                TESTING_TYPE_MANAGER);
+
+        Map<SchemaTableName, List<ColumnMetadata>> columns = metadata.listTableColumns(SESSION, new SchemaTablePrefix(
+                VIEW_NAME.getSchemaName(),
+                VIEW_NAME.getTableName()));
+
+        assertThat(columns).containsOnlyKeys(VIEW_NAME);
+        assertThat(columns.get(VIEW_NAME))
+                .singleElement()
+                .satisfies(column -> {
+                    assertThat(column.getName()).isEqualTo("id");
+                    assertThat(column.getType()).isEqualTo(BIGINT);
+                    assertThat(column.getComment()).contains("id column");
+                });
+
+        Iterator<TableColumnsMetadata> streamedColumns = metadata.streamTableColumns(SESSION, new SchemaTablePrefix(
+                VIEW_NAME.getSchemaName(),
+                VIEW_NAME.getTableName()));
+        assertThat(streamedColumns.hasNext()).isTrue();
+        TableColumnsMetadata viewColumns = streamedColumns.next();
+        assertThat(viewColumns.getTable()).isEqualTo(VIEW_NAME);
+        assertThat(viewColumns.getColumns().orElseThrow())
+                .singleElement()
+                .satisfies(column -> assertThat(column.getName()).isEqualTo("id"));
+        assertThat(streamedColumns.hasNext()).isFalse();
     }
 
     @Test
@@ -797,6 +880,13 @@ public class PaimonMetadataViewTest
                 throw new Catalog.ViewNotExistException(identifier);
             }
             return currentView;
+        }
+
+        @Override
+        public org.apache.paimon.table.Table getTable(Identifier identifier)
+                throws Catalog.TableNotExistException
+        {
+            throw new Catalog.TableNotExistException(identifier);
         }
 
         @Override

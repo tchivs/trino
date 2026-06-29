@@ -14,7 +14,9 @@
 package io.trino.plugin.paimon;
 
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorPageSink;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.CommitMessage;
@@ -28,6 +30,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.ConnectorMergeSink.DELETE_OPERATION_NUMBER;
 import static io.trino.spi.connector.ConnectorMergeSink.INSERT_OPERATION_NUMBER;
 import static io.trino.spi.connector.ConnectorMergeSink.UPDATE_DELETE_OPERATION_NUMBER;
@@ -130,6 +133,77 @@ public class PaimonMergeSinkTest
         assertThatThrownBy(() -> new PaimonMergeSink(new CapturingPageSink(), -1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("dataColumnCount must be non-negative: -1");
+    }
+
+    @Test
+    public void testMetadataDeleteMergeSinkAcceptsOnlyDeleteRows()
+    {
+        PaimonMetadataDeleteMergeSink mergeSink = new PaimonMetadataDeleteMergeSink();
+
+        mergeSink.storeMergedRows(new Page(3,
+                integerBlock(10, 20, 30),
+                tinyintBlock(DELETE_OPERATION_NUMBER, DELETE_OPERATION_NUMBER, DELETE_OPERATION_NUMBER),
+                integerBlock(100, 200, 300)));
+        mergeSink.storeMergedRows(new Page(2,
+                integerBlock(40, 50),
+                tinyintBlock(DELETE_OPERATION_NUMBER, DELETE_OPERATION_NUMBER),
+                integerBlock(400, 500)));
+
+        Collection<Slice> fragments = mergeSink.finish().join();
+        assertThat(fragments).singleElement()
+                .satisfies(fragment -> assertThat(PaimonMetadataDeleteMergeSink.decodeDeletedRowCount(fragment))
+                        .isEqualTo(5));
+    }
+
+    @Test
+    public void testMetadataDeleteMergeSinkEmptyPageIsNoOp()
+    {
+        PaimonMetadataDeleteMergeSink mergeSink = new PaimonMetadataDeleteMergeSink();
+
+        mergeSink.storeMergedRows(new Page(0,
+                integerBlock(),
+                tinyintBlock(),
+                integerBlock()));
+
+        assertThat(mergeSink.finish().join()).isEmpty();
+    }
+
+    @Test
+    public void testMetadataDeleteMergeSinkRejectsMalformedPage()
+    {
+        PaimonMetadataDeleteMergeSink mergeSink = new PaimonMetadataDeleteMergeSink();
+
+        assertThatThrownBy(() -> mergeSink.storeMergedRows(new Page(1, integerBlock(1))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("inputPage channelCount (1) must include operation and rowId channels");
+    }
+
+    @Test
+    public void testMetadataDeleteMergeSinkRejectsNonDeleteOperations()
+    {
+        PaimonMetadataDeleteMergeSink mergeSink = new PaimonMetadataDeleteMergeSink();
+
+        assertThatThrownBy(() -> mergeSink.storeMergedRows(new Page(1,
+                integerBlock(1),
+                tinyintBlock(INSERT_OPERATION_NUMBER),
+                integerBlock(10))))
+                .isInstanceOfSatisfying(TrinoException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Paimon metadata-delete merge sink only supports DELETE rows, got merge operation: 1");
+    }
+
+    @Test
+    public void testMetadataDeleteMergeFragmentValidation()
+    {
+        assertThat(PaimonMetadataDeleteMergeSink.decodeDeletedRowCount(
+                PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(17))).isEqualTo(17);
+
+        assertThatThrownBy(() -> PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(-1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("deletedRowCount is negative: -1");
+        assertThatThrownBy(() -> PaimonMetadataDeleteMergeSink.decodeDeletedRowCount(Slices.allocate(1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Invalid Paimon metadata-delete merge fragment size: 1");
     }
 
     @Test

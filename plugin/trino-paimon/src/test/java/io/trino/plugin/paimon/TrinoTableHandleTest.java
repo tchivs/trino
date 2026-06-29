@@ -818,6 +818,36 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testMergeTableHandleRejectsMissingMetadataDeleteFallback()
+    {
+        JsonCodec<PaimonMergeTableHandle> mergeHandleCodec = new JsonCodecFactory(new ObjectMapperProvider())
+                .jsonCodec(PaimonMergeTableHandle.class);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("test", "user", Collections.emptyMap(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        String json = removeJsonField(mergeHandleCodec.toJson(new PaimonMergeTableHandle(tableHandle)),
+                "metadataDeleteFallback");
+
+        assertThatThrownBy(() -> mergeHandleCodec.fromJson(json))
+                .rootCause()
+                .hasMessageContaining("Missing required creator property 'metadataDeleteFallback'");
+    }
+
+    @Test
+    public void testMergeTableHandleRoundTripsMetadataDeleteFallback()
+    {
+        JsonCodec<PaimonMergeTableHandle> mergeHandleCodec = new JsonCodecFactory(new ObjectMapperProvider())
+                .jsonCodec(PaimonMergeTableHandle.class);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("test", "user", Collections.emptyMap(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+
+        PaimonMergeTableHandle handle = mergeHandleCodec.fromJson(
+                mergeHandleCodec.toJson(PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle)));
+
+        assertThat(handle.getTableHandle()).isEqualTo(tableHandle);
+        assertThat(handle.isMetadataDeleteFallback()).isTrue();
+    }
+
+    @Test
     public void testMergeTableHandleRejectsUnknownJsonFields()
     {
         JsonCodec<PaimonMergeTableHandle> mergeHandleCodec = new JsonCodecFactory(new ObjectMapperProvider())

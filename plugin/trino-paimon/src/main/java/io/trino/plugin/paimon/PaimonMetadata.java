@@ -82,6 +82,7 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
+import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.system.SystemTableLoader;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.DataField;
@@ -602,7 +603,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonTableHandle paimonTableHandle = getTableHandle("merge row id", tableHandle);
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "merge row id");
         Catalog sessionCatalog = catalog.forSession(session);
-        FileStoreTable storeTable = rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "merge row id");
+        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge row id");
+        try {
+            rowLevelChangeFileStoreTable(storeTable, "merge row id");
+        }
+        catch (TrinoException e) {
+            if (canUseMetadataDeleteFallback(storeTable)) {
+                return metadataDeleteRowIdColumnHandle();
+            }
+            throw e;
+        }
         DataField[] row = storeTable.primaryKeys().stream()
                 .map(primaryKey -> {
                     if (!storeTable.rowType().containsField(primaryKey)) {
@@ -615,6 +625,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return PaimonColumnHandle.of(TRINO_ROW_ID_NAME, DataTypes.ROW(row), typeManager);
     }
 
+    private static PaimonColumnHandle metadataDeleteRowIdColumnHandle()
+    {
+        return PaimonColumnHandle.of(TRINO_ROW_ID_NAME, DataTypes.ROW(
+                DataTypes.FIELD(0, PaimonMergePageSourceWrapper.METADATA_DELETE_ROW_ID_FIELD, DataTypes.BIGINT())));
+    }
+
     @Override
     public Optional<ConnectorPartitioningHandle> getUpdateLayout(ConnectorSession session,
             ConnectorTableHandle tableHandle)
@@ -623,7 +639,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonTableHandle paimonTableHandle = getTableHandle("update layout", tableHandle);
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "update layout");
         Catalog sessionCatalog = catalog.forSession(session);
-        FileStoreTable storeTable = rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "update layout");
+        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "update layout");
+        try {
+            rowLevelChangeFileStoreTable(storeTable, "update layout");
+        }
+        catch (TrinoException e) {
+            if (canUseMetadataDeleteFallback(storeTable)) {
+                return Optional.empty();
+            }
+            throw e;
+        }
         try {
             return Optional.of(new PaimonPartitioningHandle(
                     InstantiationUtil.serializeObject(storeTable.schema()),
@@ -635,6 +660,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
                             schemaTableName(paimonTableHandle)),
                     e);
         }
+    }
+
+    private static boolean canUseMetadataDeleteFallback(FileStoreTable storeTable)
+    {
+        requireNonNull(storeTable, "storeTable is null");
+        BucketMode bucketMode = storeTable.bucketMode();
+        return bucketMode == BucketMode.BUCKET_UNAWARE
+                || bucketMode == BucketMode.HASH_FIXED;
     }
 
     private static FileStoreTable requireFileStoreTable(Table table, String operation)
@@ -697,6 +730,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return storeTable;
     }
 
+    private static void rowLevelChangeFileStoreTable(FileStoreTable storeTable, String operation)
+    {
+        requireNonNull(storeTable, "storeTable is null");
+        BucketMode bucketMode = storeTable.bucketMode();
+        if (bucketMode != BucketMode.HASH_FIXED) {
+            throw PaimonTableSupport.unsupportedBucketMode(operation, bucketMode);
+        }
+        PaimonTableSupport.validateRowLevelDelete(storeTable, operation);
+    }
+
     @Override
     public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle,
             RetryMode retryMode)
@@ -707,7 +750,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonTableHandle paimonTableHandle = getTableHandle("begin merge", tableHandle);
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "begin merge");
         Catalog sessionCatalog = catalog.forSession(session);
-        FileStoreTable storeTable = rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "merge");
+        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "merge");
+        try {
+            rowLevelChangeFileStoreTable(storeTable, "merge");
+        }
+        catch (TrinoException e) {
+            if (canUseMetadataDeleteFallback(storeTable)) {
+                return PaimonMergeTableHandle.forMetadataDeleteFallback(paimonTableHandle);
+            }
+            throw e;
+        }
         List<ColumnHandle> writeColumns = storeTable.rowType().getFields().stream()
                 .map(column -> PaimonColumnHandle.of(column.name(), column.type(), typeManager))
                 .collect(toList());
@@ -726,11 +778,96 @@ public record PaimonMetadata(PaimonCatalog catalog,
             Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         requireNonNull(session, "session is null");
-        PaimonTableHandle paimonTableHandle = getMergeTableHandle(mergeTableHandle);
+        PaimonMergeTableHandle paimonMergeTableHandle = getPaimonMergeTableHandle(mergeTableHandle);
+        PaimonTableHandle paimonTableHandle = paimonMergeTableHandle.paimonTableHandle();
         rejectSystemSchemaWrite(paimonTableHandle.getSchemaName(), "finish merge");
+        if (paimonMergeTableHandle.isMetadataDeleteFallback()) {
+            finishMetadataDeleteFallbackMerge(session, paimonTableHandle, fragments);
+            return;
+        }
         commit(session, paimonTableHandle, fragments,
                 PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND,
                 Optional.of(MERGE));
+    }
+
+    private void finishMetadataDeleteFallbackMerge(
+            ConnectorSession session,
+            PaimonTableHandle paimonTableHandle,
+            Collection<Slice> fragments)
+    {
+        long deletedRowCount = metadataDeleteDeletedRowCount(fragments);
+        if (deletedRowCount == 0) {
+            return;
+        }
+        if (!isMetadataDeleteFallbackHandle(paimonTableHandle)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon metadata delete fallback can only delete rows from an unfiltered, unlimited table handle");
+        }
+        try {
+            Catalog sessionCatalog = catalog.forSession(session);
+            FileStoreTable fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "delete");
+            long currentRowCount = currentVisibleRowCount(fileStoreTable);
+            if (deletedRowCount != currentRowCount) {
+                throw new TrinoException(NOT_SUPPORTED,
+                        "Paimon metadata delete fallback can only delete all rows; query deleted "
+                                + deletedRowCount + " rows but table currently contains " + currentRowCount + " rows");
+            }
+            truncatePaimonTable(fileStoreTable, paimonTableHandle, "delete", "delete rows from", Optional.empty());
+        }
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (UnsupportedOperationException e) {
+            String detail = e.getMessage();
+            throw new TrinoException(NOT_SUPPORTED,
+                    detail == null || detail.isBlank()
+                            ? "Paimon delete uses features which are not supported by the Trino connector"
+                            : "Paimon delete uses features which are not supported by the Trino connector: " + detail,
+                    e);
+        }
+        catch (Exception e) {
+            throw paimonMetadataException(
+                    format("Failed to delete rows from Paimon table '%s'", paimonTableHandle.getTableName()),
+                    e);
+        }
+    }
+
+    private static long metadataDeleteDeletedRowCount(Collection<Slice> fragments)
+    {
+        long deletedRowCount = 0;
+        for (Slice fragment : copyFragments(fragments)) {
+            try {
+                deletedRowCount = Math.addExact(
+                        deletedRowCount,
+                        PaimonMetadataDeleteMergeSink.decodeDeletedRowCount(fragment));
+            }
+            catch (IllegalArgumentException | ArithmeticException e) {
+                throw new TrinoException(PAIMON_COMMIT_ERROR,
+                        "Failed to deserialize Paimon metadata-delete merge fragment", e);
+            }
+        }
+        return deletedRowCount;
+    }
+
+    private static long currentVisibleRowCount(FileStoreTable fileStoreTable)
+    {
+        requireNonNull(fileStoreTable, "fileStoreTable is null");
+        long rowCount = 0;
+        List<Split> splits = fileStoreTable.newReadBuilder().dropStats().newScan().plan().splits();
+        for (Split split : splits) {
+            OptionalLong mergedRowCount = split.mergedRowCount();
+            if (mergedRowCount.isPresent()) {
+                rowCount = Math.addExact(rowCount, mergedRowCount.getAsLong());
+            }
+            else if (fileStoreTable.primaryKeys().isEmpty()) {
+                rowCount = Math.addExact(rowCount, split.rowCount());
+            }
+            else {
+                throw new TrinoException(NOT_SUPPORTED,
+                        "Paimon metadata delete fallback cannot determine the current row count for primary-key tables");
+            }
+        }
+        return rowCount;
     }
 
     static PaimonTableHandle getOutputTableHandle(ConnectorOutputTableHandle tableHandle)
@@ -753,12 +890,21 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     static PaimonTableHandle getMergeTableHandle(ConnectorMergeTableHandle mergeTableHandle)
     {
+        return getPaimonMergeTableHandle(mergeTableHandle).paimonTableHandle();
+    }
+
+    static PaimonMergeTableHandle getPaimonMergeTableHandle(ConnectorMergeTableHandle mergeTableHandle)
+    {
         ConnectorTableHandle tableHandle = requireNonNull(mergeTableHandle, "mergeTableHandle is null").getTableHandle();
         if (!(requireNonNull(tableHandle, "mergeTableHandle tableHandle is null") instanceof PaimonTableHandle paimonTableHandle)) {
             throw new IllegalStateException("Paimon finish merge requires PaimonTableHandle, got: "
                     + tableHandle.getClass().getName());
         }
-        return paimonTableHandle;
+        if (!(mergeTableHandle instanceof PaimonMergeTableHandle paimonMergeTableHandle)) {
+            throw new IllegalStateException("Paimon finish merge requires PaimonMergeTableHandle, got: "
+                    + mergeTableHandle.getClass().getName());
+        }
+        return paimonMergeTableHandle;
     }
 
     static PaimonTableHandle getTableHandle(String operation, ConnectorTableHandle tableHandle)
@@ -1767,6 +1913,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
             Catalog sessionCatalog = catalog.forSession(session);
             org.apache.paimon.view.View paimonView = sessionCatalog.getView(
                     new Identifier(viewName.getSchemaName(), viewName.getTableName()));
+            if (!hasTrinoViewDialect(paimonView)) {
+                return Optional.empty();
+            }
             return Optional.of(viewColumnsMetadata(paimonView));
         }
         catch (Catalog.ViewNotExistException | UnsupportedOperationException e) {
@@ -2498,7 +2647,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         return tableHandle.getFilter().isAll()
                 && tableHandle.getLimit().isEmpty()
-                && tableHandle.getProjectedColumns().isEmpty()
+                && tableHandle.getDeletePartitionSpecs().isEmpty();
+    }
+
+    private static boolean isMetadataDeleteFallbackHandle(PaimonTableHandle tableHandle)
+    {
+        return tableHandle.getFilter().isAll()
+                && tableHandle.getLimit().isEmpty()
                 && tableHandle.getDeletePartitionSpecs().isEmpty();
     }
 
@@ -3043,18 +3198,24 @@ public record PaimonMetadata(PaimonCatalog catalog,
                         Optional.ofNullable(field.description()).filter(comment -> !comment.isEmpty())))
                 .collect(toList());
 
-        String originalSql = paimonView.dialects().get("trino");
-        if (originalSql == null) {
+        if (!hasTrinoViewDialect(paimonView)) {
             throw new TrinoException(NOT_SUPPORTED,
                     format("Paimon view '%s' does not contain a Trino SQL dialect", viewName));
         }
 
+        String originalSql = paimonView.dialects().get("trino");
         return Optional.of(new ConnectorViewDefinition(originalSql, Optional.empty(), // catalog
                 Optional.empty(), // schema
                 columns, paimonView.comment(), // comment
                 Optional.ofNullable(paimonView.options().get(OWNER_PROPERTY)), // owner
                 false, // runAsInvoker
                 List.of())); // path
+    }
+
+    private static boolean hasTrinoViewDialect(org.apache.paimon.view.View view)
+    {
+        requireNonNull(view, "view is null");
+        return !StringUtils.isNullOrWhitespaceOnly(view.dialects().get("trino"));
     }
 
     @Override

@@ -26,11 +26,25 @@ public class PaimonMergeTableHandle
         ConnectorMergeTableHandle
 {
     private final PaimonTableHandle tableHandle;
+    private final boolean metadataDeleteFallback;
 
     @JsonCreator
-    public PaimonMergeTableHandle(@JsonProperty(value = "tableHandle", required = true) PaimonTableHandle tableHandle)
+    public PaimonMergeTableHandle(
+            @JsonProperty(value = "tableHandle", required = true) PaimonTableHandle tableHandle,
+            @JsonProperty(value = "metadataDeleteFallback", required = true) Boolean metadataDeleteFallback)
     {
         this.tableHandle = requireNonNull(tableHandle, "tableHandle is null");
+        this.metadataDeleteFallback = requireNonNull(metadataDeleteFallback, "metadataDeleteFallback is null");
+    }
+
+    public PaimonMergeTableHandle(PaimonTableHandle tableHandle)
+    {
+        this(tableHandle, false);
+    }
+
+    public static PaimonMergeTableHandle forMetadataDeleteFallback(PaimonTableHandle tableHandle)
+    {
+        return new PaimonMergeTableHandle(tableHandle, true);
     }
 
     @JsonAnySetter
@@ -44,5 +58,16 @@ public class PaimonMergeTableHandle
     public ConnectorTableHandle getTableHandle()
     {
         return tableHandle;
+    }
+
+    PaimonTableHandle paimonTableHandle()
+    {
+        return tableHandle;
+    }
+
+    @JsonProperty
+    public boolean isMetadataDeleteFallback()
+    {
+        return metadataDeleteFallback;
     }
 }

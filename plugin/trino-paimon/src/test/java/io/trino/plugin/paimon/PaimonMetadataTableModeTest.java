@@ -92,6 +92,9 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
+import org.apache.paimon.table.source.ReadBuilder;
+import org.apache.paimon.table.source.Split;
+import org.apache.paimon.table.source.TableScan;
 import org.apache.paimon.table.system.AuditLogTable;
 import org.apache.paimon.table.system.RowTrackingTable;
 import org.apache.paimon.table.system.SystemTableLoader;
@@ -579,12 +582,9 @@ public class PaimonMetadataTableModeTest
 
         assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(), "Paimon row-level change requires primary keys");
-        assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
-                NOT_SUPPORTED.toErrorCode(), "Paimon merge row id requires primary keys");
-        assertTrinoError(() -> metadata.getUpdateLayout(SESSION, tableHandle),
-                NOT_SUPPORTED.toErrorCode(), "Paimon update layout requires primary keys");
-        assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
-                NOT_SUPPORTED.toErrorCode(), "Paimon merge requires primary keys");
+        assertMetadataDeleteRowId(metadata.getMergeRowIdColumnHandle(SESSION, tableHandle));
+        assertThat(metadata.getUpdateLayout(SESSION, tableHandle)).isEmpty();
+        assertMetadataDeleteFallback(metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES));
         assertThat(catalog.initialized).isTrue();
     }
 
@@ -607,15 +607,9 @@ public class PaimonMetadataTableModeTest
         assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),
                 "Paimon row-level change is not supported for this table: Merge engine first-row can not support batch delete.");
-        assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
-                NOT_SUPPORTED.toErrorCode(),
-                "Paimon merge row id is not supported for this table: Merge engine first-row can not support batch delete.");
-        assertTrinoError(() -> metadata.getUpdateLayout(SESSION, tableHandle),
-                NOT_SUPPORTED.toErrorCode(),
-                "Paimon update layout is not supported for this table: Merge engine first-row can not support batch delete.");
-        assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
-                NOT_SUPPORTED.toErrorCode(),
-                "Paimon merge is not supported for this table: Merge engine first-row can not support batch delete.");
+        assertMetadataDeleteRowId(metadata.getMergeRowIdColumnHandle(SESSION, tableHandle));
+        assertThat(metadata.getUpdateLayout(SESSION, tableHandle)).isEmpty();
+        assertMetadataDeleteFallback(metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES));
         assertThat(catalog.initialized).isTrue();
     }
 
@@ -1391,14 +1385,13 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testBeginMergeRequiresPrimaryKeyBucketMode()
+    public void testBeginMergeUsesMetadataDeleteFallbackForUnsupportedRowLevelBucketMode()
     {
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(BucketMode.BUCKET_UNAWARE)),
                 TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
-        assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
-                NOT_SUPPORTED.toErrorCode(), "Unsupported table bucket mode: BUCKET_UNAWARE for Paimon merge");
+        assertMetadataDeleteFallback(metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES));
     }
 
     @Test
@@ -1615,6 +1608,152 @@ public class PaimonMetadataTableModeTest
         assertThat(overwriteEnabled).isFalse();
         assertThat(operation).hasValue(Snapshot.Operation.MERGE);
         assertThat(committed).isTrue();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackTruncatesOnlyWhenAllRowsWereDeleted()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(testingSplit(2, OptionalLong.empty()), testingSplit(3, OptionalLong.empty())), List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        metadata.finishMerge(SESSION,
+                PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(2),
+                        PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(3)),
+                List.of());
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isTrue();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackRejectsLimitedHandle()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(testingSplit(1, OptionalLong.empty())), List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(1));
+
+        assertTrinoError(() -> metadata.finishMerge(
+                        SESSION,
+                        PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                        List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(1)),
+                        List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon metadata delete fallback can only delete rows from an unfiltered, unlimited table handle");
+        assertThat(copiedWithLatestSchema).isFalse();
+        assertThat(truncated).isFalse();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackRejectsFilteredHandle()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(testingSplit(1, OptionalLong.empty())), List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(id, Domain.singleValue(INTEGER, 1L))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertTrinoError(() -> metadata.finishMerge(
+                        SESSION,
+                        PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                        List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(1)),
+                        List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon metadata delete fallback can only delete rows from an unfiltered, unlimited table handle");
+        assertThat(copiedWithLatestSchema).isFalse();
+        assertThat(truncated).isFalse();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackNoOpsWhenNoRowsWereDeleted()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(testingSplit(10, OptionalLong.empty())), List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(id, Domain.singleValue(INTEGER, 1L))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(1));
+
+        metadata.finishMerge(SESSION,
+                PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                List.of(),
+                List.of());
+
+        assertThat(copiedWithLatestSchema).isFalse();
+        assertThat(truncated).isFalse();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackRejectsPartialDelete()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(testingSplit(10, OptionalLong.empty())), List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.finishMerge(
+                        SESSION,
+                        PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                        List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(4)),
+                        List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon metadata delete fallback can only delete all rows; query deleted 4 rows but table currently contains 10 rows");
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackRejectsPrimaryKeyTableWithoutMergedRowCounts()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(testingSplit(10, OptionalLong.empty())), List.of("id"));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.finishMerge(
+                        SESSION,
+                        PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                        List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(10)),
+                        List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon metadata delete fallback cannot determine the current row count for primary-key tables");
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
     }
 
     @Test
@@ -1931,7 +2070,7 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testApplyDeleteRejectsLimitedOrProjectedFullTableHandles()
+    public void testApplyDeleteRejectsLimitedFullTableHandle()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
         AtomicBoolean truncated = new AtomicBoolean();
@@ -1939,7 +2078,6 @@ public class PaimonMetadataTableModeTest
         FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions);
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
-        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
         PaimonTableHandle limitedHandle = new PaimonTableHandle(
                 "schema",
                 "table",
@@ -1948,7 +2086,26 @@ public class PaimonMetadataTableModeTest
                 Optional.empty(),
                 Optional.empty(),
                 OptionalLong.of(1));
-        PaimonTableHandle projectedHandle = new PaimonTableHandle(
+
+        assertThat(metadata.applyDelete(SESSION, limitedHandle)).isEmpty();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testApplyDeleteAcceptsProjectedFullTableHandle()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
                 "schema",
                 "table",
                 Map.of(),
@@ -1957,9 +2114,9 @@ public class PaimonMetadataTableModeTest
                 Optional.empty(),
                 OptionalLong.empty());
 
-        assertThat(metadata.applyDelete(SESSION, limitedHandle)).isEmpty();
-        assertThat(metadata.applyDelete(SESSION, projectedHandle)).isEmpty();
+        Optional<ConnectorTableHandle> deleteHandle = metadata.applyDelete(SESSION, tableHandle);
 
+        assertThat(deleteHandle).contains(tableHandle);
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(truncated).isFalse();
         assertThat(truncatedPartitions.get()).isNull();
@@ -6271,6 +6428,22 @@ public class PaimonMetadataTableModeTest
                 });
     }
 
+    private static void assertMetadataDeleteRowId(ColumnHandle columnHandle)
+    {
+        assertThat(columnHandle).isInstanceOfSatisfying(PaimonColumnHandle.class, rowId -> {
+            assertThat(rowId.getColumnName()).isEqualTo(PaimonColumnHandle.TRINO_ROW_ID_NAME);
+            assertThat(rowId.isHidden()).isTrue();
+            assertThat(((org.apache.paimon.types.RowType) rowId.logicalType()).getFieldNames())
+                    .containsExactly("_metadata_delete");
+        });
+    }
+
+    private static void assertMetadataDeleteFallback(ConnectorMergeTableHandle mergeHandle)
+    {
+        assertThat(mergeHandle).isInstanceOfSatisfying(PaimonMergeTableHandle.class,
+                paimonMergeHandle -> assertThat(paimonMergeHandle.isMetadataDeleteFallback()).isTrue());
+    }
+
     private static Map<String, ColumnHandle> assignments(PaimonColumnHandle first, PaimonColumnHandle second)
     {
         Map<String, ColumnHandle> assignments = new LinkedHashMap<>();
@@ -6912,6 +7085,123 @@ public class PaimonMetadataTableModeTest
                     case "toString" -> "stale-truncate-testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    private static FileStoreTable metadataDeleteFallbackFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicBoolean truncated,
+            List<Split> splits,
+            List<String> primaryKeys)
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        AtomicReference<FileStoreTable> latestTableRef = new AtomicReference<>();
+        BatchTableCommit commit = (BatchTableCommit) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {BatchTableCommit.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "truncateTable" -> {
+                        truncated.set(true);
+                        yield null;
+                    }
+                    case "close", "abort", "withMetricRegistry" -> proxy;
+                    case "toString" -> "testing-metadata-delete-batch-table-commit";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        BatchWriteBuilder batchWriteBuilder = (BatchWriteBuilder) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {BatchWriteBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "newCommit" -> commit;
+                    case "withOverwrite" -> proxy;
+                    case "tableName" -> "testing";
+                    case "rowType" -> rowType;
+                    case "newWriteSelector" -> Optional.empty();
+                    case "toString" -> "testing-metadata-delete-batch-write-builder";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        ReadBuilder readBuilder = readBuilder(splits, rowType);
+        FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "newBatchWriteBuilder" -> batchWriteBuilder;
+                    case "newReadBuilder" -> readBuilder;
+                    case "bucketMode" -> BucketMode.BUCKET_UNAWARE;
+                    case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of();
+                    case "primaryKeys" -> primaryKeys;
+                    case "coreOptions" -> new CoreOptions(new Options(Map.of()));
+                    case "schema" -> TableSchema.create(1, new Schema(
+                            rowType.getFields(),
+                            List.of(),
+                            primaryKeys,
+                            Map.of(CoreOptions.BUCKET.key(), "-1"),
+                            ""));
+                    case "copyWithLatestSchema", "copy", "copyWithoutTimeTravel" -> proxy;
+                    case "toString" -> "latest-metadata-delete-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        latestTableRef.set(latestTable);
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithLatestSchema" -> {
+                        copiedWithLatestSchema.set(true);
+                        yield latestTableRef.get();
+                    }
+                    case "copy", "copyWithoutTimeTravel" -> proxy;
+                    case "newBatchWriteBuilder", "newReadBuilder" -> throw new AssertionError(
+                            "stale FileStoreTable should not be used for metadata delete fallback");
+                    case "toString" -> "stale-metadata-delete-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder readBuilder(List<Split> splits, org.apache.paimon.types.RowType rowType)
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "dropStats" -> proxy;
+                    case "newScan" -> tableScan(splits);
+                    case "readType" -> rowType;
+                    case "tableName" -> "testing-table";
+                    case "toString" -> "testing-read-builder";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static TableScan tableScan(List<Split> splits)
+    {
+        List<Split> copiedSplits = List.copyOf(splits);
+        return (TableScan) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {TableScan.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "plan" -> (TableScan.Plan) () -> copiedSplits;
+                    case "toString" -> "testing-table-scan";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Split testingSplit(long rowCount, OptionalLong mergedRowCount)
+    {
+        return new Split()
+        {
+            @Override
+            public long rowCount()
+            {
+                return rowCount;
+            }
+
+            @Override
+            public OptionalLong mergedRowCount()
+            {
+                return mergedRowCount;
+            }
+        };
     }
 
     private static FileStoreTable truncateFailingFileStoreTable(AtomicBoolean copiedWithLatestSchema, IOException failure)

@@ -123,6 +123,9 @@ public class TrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.comment_values");
             sql("DROP TABLE IF EXISTS paimon.default.replace_values");
             sql("DROP TABLE IF EXISTS paimon.default.truncate_values");
+            sql("DROP TABLE IF EXISTS paimon.default.delete_all_bucket_unaware_values");
+            sql("DROP TABLE IF EXISTS paimon.default.filtered_delete_bucket_unaware_values");
+            sql("DROP TABLE IF EXISTS paimon.default.merge_update_bucket_unaware_values");
             sql("DROP TABLE IF EXISTS paimon.default.hash_fixed_mutations");
             sql("DROP TABLE IF EXISTS paimon.default.drop_nn_values");
             sql("DROP TABLE IF EXISTS paimon.default.nested_field_values");
@@ -984,6 +987,51 @@ public class TrinoITCase
         sql("TRUNCATE TABLE paimon.default.truncate_values");
 
         assertThat(sql("SELECT count(*) FROM paimon.default.truncate_values")).isEqualTo("[[0]]");
+    }
+
+    @Test
+    public void testDeleteAllRowsUsesMetadataDeleteForBucketUnawareTable()
+    {
+        sql("CREATE TABLE paimon.default.delete_all_bucket_unaware_values (id integer, name varchar)");
+        sql("INSERT INTO paimon.default.delete_all_bucket_unaware_values VALUES (1, 'one'), (2, 'two')");
+
+        sql("DELETE FROM paimon.default.delete_all_bucket_unaware_values");
+
+        assertThat(sql("SELECT count(*) FROM paimon.default.delete_all_bucket_unaware_values")).isEqualTo("[[0]]");
+    }
+
+    @Test
+    public void testFilteredDeleteDoesNotUseMetadataDeleteForBucketUnawareTable()
+    {
+        sql("CREATE TABLE paimon.default.filtered_delete_bucket_unaware_values (id integer, name varchar)");
+        sql("INSERT INTO paimon.default.filtered_delete_bucket_unaware_values VALUES (1, 'one'), (2, 'two')");
+
+        sql("DELETE FROM paimon.default.filtered_delete_bucket_unaware_values WHERE id = 99");
+
+        assertThat(sql("SELECT count(*) FROM paimon.default.filtered_delete_bucket_unaware_values")).isEqualTo("[[2]]");
+
+        assertQueryFails(
+                "DELETE FROM paimon.default.filtered_delete_bucket_unaware_values WHERE id = 1",
+                ".*Paimon metadata delete fallback can only delete rows from an unfiltered, unlimited table handle.*");
+
+        assertThat(sql("SELECT count(*) FROM paimon.default.filtered_delete_bucket_unaware_values")).isEqualTo("[[2]]");
+    }
+
+    @Test
+    public void testMergeUpdateDoesNotUseMetadataDeleteForBucketUnawareTable()
+    {
+        sql("CREATE TABLE paimon.default.merge_update_bucket_unaware_values (id integer, name varchar)");
+        sql("INSERT INTO paimon.default.merge_update_bucket_unaware_values VALUES (1, 'one'), (2, 'two')");
+
+        assertQueryFails(
+                "MERGE INTO paimon.default.merge_update_bucket_unaware_values t "
+                        + "USING (VALUES (1, 'updated')) s(id, name) "
+                        + "ON t.id = s.id "
+                        + "WHEN MATCHED THEN UPDATE SET name = s.name",
+                ".*Unsupported table bucket mode: BUCKET_UNAWARE for Paimon row-level change.*");
+
+        assertThat(sql("SELECT * FROM paimon.default.merge_update_bucket_unaware_values ORDER BY id"))
+                .isEqualTo("[[1, one], [2, two]]");
     }
 
     @Test

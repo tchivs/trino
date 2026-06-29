@@ -320,6 +320,18 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testMergePageSinkUsesMetadataDeleteFallbackSinkWithoutCatalogInitialization()
+    {
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(failingInitMetadataFactory());
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        ConnectorMergeSink sink = provider.createMergeSink(null, SESSION,
+                PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle), null);
+
+        assertThat(sink).isInstanceOf(PaimonMetadataDeleteMergeSink.class);
+    }
+
+    @Test
     public void testInsertOverwriteRejectsPartitionedTableWithoutDynamicPartitionOverwrite()
     {
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
@@ -642,6 +654,11 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> PaimonPageSinkProvider.getMergeTableHandle(mergeTableHandle(null)))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("mergeHandle tableHandle is null");
+
+        assertThatThrownBy(() -> PaimonPageSinkProvider.getMergeTableHandle(mergeTableHandle(tableHandle)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon merge sink requires PaimonMergeTableHandle, got: %s",
+                        mergeTableHandle(tableHandle).getClass().getName());
 
         ConnectorTableHandle wrongTableHandle = new ConnectorTableHandle() {};
         assertThatThrownBy(() -> PaimonPageSinkProvider.getMergeTableHandle(mergeTableHandle(wrongTableHandle)))
