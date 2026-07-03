@@ -438,6 +438,8 @@ public class PaimonMetadataTableModeTest
                 DataTypes.FIELD(5, "event_time_tz", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6)));
         Statistics statistics = new Statistics(7, 3, 100L, 4096L, Map.of(
                 "id", ColStats.newColStats(0, 20L, 1L, 99L, 5L, 8L, 8L),
+                "extra", ColStats.newColStats(99, 1L, 100, 200, 0L, 4L, 4L),
+                "old_extra", ColStats.newColStats(2, 7L, 10, 20, 10L, 4L, 4L),
                 "missing", ColStats.newColStats(9, 1L, null, null, 0L, 4L, 4L),
                 "name", ColStats.newColStats(1, null, BinaryString.fromString("a"), BinaryString.fromString("z"),
                         25L, 12L, 64L),
@@ -453,7 +455,7 @@ public class PaimonMetadataTableModeTest
                 new PaimonTableHandle("schema", "table", Map.of()));
 
         assertThat(tableStatistics.getRowCount().getValue()).isEqualTo(100);
-        assertThat(tableStatistics.getColumnStatistics()).hasSize(5);
+        assertThat(tableStatistics.getColumnStatistics()).hasSize(6);
 
         ColumnStatistics idStats = tableStatistics.getColumnStatistics()
                 .get(PaimonColumnHandle.of("id", DataTypes.BIGINT()));
@@ -468,6 +470,12 @@ public class PaimonMetadataTableModeTest
         assertThat(nameStats.getNullsFraction().getValue()).isEqualTo(0.25);
         assertThat(nameStats.getDataSize().getValue()).isEqualTo(900);
         assertThat(nameStats.getRange()).isEmpty();
+
+        ColumnStatistics extraStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("extra", DataTypes.INT()));
+        assertThat(extraStats.getDistinctValuesCount().getValue()).isEqualTo(7);
+        assertThat(extraStats.getNullsFraction().getValue()).isEqualTo(0.1);
+        assertThat(extraStats.getRange()).contains(new DoubleRange(10, 20));
 
         ColumnStatistics dateStats = tableStatistics.getColumnStatistics()
                 .get(PaimonColumnHandle.of("event_date", DataTypes.DATE()));

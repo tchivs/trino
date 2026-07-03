@@ -1270,8 +1270,26 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return builder.build();
         }
 
+        Map<Integer, ColStats<?>> colStatsById = new HashMap<>();
+        Set<Integer> duplicateColStatIds = new HashSet<>();
+        for (ColStats<?> stats : colStats.values()) {
+            if (stats == null) {
+                continue;
+            }
+            ColStats<?> previous = colStatsById.putIfAbsent(stats.colId(), stats);
+            if (previous != null) {
+                duplicateColStatIds.add(stats.colId());
+            }
+        }
+
         for (DataField field : PaimonTableHandle.effectiveReadRowType(table).getFields()) {
             ColStats<?> columnStats = colStats.get(field.name());
+            if (columnStats != null && columnStats.colId() != field.id()) {
+                columnStats = null;
+            }
+            if (columnStats == null && !duplicateColStatIds.contains(field.id())) {
+                columnStats = colStatsById.get(field.id());
+            }
             if (columnStats != null) {
                 builder.setColumnStatistics(
                         PaimonColumnHandle.of(field.name(), field.type(), typeManager),
