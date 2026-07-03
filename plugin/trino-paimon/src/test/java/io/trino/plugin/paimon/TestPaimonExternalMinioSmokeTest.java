@@ -60,6 +60,17 @@ public class TestPaimonExternalMinioSmokeTest
                     .contains(config.table());
 
             String tableName = qualifiedName(CATALOG, config.schema(), config.table());
+            assertThat(queryRunner.execute("SELECT table_name FROM " + qualifiedName(CATALOG, "information_schema", "tables")
+                    + " WHERE table_schema = " + stringLiteral(config.schema())
+                    + " AND table_name = " + stringLiteral(config.table())).getOnlyColumnAsSet())
+                    .contains(config.table());
+
+            String createTable = (String) queryRunner.execute("SHOW CREATE TABLE " + tableName)
+                    .getOnlyValue();
+            assertThat(createTable)
+                    .contains("CREATE TABLE")
+                    .contains(config.table());
+
             MaterializedResult columns = queryRunner.execute("SHOW COLUMNS FROM " + tableName);
             assertThat(columns.getRowCount()).isGreaterThan(0);
 
@@ -99,6 +110,11 @@ public class TestPaimonExternalMinioSmokeTest
     private static String quote(String identifier)
     {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static String stringLiteral(String value)
+    {
+        return "'" + value.replace("'", "''") + "'";
     }
 
     private record ExternalMinioConfig(
