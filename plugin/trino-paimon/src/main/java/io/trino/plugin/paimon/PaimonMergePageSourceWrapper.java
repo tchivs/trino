@@ -158,11 +158,8 @@ public class PaimonMergePageSourceWrapper
                 rowIdBlocks[i] = nextPage.getBlock(channelIndex);
             }
 
-            // The rowIsNull array size must match rowCount (number of rows), not the number
-            // of fields
-            // All rows are non-null in this context
             newBlocks[nextPage.getChannelCount()] = RowBlock.fromNotNullSuppressedFieldBlocks(rowCount,
-                    Optional.of(new boolean[rowCount]), rowIdBlocks);
+                    Optional.empty(), rowIdBlocks);
 
             return new Page(rowCount, newBlocks);
         }

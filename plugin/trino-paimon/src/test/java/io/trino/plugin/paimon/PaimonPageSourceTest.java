@@ -2187,8 +2187,10 @@ public class PaimonPageSourceTest
         RowType rowIdType = RowType.from(List.of(RowType.field("b", BIGINT), RowType.field("a", BIGINT)));
 
         Page page = wrapper.getNextPage();
-        SqlRow rowId = rowIdType.getObject(page.getBlock(2), 0);
+        Block rowIdBlock = page.getBlock(2);
+        SqlRow rowId = rowIdType.getObject(rowIdBlock, 0);
 
+        assertThat(rowIdBlock.mayHaveNull()).isFalse();
         assertThat(BIGINT.getLong(rowId.getRawFieldBlock(0), rowId.getRawIndex())).isEqualTo(20);
         assertThat(BIGINT.getLong(rowId.getRawFieldBlock(1), rowId.getRawIndex())).isEqualTo(10);
     }
