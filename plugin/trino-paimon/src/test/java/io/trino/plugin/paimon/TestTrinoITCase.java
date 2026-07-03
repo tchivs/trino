@@ -66,6 +66,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import java.nio.file.Files;
 import java.time.Instant;
@@ -86,7 +87,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 @Execution(ExecutionMode.SAME_THREAD)  // Disable concurrent execution to avoid table name conflicts
-public class TrinoITCase
+@Isolated
+public class TestTrinoITCase
         extends
         AbstractTestQueryFramework
 {
@@ -1012,7 +1014,7 @@ public class TrinoITCase
 
         assertQueryFails(
                 "DELETE FROM paimon.default.filtered_delete_bucket_unaware_values WHERE id = 1",
-                ".*Paimon metadata delete fallback can only delete rows from an unfiltered, unlimited table handle.*");
+                ".*Paimon metadata delete fallback can only delete all rows or complete partitions from an unlimited table handle.*");
 
         assertThat(sql("SELECT count(*) FROM paimon.default.filtered_delete_bucket_unaware_values")).isEqualTo("[[2]]");
     }
