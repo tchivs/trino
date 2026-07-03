@@ -282,6 +282,9 @@ public class PaimonCatalogTest
                     if (method.getName().equals("newInputFile")) {
                         return failingInputFile((Location) args[0]);
                     }
+                    if (method.getName().equals("directoryExists")) {
+                        throw new IOException("simulated S3 probe failure");
+                    }
                     throw new AssertionError("Unexpected filesystem call: " + method.getName());
                 });
     }

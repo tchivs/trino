@@ -106,11 +106,20 @@ public class PaimonFileIO
     {
         Location location = Location.of(path.toString());
         if (objectStore) {
-            if (existFile(location)) {
-                return fileStatus(location, path);
+            IOException fileProbeFailure = null;
+            try {
+                if (existFile(location)) {
+                    return fileStatus(location, path);
+                }
+            }
+            catch (IOException e) {
+                fileProbeFailure = e;
             }
             if (isDirectory(location, false)) {
                 return new PaimonDirectoryFileStatus(path);
+            }
+            if (fileProbeFailure != null) {
+                throw fileProbeFailure;
             }
             return fileStatus(location, path);
         }
@@ -127,11 +136,20 @@ public class PaimonFileIO
         List<FileStatus> fileStatusList = new ArrayList<>();
         Location location = Location.of(path.toString());
         if (objectStore) {
-            if (existFile(location)) {
-                fileStatusList.add(fileStatus(location, path));
+            boolean fileProbeFailed = false;
+            try {
+                if (existFile(location)) {
+                    fileStatusList.add(fileStatus(location, path));
+                }
             }
-            else if (isDirectory(location, false)) {
+            catch (IOException e) {
+                fileProbeFailed = true;
+            }
+            if (fileStatusList.isEmpty() && isDirectory(location, false)) {
                 addDirectoryEntries(fileStatusList, location);
+            }
+            if (fileProbeFailed && fileStatusList.isEmpty()) {
+                return new FileStatus[0];
             }
         }
         else if (isDirectory(location)) {
@@ -176,12 +194,43 @@ public class PaimonFileIO
     {
         Location location = Location.of(path.toString());
         if (objectStore) {
-            if (existFile(location)) {
-                return true;
+            try {
+                if (existFile(location)) {
+                    return true;
+                }
+            }
+            catch (IOException e) {
+                return isDirectory(location, false);
             }
             return isDirectory(location, false);
         }
         return isDirectory(location) || existFile(location);
+    }
+
+    @Override
+    public void checkOrMkdirs(Path path)
+            throws IOException
+    {
+        if (!objectStore) {
+            FileIO.super.checkOrMkdirs(path);
+            return;
+        }
+
+        Location location = Location.of(path.toString());
+        if (isDirectory(location, false)) {
+            return;
+        }
+
+        try {
+            if (existFile(location)) {
+                throw new IllegalArgumentException("The path '%s' should be a directory.".formatted(path));
+            }
+        }
+        catch (IOException ignored) {
+            // Some S3-compatible stores fail HEAD on absent directory-prefix objects instead of
+            // returning a normal not-found response. Let mkdirs perform the real write/access check.
+        }
+        mkdirs(path);
     }
 
     private FileStatus fileStatus(Location location, Path path)
@@ -303,7 +352,12 @@ public class PaimonFileIO
     private boolean directoryMarkerExists(Location location)
             throws IOException
     {
-        return trinoFileSystem.newInputFile(directoryMarker(location)).exists();
+        try {
+            return trinoFileSystem.newInputFile(directoryMarker(location)).exists();
+        }
+        catch (IOException e) {
+            return false;
+        }
     }
 
     private boolean hasChildForNonRecursiveDelete(Location location)

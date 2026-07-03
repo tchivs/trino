@@ -16,7 +16,9 @@ package io.trino.plugin.paimon.fileio;
 import io.trino.filesystem.FileIterator;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
+import io.trino.filesystem.TrinoInput;
 import io.trino.filesystem.TrinoInputFile;
+import io.trino.filesystem.TrinoInputStream;
 import io.trino.filesystem.TrinoOutputFile;
 import io.trino.filesystem.local.LocalFileSystem;
 import io.trino.filesystem.memory.MemoryFileSystem;
@@ -25,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Map;
@@ -82,6 +85,26 @@ public class TestPaimonFileIO
         assertThat(fileIO.exists(databasePath)).isTrue();
         assertThat(fileIO.getFileStatus(databasePath).isDir()).isTrue();
         assertThat(fileIO.listStatus(databasePath)).isEmpty();
+    }
+
+    @Test
+    public void testObjectStoreCheckOrMkdirsToleratesFailedHeadForMissingDirectoryPrefix()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new MissingDirectoryPrefixHeadFileSystem());
+        Path warehousePath = new Path("memory:///warehouse");
+        Path databasePath = new Path(warehousePath, "minio_smoke.db");
+
+        assertThat(fileIO.exists(warehousePath)).isFalse();
+        assertThat(fileIO.exists(databasePath)).isFalse();
+
+        fileIO.checkOrMkdirs(warehousePath);
+        assertThat(fileIO.exists(warehousePath)).isTrue();
+        assertThat(fileIO.getFileStatus(warehousePath).isDir()).isTrue();
+
+        assertThat(fileIO.mkdirs(databasePath)).isTrue();
+        assertThat(fileIO.exists(databasePath)).isTrue();
+        assertThat(fileIO.getFileStatus(databasePath).isDir()).isTrue();
     }
 
     @Test
@@ -548,6 +571,72 @@ public class TestPaimonFileIO
                 throw new IOException("Cannot check directory for regular file: " + location);
             }
             return super.directoryExists(location);
+        }
+    }
+
+    private static class MissingDirectoryPrefixHeadFileSystem
+            extends NoRenameFileSystem
+    {
+        @Override
+        public TrinoInputFile newInputFile(Location location)
+        {
+            TrinoInputFile delegate = super.newInputFile(location);
+            if (Set.of("warehouse", "warehouse/minio_smoke.db").contains(location.path())) {
+                return new FailedHeadInputFile(delegate);
+            }
+            return delegate;
+        }
+    }
+
+    private static class FailedHeadInputFile
+            implements TrinoInputFile
+    {
+        private final TrinoInputFile delegate;
+
+        private FailedHeadInputFile(TrinoInputFile delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public TrinoInput newInput()
+                throws IOException
+        {
+            return delegate.newInput();
+        }
+
+        @Override
+        public TrinoInputStream newStream()
+                throws IOException
+        {
+            return delegate.newStream();
+        }
+
+        @Override
+        public long length()
+                throws IOException
+        {
+            return delegate.length();
+        }
+
+        @Override
+        public Instant lastModified()
+                throws IOException
+        {
+            return delegate.lastModified();
+        }
+
+        @Override
+        public boolean exists()
+                throws IOException
+        {
+            throw new IOException("simulated S3 HEAD failure for " + delegate.location());
+        }
+
+        @Override
+        public Location location()
+        {
+            return delegate.location();
         }
     }
 }
