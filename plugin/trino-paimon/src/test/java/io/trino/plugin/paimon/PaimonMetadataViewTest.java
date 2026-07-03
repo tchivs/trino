@@ -248,6 +248,17 @@ public class PaimonMetadataViewTest
     }
 
     @Test
+    public void testListViewsDoesNotReadViewColumnsForDialectFilter()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(viewWithUnreadableRowType(Map.of("trino", "SELECT id FROM trino_table"))),
+                TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.listViews(SESSION, Optional.of(VIEW_NAME.getSchemaName())))
+                .containsExactly(VIEW_NAME);
+    }
+
+    @Test
     public void testListViewsWithoutSchemaListsAllSchemas()
     {
         MultiSchemaViewCatalog catalog = new MultiSchemaViewCatalog();
@@ -818,6 +829,61 @@ public class PaimonMetadataViewTest
                 dialects,
                 null,
                 options);
+    }
+
+    private static View viewWithUnreadableRowType(Map<String, String> dialects)
+    {
+        Identifier identifier = new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName());
+        return new View()
+        {
+            @Override
+            public String name()
+            {
+                return identifier.getObjectName();
+            }
+
+            @Override
+            public String fullName()
+            {
+                return identifier.getFullName();
+            }
+
+            @Override
+            public org.apache.paimon.types.RowType rowType()
+            {
+                throw new AssertionError("listViews should not read view columns");
+            }
+
+            @Override
+            public String query()
+            {
+                return "SELECT id FROM canonical_table";
+            }
+
+            @Override
+            public Map<String, String> dialects()
+            {
+                return dialects;
+            }
+
+            @Override
+            public Optional<String> comment()
+            {
+                return Optional.empty();
+            }
+
+            @Override
+            public Map<String, String> options()
+            {
+                return Map.of();
+            }
+
+            @Override
+            public View copy(Map<String, String> dynamicOptions)
+            {
+                return this;
+            }
+        };
     }
 
     private static ConnectorViewDefinition viewDefinition(String sql)

@@ -1557,7 +1557,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .orElseGet(() -> listSchemaNames(session))
                 .forEach(schema -> {
                     tables.addAll(listTables(sessionCatalog, schema));
-                    tables.addAll(listViewsIfSupported(sessionCatalog, session, schema));
+                    tables.addAll(listViewsIfSupported(sessionCatalog, schema));
                 });
         return tables;
     }
@@ -1578,10 +1578,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
-    private List<SchemaTableName> listViewsIfSupported(Catalog sessionCatalog, ConnectorSession session, String schemaName)
+    private List<SchemaTableName> listViewsIfSupported(Catalog sessionCatalog, String schemaName)
     {
         try {
-            return listViews(sessionCatalog, session, schemaName);
+            return listViews(sessionCatalog, schemaName);
         }
         catch (TrinoException e) {
             if (isUnsupportedViewListOperation(e)) {
@@ -1604,7 +1604,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .orElseGet(() -> listSchemaNames(session))
                 .forEach(schema -> {
                     listTables(sessionCatalog, schema).forEach(tableName -> relationTypes.put(tableName, RelationType.TABLE));
-                    listViewsIfSupported(sessionCatalog, session, schema).forEach(viewName -> relationTypes.put(viewName, RelationType.VIEW));
+                    listViewsIfSupported(sessionCatalog, schema).forEach(viewName -> relationTypes.put(viewName, RelationType.VIEW));
                 });
         return Collections.unmodifiableMap(new LinkedHashMap<>(relationTypes));
     }
@@ -3199,21 +3199,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return Optional.empty();
         }
         Catalog sessionCatalog = catalog.forSession(session);
-        Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
-
-        org.apache.paimon.view.View paimonView;
-        try {
-            paimonView = sessionCatalog.getView(identifier);
-        }
-        catch (Catalog.ViewNotExistException e) {
+        Optional<org.apache.paimon.view.View> view = getPaimonView(sessionCatalog, viewName);
+        if (view.isEmpty()) {
             return Optional.empty();
         }
-        catch (UnsupportedOperationException e) {
-            throw unsupportedViewOperation("read", e);
-        }
-        catch (Exception e) {
-            throw paimonViewException(format("Failed to get view '%s'", viewName), e);
-        }
+        org.apache.paimon.view.View paimonView = view.get();
 
         if (!hasTrinoViewDialect(paimonView)) {
             throw new TrinoException(NOT_SUPPORTED,
@@ -3236,6 +3226,25 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 List.of())); // path
     }
 
+    private Optional<org.apache.paimon.view.View> getPaimonView(Catalog sessionCatalog, SchemaTableName viewName)
+    {
+        requireNonNull(sessionCatalog, "sessionCatalog is null");
+        requireNonNull(viewName, "viewName is null");
+        try {
+            Identifier identifier = new Identifier(viewName.getSchemaName(), viewName.getTableName());
+            return Optional.of(sessionCatalog.getView(identifier));
+        }
+        catch (Catalog.ViewNotExistException e) {
+            return Optional.empty();
+        }
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("read", e);
+        }
+        catch (Exception e) {
+            throw paimonViewException(format("Failed to get view '%s'", viewName), e);
+        }
+    }
+
     private static boolean hasTrinoViewDialect(org.apache.paimon.view.View view)
     {
         requireNonNull(view, "view is null");
@@ -3253,15 +3262,15 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         return schemaName.map(Collections::singletonList)
                 .orElseGet(sessionCatalog::listDatabases).stream()
-                .flatMap(schema -> listViews(sessionCatalog, session, schema).stream())
+                .flatMap(schema -> listViews(sessionCatalog, schema).stream())
                 .collect(toList());
     }
 
-    private List<SchemaTableName> listViews(Catalog sessionCatalog, ConnectorSession session, String schemaName)
+    private List<SchemaTableName> listViews(Catalog sessionCatalog, String schemaName)
     {
         return listViewNames(sessionCatalog, schemaName).stream()
                 .map(viewName -> new SchemaTableName(schemaName, viewName))
-                .filter(viewName -> isTrinoView(session, viewName))
+                .filter(viewName -> isTrinoView(sessionCatalog, viewName))
                 .collect(toList());
     }
 
@@ -3285,17 +3294,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
-    private boolean isTrinoView(ConnectorSession session, SchemaTableName viewName)
+    private boolean isTrinoView(Catalog sessionCatalog, SchemaTableName viewName)
     {
-        try {
-            return getView(session, viewName).isPresent();
-        }
-        catch (TrinoException e) {
-            if (isMissingTrinoViewDialect(e, viewName)) {
-                return false;
-            }
-            throw e;
-        }
+        return getPaimonView(sessionCatalog, viewName)
+                .filter(PaimonMetadata::hasTrinoViewDialect)
+                .isPresent();
     }
 
     @Override
