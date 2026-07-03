@@ -30,6 +30,7 @@ import org.apache.paimon.data.InternalVector;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.Variant;
 import org.apache.paimon.index.BucketAssigner;
+import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
@@ -67,6 +68,8 @@ public class PaimonPageSink
     private final int inputChannelCount;
     private final boolean allColumnsPresent;
     @Nullable
+    private final MemoryPoolFactory memoryPoolFactory;
+    @Nullable
     private final DynamicBucketWriter dynamicBucketWriter;
 
     public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes)
@@ -89,6 +92,13 @@ public class PaimonPageSink
     public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes,
             int[] inputChannels, Object[] defaultValues, @Nullable DynamicBucketWriter dynamicBucketWriter)
     {
+        this(writer, columnTypes, logicalTypes, inputChannels, defaultValues, dynamicBucketWriter, null);
+    }
+
+    public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes,
+            int[] inputChannels, Object[] defaultValues, @Nullable DynamicBucketWriter dynamicBucketWriter,
+            @Nullable MemoryPoolFactory memoryPoolFactory)
+    {
         this.writer = requireNonNull(writer, "writer is null");
         this.columnTypes = copyColumnTypes(columnTypes);
         this.logicalTypes = copyLogicalTypes(logicalTypes);
@@ -107,6 +117,7 @@ public class PaimonPageSink
                 this.defaultValues.length, this.columnTypes.size());
         this.inputChannelCount = inputChannelCount(this.inputChannels);
         this.allColumnsPresent = allColumnsPresent(this.inputChannels);
+        this.memoryPoolFactory = memoryPoolFactory;
         this.dynamicBucketWriter = dynamicBucketWriter;
     }
 
@@ -191,6 +202,15 @@ public class PaimonPageSink
         int[] channels = new int[columns.size()];
         Arrays.setAll(channels, index -> index);
         return channels;
+    }
+
+    @Override
+    public long getMemoryUsage()
+    {
+        if (memoryPoolFactory == null) {
+            return 0;
+        }
+        return memoryPoolFactory.usedBufferSize();
     }
 
     @Override

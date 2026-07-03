@@ -28,6 +28,8 @@ import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.memory.MemoryOwner;
+import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
@@ -258,6 +260,24 @@ public class PaimonPageSinkProviderTest
 
         assertThat(pageSink).isNotNull();
         assertThat(overwriteEnabled).isTrue();
+    }
+
+    @Test
+    public void testPageSinkProviderSharesWriteBufferMemoryPoolWithSink()
+    {
+        AtomicReference<MemoryPoolFactory> writeBufferPool = new AtomicReference<>();
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
+                writeReadyFileStoreTable(new AtomicBoolean(), new AtomicReference<>(), new AtomicBoolean(),
+                        writeBufferPool)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())));
+
+        ConnectorPageSink pageSink = provider.createPageSink(null, SESSION, (ConnectorOutputTableHandle) tableHandle,
+                null);
+
+        assertThat(writeBufferPool.get()).isNotNull();
+        writeBufferPool.get().addOwners(List.of(memoryOwner(1234)));
+        assertThat(pageSink.getMemoryUsage()).isEqualTo(1234);
     }
 
     @Test
@@ -1128,6 +1148,23 @@ public class PaimonPageSinkProviderTest
                 List.of(), Map.of());
     }
 
+    private static FileStoreTable writeReadyFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            AtomicBoolean overwriteEnabled,
+            AtomicReference<MemoryPoolFactory> writeBufferPool)
+    {
+        return writeReadyFileStoreTable(
+                copiedWithLatestSchema,
+                copyWithoutTimeTravelOptions,
+                overwriteEnabled,
+                List.of(),
+                Map.of(),
+                List.of("id"),
+                BucketMode.HASH_FIXED,
+                writeBufferPool);
+    }
+
     private static FileStoreTable writeReadyPartitionedFileStoreTable(
             AtomicBoolean copiedWithLatestSchema,
             AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
@@ -1180,7 +1217,28 @@ public class PaimonPageSinkProviderTest
             List<String> primaryKeys,
             BucketMode bucketMode)
     {
-        org.apache.paimon.table.sink.BatchTableWrite writer = writer();
+        return writeReadyFileStoreTable(
+                copiedWithLatestSchema,
+                copyWithoutTimeTravelOptions,
+                overwriteEnabled,
+                partitionKeys,
+                options,
+                primaryKeys,
+                bucketMode,
+                new AtomicReference<>());
+    }
+
+    private static FileStoreTable writeReadyFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            AtomicBoolean overwriteEnabled,
+            List<String> partitionKeys,
+            Map<String, String> options,
+            List<String> primaryKeys,
+            BucketMode bucketMode,
+            AtomicReference<MemoryPoolFactory> writeBufferPool)
+    {
+        org.apache.paimon.table.sink.BatchTableWrite writer = writer(writeBufferPool);
         org.apache.paimon.table.sink.BatchWriteBuilder batchWriteBuilder = (org.apache.paimon.table.sink.BatchWriteBuilder) Proxy
                 .newProxyInstance(
                         PaimonPageSinkProviderTest.class.getClassLoader(),
@@ -1320,6 +1378,28 @@ public class PaimonPageSinkProviderTest
                 });
     }
 
+    private static MemoryOwner memoryOwner(long memoryOccupancy)
+    {
+        return new MemoryOwner()
+        {
+            @Override
+            public void setMemoryPool(org.apache.paimon.memory.MemorySegmentPool memoryPool)
+            {
+            }
+
+            @Override
+            public long memoryOccupancy()
+            {
+                return memoryOccupancy;
+            }
+
+            @Override
+            public void flushMemory()
+            {
+            }
+        };
+    }
+
     private static class TestingCatalog
             extends io.trino.plugin.paimon.catalog.PaimonCatalog
     {
@@ -1379,6 +1459,11 @@ public class PaimonPageSinkProviderTest
         return writer(List.of(), null, null, null);
     }
 
+    private static org.apache.paimon.table.sink.BatchTableWrite writer(AtomicReference<MemoryPoolFactory> writeBufferPool)
+    {
+        return writer(List.of(), null, null, null, new AtomicReference<>(), writeBufferPool);
+    }
+
     private static org.apache.paimon.table.sink.BatchTableWrite writer(RuntimeException closeFailure)
     {
         return writer(List.of(), null, null, closeFailure);
@@ -1411,10 +1496,23 @@ public class PaimonPageSinkProviderTest
             Exception writeFailure, Exception prepareFailure, Exception closeFailure,
             AtomicReference<Object[]> writeArguments)
     {
+        return writer(commitMessages, writeFailure, prepareFailure, closeFailure, writeArguments,
+                new AtomicReference<>());
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages,
+            Exception writeFailure, Exception prepareFailure, Exception closeFailure,
+            AtomicReference<Object[]> writeArguments,
+            AtomicReference<MemoryPoolFactory> writeBufferPool)
+    {
         return (org.apache.paimon.table.sink.BatchTableWrite) Proxy.newProxyInstance(
                 PaimonPageSinkProviderTest.class.getClassLoader(),
                 new Class<?>[] {org.apache.paimon.table.sink.BatchTableWrite.class},
                 (proxy, method, args) -> switch (method.getName()) {
+                    case "withMemoryPoolFactory" -> {
+                        writeBufferPool.set((MemoryPoolFactory) args[0]);
+                        yield proxy;
+                    }
                     case "write" -> {
                         if (writeFailure != null) {
                             throw writeFailure;

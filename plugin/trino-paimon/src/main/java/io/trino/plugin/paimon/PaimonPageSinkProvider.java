@@ -33,6 +33,8 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.index.BucketAssigner;
 import org.apache.paimon.index.HashBucketAssigner;
 import org.apache.paimon.index.SimpleHashBucketAssigner;
+import org.apache.paimon.memory.HeapMemorySegmentPool;
+import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
@@ -344,16 +346,27 @@ public class PaimonPageSinkProvider
                 batchWriteBuilder.withOverwrite();
             }
             BatchTableWrite write = batchWriteBuilder.newWrite();
+            MemoryPoolFactory memoryPoolFactory = memoryPoolFactory(table);
+            write.withMemoryPoolFactory(memoryPoolFactory);
             if (table.bucketMode() == BucketMode.HASH_DYNAMIC) {
                 return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
-                        writeLayout.inputChannels(), writeLayout.defaultValues(), dynamicBucketWriter(table, overwrite));
+                        writeLayout.inputChannels(), writeLayout.defaultValues(), dynamicBucketWriter(table, overwrite),
+                        memoryPoolFactory);
             }
             return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
-                    writeLayout.inputChannels(), writeLayout.defaultValues(), null);
+                    writeLayout.inputChannels(), writeLayout.defaultValues(), null, memoryPoolFactory);
         }
         catch (Exception e) {
             throw PaimonPageSink.wrapWriteException(e);
         }
+    }
+
+    private static MemoryPoolFactory memoryPoolFactory(FileStoreTable table)
+    {
+        CoreOptions coreOptions = table.coreOptions();
+        return new MemoryPoolFactory(new HeapMemorySegmentPool(
+                coreOptions.writeBufferSize(),
+                coreOptions.pageSize()));
     }
 
     private static PaimonPageSink.DynamicBucketWriter dynamicBucketWriter(FileStoreTable table, boolean overwrite)
