@@ -179,4 +179,39 @@ public class TestPaimonMinioSmokeTest
             assertUpdate("DROP SCHEMA IF EXISTS " + qualifiedSchemaName);
         }
     }
+
+    @Test
+    public void testMinioSpillableWriteBufferSmoke()
+    {
+        String tableName = "spillable_write_" + randomNameSuffix();
+        String qualifiedSchemaName = CATALOG + "." + SCHEMA;
+        String qualifiedTableName = qualifiedSchemaName + "." + tableName;
+
+        assertUpdate("CREATE SCHEMA " + qualifiedSchemaName);
+        try {
+            assertUpdate("CREATE TABLE " + qualifiedTableName + " ("
+                    + "orderkey bigint, "
+                    + "status varchar, "
+                    + "ds varchar) "
+                    + "WITH ("
+                    + "partitioned_by = ARRAY['ds'], "
+                    + "write_buffer_for_append = 'true', "
+                    + "write_buffer_spillable = 'true', "
+                    + "write_max_writers_to_spill = '1')");
+
+            assertUpdate("INSERT INTO " + qualifiedTableName + " VALUES "
+                    + "(1, 'queued', '2026-07-01'), "
+                    + "(2, 'ready', '2026-07-02')", 2);
+
+            assertQuery(
+                    "SELECT orderkey, status, ds FROM " + qualifiedTableName + " ORDER BY orderkey",
+                    "VALUES "
+                            + "(CAST(1 AS BIGINT), CAST('queued' AS VARCHAR), CAST('2026-07-01' AS VARCHAR)), "
+                            + "(CAST(2 AS BIGINT), CAST('ready' AS VARCHAR), CAST('2026-07-02' AS VARCHAR))");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + qualifiedTableName);
+            assertUpdate("DROP SCHEMA IF EXISTS " + qualifiedSchemaName);
+        }
+    }
 }

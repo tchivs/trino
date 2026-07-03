@@ -30,6 +30,8 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.disk.IOManager;
+import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.index.BucketAssigner;
 import org.apache.paimon.index.HashBucketAssigner;
 import org.apache.paimon.index.SimpleHashBucketAssigner;
@@ -48,6 +50,7 @@ import org.apache.paimon.types.DataType;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
@@ -61,13 +64,26 @@ public class PaimonPageSinkProvider
 {
     private final PaimonCatalog paimonCatalog;
     private final TypeManager typeManager;
+    private final Supplier<IOManager> ioManagerFactory;
 
     @Inject
+    public PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, PaimonConfig config)
+    {
+        this(paimonMetadataFactory, () -> createIoManager(requireNonNull(config, "config is null")
+                .getWriteSpillPath()));
+    }
+
     public PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory)
+    {
+        this(paimonMetadataFactory, new PaimonConfig());
+    }
+
+    PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, Supplier<IOManager> ioManagerFactory)
     {
         requireNonNull(paimonMetadataFactory, "trinoMetadataFactory is null");
         this.paimonCatalog = paimonMetadataFactory.create().catalog();
         this.typeManager = paimonMetadataFactory.typeManager();
+        this.ioManagerFactory = requireNonNull(ioManagerFactory, "ioManagerFactory is null");
     }
 
     static void validateWriteBucketMode(Table table)
@@ -340,25 +356,39 @@ public class PaimonPageSinkProvider
 
     private PaimonPageSink createPageSink(FileStoreTable table, boolean overwrite, WriteLayout writeLayout)
     {
+        BatchTableWrite write = null;
+        IOManager ioManager = null;
         try {
             BatchWriteBuilder batchWriteBuilder = table.newBatchWriteBuilder();
             if (overwrite) {
                 batchWriteBuilder.withOverwrite();
             }
-            BatchTableWrite write = batchWriteBuilder.newWrite();
+            write = batchWriteBuilder.newWrite();
+            ioManager = requireNonNull(ioManagerFactory.get(), "ioManagerFactory returned null");
+            write.withIOManager(ioManager);
             MemoryPoolFactory memoryPoolFactory = memoryPoolFactory(table);
             write.withMemoryPoolFactory(memoryPoolFactory);
             if (table.bucketMode() == BucketMode.HASH_DYNAMIC) {
                 return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
                         writeLayout.inputChannels(), writeLayout.defaultValues(), dynamicBucketWriter(table, overwrite),
-                        memoryPoolFactory);
+                        memoryPoolFactory, ioManager);
             }
             return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
-                    writeLayout.inputChannels(), writeLayout.defaultValues(), null, memoryPoolFactory);
+                    writeLayout.inputChannels(), writeLayout.defaultValues(), null, memoryPoolFactory, ioManager);
         }
         catch (Exception e) {
-            throw PaimonPageSink.wrapWriteException(e);
+            RuntimeException failure = PaimonPageSink.wrapWriteException(e);
+            if (write != null) {
+                failure = PaimonPageSink.closeWriter(write, failure);
+            }
+            failure = PaimonPageSink.closeIoManager(ioManager, failure);
+            throw failure;
         }
+    }
+
+    static IOManager createIoManager(String writeSpillPath)
+    {
+        return new IOManagerImpl(PaimonWriteSpillPaths.split(writeSpillPath));
     }
 
     private static MemoryPoolFactory memoryPoolFactory(FileStoreTable table)

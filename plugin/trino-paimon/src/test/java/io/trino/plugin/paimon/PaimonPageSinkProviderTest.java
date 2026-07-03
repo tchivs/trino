@@ -28,6 +28,8 @@ import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.disk.IOManager;
+import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.memory.MemoryOwner;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
@@ -56,6 +58,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_CLOSE_ERROR;
@@ -278,6 +281,42 @@ public class PaimonPageSinkProviderTest
         assertThat(writeBufferPool.get()).isNotNull();
         writeBufferPool.get().addOwners(List.of(memoryOwner(1234)));
         assertThat(pageSink.getMemoryUsage()).isEqualTo(1234);
+    }
+
+    @Test
+    public void testPageSinkProviderSharesIoManagerWithWriteAndSink()
+    {
+        AtomicReference<IOManager> writeIoManager = new AtomicReference<>();
+        TestingIoManager ioManager = new TestingIoManager();
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
+                writeReadyFileStoreTable(new AtomicBoolean(), new AtomicReference<>(), new AtomicBoolean(),
+                        new AtomicReference<>(), writeIoManager)), () -> ioManager);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())));
+
+        ConnectorPageSink pageSink = provider.createPageSink(null, SESSION, (ConnectorOutputTableHandle) tableHandle,
+                null);
+
+        assertThat(writeIoManager.get()).isSameAs(ioManager);
+        assertThat(ioManager.isClosed()).isFalse();
+
+        pageSink.finish().join();
+
+        assertThat(ioManager.isClosed()).isTrue();
+    }
+
+    @Test
+    public void testCreateIoManagerRejectsEmptySpillPath()
+    {
+        assertThatThrownBy(() -> PaimonPageSinkProvider.createIoManager(""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("write.spill-path must contain at least one path");
+        assertThatThrownBy(() -> PaimonPageSinkProvider.createIoManager("/tmp,,/var/tmp"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("write.spill-path must not contain empty path entries");
+        assertThatThrownBy(() -> PaimonPageSinkProvider.createIoManager("/tmp,"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("write.spill-path must not contain empty path entries");
     }
 
     @Test
@@ -909,6 +948,60 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testPageSinkAbortClosesIoManager()
+    {
+        TestingIoManager ioManager = new TestingIoManager();
+        PaimonPageSink pageSink = new PaimonPageSink(
+                writer(),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()),
+                new int[] {0},
+                new Object[] {null},
+                null,
+                null,
+                ioManager);
+
+        pageSink.abort();
+
+        assertThat(ioManager.isClosed()).isTrue();
+    }
+
+    @Test
+    public void testPageSinkTerminalCloseIsIdempotent()
+    {
+        AtomicInteger closeCount = new AtomicInteger();
+        TestingIoManager ioManager = new TestingIoManager();
+        PaimonPageSink pageSink = new PaimonPageSink(
+                writer(List.of(), null, null, null, new AtomicReference<>(), new AtomicReference<>(),
+                        new AtomicReference<>(), closeCount),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()),
+                new int[] {0},
+                new Object[] {null},
+                null,
+                null,
+                ioManager);
+
+        pageSink.abort();
+        pageSink.abort();
+
+        assertThat(closeCount).hasValue(1);
+        assertThat(ioManager.closeCount()).isEqualTo(1);
+    }
+
+    @Test
+    public void testPageSinkRejectsWritesAfterAbort()
+    {
+        PaimonPageSink pageSink = new PaimonPageSink(writer(), List.of(INTEGER), List.of(DataTypes.INT()));
+
+        pageSink.abort();
+
+        assertThatThrownBy(() -> pageSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 1L))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon page sink is already closed");
+    }
+
+    @Test
     public void testPageSinkWriteAndFinishWrapCheckedFailures()
     {
         IOException writeFailure = new IOException("write failed");
@@ -1158,11 +1251,27 @@ public class PaimonPageSinkProviderTest
                 copiedWithLatestSchema,
                 copyWithoutTimeTravelOptions,
                 overwriteEnabled,
+                writeBufferPool,
+                new AtomicReference<>());
+    }
+
+    private static FileStoreTable writeReadyFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            AtomicBoolean overwriteEnabled,
+            AtomicReference<MemoryPoolFactory> writeBufferPool,
+            AtomicReference<IOManager> writeIoManager)
+    {
+        return writeReadyFileStoreTable(
+                copiedWithLatestSchema,
+                copyWithoutTimeTravelOptions,
+                overwriteEnabled,
                 List.of(),
                 Map.of(),
                 List.of("id"),
                 BucketMode.HASH_FIXED,
-                writeBufferPool);
+                writeBufferPool,
+                writeIoManager);
     }
 
     private static FileStoreTable writeReadyPartitionedFileStoreTable(
@@ -1225,6 +1334,7 @@ public class PaimonPageSinkProviderTest
                 options,
                 primaryKeys,
                 bucketMode,
+                new AtomicReference<>(),
                 new AtomicReference<>());
     }
 
@@ -1238,7 +1348,30 @@ public class PaimonPageSinkProviderTest
             BucketMode bucketMode,
             AtomicReference<MemoryPoolFactory> writeBufferPool)
     {
-        org.apache.paimon.table.sink.BatchTableWrite writer = writer(writeBufferPool);
+        return writeReadyFileStoreTable(
+                copiedWithLatestSchema,
+                copyWithoutTimeTravelOptions,
+                overwriteEnabled,
+                partitionKeys,
+                options,
+                primaryKeys,
+                bucketMode,
+                writeBufferPool,
+                new AtomicReference<>());
+    }
+
+    private static FileStoreTable writeReadyFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            AtomicBoolean overwriteEnabled,
+            List<String> partitionKeys,
+            Map<String, String> options,
+            List<String> primaryKeys,
+            BucketMode bucketMode,
+            AtomicReference<MemoryPoolFactory> writeBufferPool,
+            AtomicReference<IOManager> writeIoManager)
+    {
+        org.apache.paimon.table.sink.BatchTableWrite writer = writer(writeBufferPool, writeIoManager);
         org.apache.paimon.table.sink.BatchWriteBuilder batchWriteBuilder = (org.apache.paimon.table.sink.BatchWriteBuilder) Proxy
                 .newProxyInstance(
                         PaimonPageSinkProviderTest.class.getClassLoader(),
@@ -1400,6 +1533,37 @@ public class PaimonPageSinkProviderTest
         };
     }
 
+    private static class TestingIoManager
+            extends IOManagerImpl
+    {
+        private final AtomicBoolean closed = new AtomicBoolean();
+        private final AtomicInteger closeCount = new AtomicInteger();
+
+        private TestingIoManager()
+        {
+            super(System.getProperty("java.io.tmpdir"));
+        }
+
+        @Override
+        public void close()
+                throws Exception
+        {
+            closeCount.incrementAndGet();
+            closed.set(true);
+            super.close();
+        }
+
+        private boolean isClosed()
+        {
+            return closed.get();
+        }
+
+        private int closeCount()
+        {
+            return closeCount.get();
+        }
+    }
+
     private static class TestingCatalog
             extends io.trino.plugin.paimon.catalog.PaimonCatalog
     {
@@ -1461,7 +1625,14 @@ public class PaimonPageSinkProviderTest
 
     private static org.apache.paimon.table.sink.BatchTableWrite writer(AtomicReference<MemoryPoolFactory> writeBufferPool)
     {
-        return writer(List.of(), null, null, null, new AtomicReference<>(), writeBufferPool);
+        return writer(writeBufferPool, new AtomicReference<>());
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite writer(
+            AtomicReference<MemoryPoolFactory> writeBufferPool,
+            AtomicReference<IOManager> writeIoManager)
+    {
+        return writer(List.of(), null, null, null, new AtomicReference<>(), writeBufferPool, writeIoManager);
     }
 
     private static org.apache.paimon.table.sink.BatchTableWrite writer(RuntimeException closeFailure)
@@ -1505,10 +1676,35 @@ public class PaimonPageSinkProviderTest
             AtomicReference<Object[]> writeArguments,
             AtomicReference<MemoryPoolFactory> writeBufferPool)
     {
+        return writer(commitMessages, writeFailure, prepareFailure, closeFailure, writeArguments, writeBufferPool,
+                new AtomicReference<>());
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages,
+            Exception writeFailure, Exception prepareFailure, Exception closeFailure,
+            AtomicReference<Object[]> writeArguments,
+            AtomicReference<MemoryPoolFactory> writeBufferPool,
+            AtomicReference<IOManager> writeIoManager)
+    {
+        return writer(commitMessages, writeFailure, prepareFailure, closeFailure, writeArguments, writeBufferPool,
+                writeIoManager, new AtomicInteger());
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite writer(List<CommitMessage> commitMessages,
+            Exception writeFailure, Exception prepareFailure, Exception closeFailure,
+            AtomicReference<Object[]> writeArguments,
+            AtomicReference<MemoryPoolFactory> writeBufferPool,
+            AtomicReference<IOManager> writeIoManager,
+            AtomicInteger closeCount)
+    {
         return (org.apache.paimon.table.sink.BatchTableWrite) Proxy.newProxyInstance(
                 PaimonPageSinkProviderTest.class.getClassLoader(),
                 new Class<?>[] {org.apache.paimon.table.sink.BatchTableWrite.class},
                 (proxy, method, args) -> switch (method.getName()) {
+                    case "withIOManager" -> {
+                        writeIoManager.set((IOManager) args[0]);
+                        yield proxy;
+                    }
                     case "withMemoryPoolFactory" -> {
                         writeBufferPool.set((MemoryPoolFactory) args[0]);
                         yield proxy;
@@ -1527,6 +1723,7 @@ public class PaimonPageSinkProviderTest
                         yield commitMessages;
                     }
                     case "close" -> {
+                        closeCount.incrementAndGet();
                         if (closeFailure != null) {
                             throw closeFailure;
                         }

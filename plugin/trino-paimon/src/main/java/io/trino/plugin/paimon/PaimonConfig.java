@@ -14,6 +14,8 @@
 package io.trino.plugin.paimon;
 
 import io.airlift.configuration.Config;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.NotBlank;
 import org.apache.paimon.options.Options;
 
 import java.util.HashMap;
@@ -36,6 +38,7 @@ public class PaimonConfig
     private Boolean fsNativeS3Enabled;
     private Boolean fsHadoopEnabled;
     private int catalogSessionCacheMaximumSize = DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE;
+    private String writeSpillPath = System.getProperty("java.io.tmpdir");
 
     public String getWarehouse()
     {
@@ -143,6 +146,25 @@ public class PaimonConfig
     {
         this.catalogSessionCacheMaximumSize = catalogSessionCacheMaximumSize;
         return this;
+    }
+
+    @NotBlank
+    public String getWriteSpillPath()
+    {
+        return writeSpillPath;
+    }
+
+    @Config("write.spill-path")
+    public PaimonConfig setWriteSpillPath(String writeSpillPath)
+    {
+        this.writeSpillPath = writeSpillPath;
+        return this;
+    }
+
+    @AssertTrue(message = "must not contain empty path entries")
+    public boolean isWriteSpillPathEntriesValid()
+    {
+        return PaimonWriteSpillPaths.hasValidEntries(writeSpillPath);
     }
 
     /**

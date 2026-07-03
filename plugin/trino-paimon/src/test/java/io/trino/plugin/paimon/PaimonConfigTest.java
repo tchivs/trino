@@ -13,11 +13,14 @@
  */
 package io.trino.plugin.paimon;
 
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.NotBlank;
 import org.apache.paimon.options.Options;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static io.trino.plugin.paimon.catalog.PaimonCatalog.DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -129,6 +132,7 @@ public class PaimonConfigTest
         assertThat(config.getFsNativeS3Enabled()).isTrue();
         assertThat(config.getFsHadoopEnabled()).isFalse();
         assertThat(config.getCatalogSessionCacheMaximumSize()).isEqualTo(DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE);
+        assertThat(config.getWriteSpillPath()).isEqualTo(System.getProperty("java.io.tmpdir"));
     }
 
     @Test
@@ -144,6 +148,46 @@ public class PaimonConfigTest
         assertThat(options.toMap())
                 .containsEntry("warehouse", "/tmp/warehouse")
                 .doesNotContainKey("catalog.session-cache.maximum-size");
+    }
+
+    @Test
+    public void testWriteSpillPathIsConnectorOnly()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setWarehouse("/tmp/warehouse")
+                .setWriteSpillPath("/tmp/paimon-spill");
+
+        Options options = config.toOptions();
+
+        assertThat(config.getWriteSpillPath()).isEqualTo("/tmp/paimon-spill");
+        assertThat(options.toMap())
+                .containsEntry("warehouse", "/tmp/warehouse")
+                .doesNotContainKey("write.spill-path");
+    }
+
+    @Test
+    public void testWriteSpillPathMustNotBeEmpty()
+    {
+        assertFailsValidation(
+                new PaimonConfig().setWriteSpillPath(""),
+                "writeSpillPath",
+                "must not be blank",
+                NotBlank.class);
+        assertFailsValidation(
+                new PaimonConfig().setWriteSpillPath("   "),
+                "writeSpillPath",
+                "must not be blank",
+                NotBlank.class);
+        assertFailsValidation(
+                new PaimonConfig().setWriteSpillPath("/tmp,,/var/tmp"),
+                "writeSpillPathEntriesValid",
+                "must not contain empty path entries",
+                AssertTrue.class);
+        assertFailsValidation(
+                new PaimonConfig().setWriteSpillPath("/tmp,"),
+                "writeSpillPathEntriesValid",
+                "must not contain empty path entries",
+                AssertTrue.class);
     }
 
     @Test

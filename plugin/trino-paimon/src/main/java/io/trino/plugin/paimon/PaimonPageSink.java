@@ -29,6 +29,7 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.InternalVector;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.Variant;
+import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.index.BucketAssigner;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.table.sink.BatchTableWrite;
@@ -45,8 +46,10 @@ import java.util.Collection;
 import java.util.IllegalFormatException;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_CLOSE_ERROR;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_DATA_ERROR;
@@ -70,7 +73,10 @@ public class PaimonPageSink
     @Nullable
     private final MemoryPoolFactory memoryPoolFactory;
     @Nullable
+    private final IOManager ioManager;
+    @Nullable
     private final DynamicBucketWriter dynamicBucketWriter;
+    private final AtomicBoolean closed = new AtomicBoolean();
 
     public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes)
     {
@@ -99,6 +105,14 @@ public class PaimonPageSink
             int[] inputChannels, Object[] defaultValues, @Nullable DynamicBucketWriter dynamicBucketWriter,
             @Nullable MemoryPoolFactory memoryPoolFactory)
     {
+        this(writer, columnTypes, logicalTypes, inputChannels, defaultValues, dynamicBucketWriter, memoryPoolFactory,
+                null);
+    }
+
+    public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes,
+            int[] inputChannels, Object[] defaultValues, @Nullable DynamicBucketWriter dynamicBucketWriter,
+            @Nullable MemoryPoolFactory memoryPoolFactory, @Nullable IOManager ioManager)
+    {
         this.writer = requireNonNull(writer, "writer is null");
         this.columnTypes = copyColumnTypes(columnTypes);
         this.logicalTypes = copyLogicalTypes(logicalTypes);
@@ -118,6 +132,7 @@ public class PaimonPageSink
         this.inputChannelCount = inputChannelCount(this.inputChannels);
         this.allColumnsPresent = allColumnsPresent(this.inputChannels);
         this.memoryPoolFactory = memoryPoolFactory;
+        this.ioManager = ioManager;
         this.dynamicBucketWriter = dynamicBucketWriter;
     }
 
@@ -227,6 +242,7 @@ public class PaimonPageSink
 
     public void writePage(Page page, RowKind rowKind)
     {
+        checkState(!closed.get(), "Paimon page sink is already closed");
         requireNonNull(page, "page is null");
         requireNonNull(rowKind, "rowKind is null");
         validatePageShape(page);
@@ -277,6 +293,7 @@ public class PaimonPageSink
     @Override
     public CompletableFuture<Collection<Slice>> finish()
     {
+        checkState(!closed.get(), "Paimon page sink is already closed");
         Collection<Slice> commitTasks = new ArrayList<>();
         RuntimeException failure = null;
         try {
@@ -293,7 +310,7 @@ public class PaimonPageSink
         catch (Exception e) {
             failure = wrapWriteException(e);
         }
-        failure = closeWriter(failure);
+        failure = close(failure);
         if (failure != null) {
             throw failure;
         }
@@ -303,12 +320,21 @@ public class PaimonPageSink
     @Override
     public void abort()
     {
-        try {
-            writer.close();
+        RuntimeException failure = close(null);
+        if (failure != null) {
+            throw failure;
         }
-        catch (Exception e) {
-            throw wrapWriterCloseException(e);
+    }
+
+    @Nullable
+    private RuntimeException close(@Nullable RuntimeException failure)
+    {
+        if (!closed.compareAndSet(false, true)) {
+            return failure;
         }
+        failure = closeWriter(writer, failure);
+        failure = closeIoManager(ioManager, failure);
+        return failure;
     }
 
     @Nullable
@@ -330,9 +356,24 @@ public class PaimonPageSink
     }
 
     @Nullable
-    private RuntimeException closeWriter(@Nullable RuntimeException failure)
+    static RuntimeException closeIoManager(@Nullable IOManager ioManager, @Nullable RuntimeException failure)
     {
-        return closeWriter(writer, failure);
+        if (ioManager == null) {
+            return failure;
+        }
+        try {
+            ioManager.close();
+        }
+        catch (Exception e) {
+            RuntimeException closeFailure = wrapIoManagerCloseException(e);
+            if (failure != null) {
+                failure.addSuppressed(closeFailure);
+            }
+            else {
+                failure = closeFailure;
+            }
+        }
+        return failure;
     }
 
     static RuntimeException wrapWriteException(Exception exception)
@@ -377,6 +418,17 @@ public class PaimonPageSink
             return runtimeException;
         }
         return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer", exception);
+    }
+
+    static RuntimeException wrapIoManagerCloseException(Exception exception)
+    {
+        if (exception instanceof TrinoException trinoException) {
+            return trinoException;
+        }
+        if (exception instanceof RuntimeException runtimeException) {
+            return runtimeException;
+        }
+        return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer IO manager", exception);
     }
 
     static class DynamicBucketWriter
