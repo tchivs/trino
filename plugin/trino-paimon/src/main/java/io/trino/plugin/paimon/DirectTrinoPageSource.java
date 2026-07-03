@@ -229,9 +229,11 @@ public class DirectTrinoPageSource
     @Override
     public long getMemoryUsage()
     {
-        return currentSource()
-                .map(ConnectorPageSource::getMemoryUsage)
-                .orElse(0L);
+        long memoryUsage = memoryUsage(current);
+        for (PageSourceHandle source : pageSourceQueue) {
+            memoryUsage += memoryUsage(source);
+        }
+        return memoryUsage;
     }
 
     @Override
@@ -265,6 +267,14 @@ public class DirectTrinoPageSource
             return Optional.empty();
         }
         return Optional.of(current.pageSource());
+    }
+
+    private static long memoryUsage(PageSourceHandle source)
+    {
+        if (source == null || !source.isOpened()) {
+            return 0;
+        }
+        return source.pageSource().getMemoryUsage();
     }
 
     private void accumulateCompletedState(PageSourceHandle source)

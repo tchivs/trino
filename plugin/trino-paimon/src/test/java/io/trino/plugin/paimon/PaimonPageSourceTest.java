@@ -1900,6 +1900,33 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectPageSourceReportsQueuedOpenedSourceMemoryUsage()
+    {
+        DelegatingStatePageSource first = new DelegatingStatePageSource(
+                new Page(1, bigintBlock(1)),
+                OptionalLong.of(0),
+                10L,
+                20L,
+                100L);
+        DelegatingStatePageSource second = new DelegatingStatePageSource(
+                new Page(1, bigintBlock(2)),
+                OptionalLong.of(0),
+                30L,
+                40L,
+                200L);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(first, second)),
+                OptionalLong.empty());
+
+        assertThat(pageSource.getMemoryUsage()).isEqualTo(300L);
+
+        assertThat(pageSource.getNextPage()).isNotNull();
+        assertThat(pageSource.getMemoryUsage()).isEqualTo(300L);
+
+        assertThat(pageSource.getNextPage()).isNotNull();
+        assertThat(pageSource.getMemoryUsage()).isEqualTo(200L);
+    }
+
+    @Test
     void testDirectPageSourceLazilyOpensQueuedSources()
     {
         AtomicInteger firstOpens = new AtomicInteger();
@@ -1922,6 +1949,37 @@ public class PaimonPageSourceTest
         assertThat(secondPage.getPositionCount()).isEqualTo(1);
         assertThat(firstOpens).hasValue(1);
         assertThat(secondOpens).hasValue(1);
+    }
+
+    @Test
+    void testDirectPageSourceMemoryUsageDoesNotOpenLazyQueuedSources()
+    {
+        AtomicInteger firstOpens = new AtomicInteger();
+        AtomicInteger secondOpens = new AtomicInteger();
+        LinkedList<Supplier<ConnectorPageSource>> suppliers = new LinkedList<>(List.of(
+                countingPageSourceSupplier(firstOpens, new DelegatingStatePageSource(
+                        new Page(1, bigintBlock(1)),
+                        OptionalLong.of(0),
+                        10L,
+                        20L,
+                        100L)),
+                countingPageSourceSupplier(secondOpens, new DelegatingStatePageSource(
+                        new Page(1, bigintBlock(2)),
+                        OptionalLong.of(0),
+                        30L,
+                        40L,
+                        200L))));
+
+        DirectTrinoPageSource pageSource = DirectTrinoPageSource.lazyPageSources(suppliers, OptionalLong.empty());
+
+        assertThat(pageSource.getMemoryUsage()).isZero();
+        assertThat(firstOpens).hasValue(0);
+        assertThat(secondOpens).hasValue(0);
+
+        assertThat(pageSource.getNextPage()).isNotNull();
+        assertThat(pageSource.getMemoryUsage()).isEqualTo(100L);
+        assertThat(firstOpens).hasValue(1);
+        assertThat(secondOpens).hasValue(0);
     }
 
     @Test
@@ -2890,6 +2948,7 @@ public class PaimonPageSourceTest
         private final OptionalLong completedPositionsBeforePage;
         private final long completedBytes;
         private final long readTimeNanos;
+        private final long memoryUsage;
         private final CompletableFuture<?> blockedFuture = new CompletableFuture<>();
         private final Metrics metrics = new Metrics(Map.of("merge-wrapper", new LongCount(11)));
         private boolean returned;
@@ -2897,10 +2956,17 @@ public class PaimonPageSourceTest
         private DelegatingStatePageSource(Page page, OptionalLong completedPositionsBeforePage, long completedBytes,
                 long readTimeNanos)
         {
+            this(page, completedPositionsBeforePage, completedBytes, readTimeNanos, 0);
+        }
+
+        private DelegatingStatePageSource(Page page, OptionalLong completedPositionsBeforePage, long completedBytes,
+                long readTimeNanos, long memoryUsage)
+        {
             this.page = requireNonNull(page, "page is null");
             this.completedPositionsBeforePage = requireNonNull(completedPositionsBeforePage, "completedPositionsBeforePage is null");
             this.completedBytes = completedBytes;
             this.readTimeNanos = readTimeNanos;
+            this.memoryUsage = memoryUsage;
         }
 
         @Override
@@ -2946,7 +3012,7 @@ public class PaimonPageSourceTest
         @Override
         public long getMemoryUsage()
         {
-            return 0;
+            return memoryUsage;
         }
 
         @Override
