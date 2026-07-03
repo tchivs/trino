@@ -69,6 +69,7 @@ import org.apache.paimon.data.Decimal;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.partition.Partition;
+import org.apache.paimon.partition.PartitionPredicate;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
@@ -82,6 +83,7 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
+import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.system.SystemTableLoader;
 import org.apache.paimon.types.ArrayType;
@@ -800,20 +802,31 @@ public record PaimonMetadata(PaimonCatalog catalog,
         if (deletedRowCount == 0) {
             return;
         }
-        if (!isMetadataDeleteFallbackHandle(paimonTableHandle)) {
+        if (paimonTableHandle.getLimit().isPresent() || paimonTableHandle.getDeletePartitionSpecs().isPresent()) {
             throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon metadata delete fallback can only delete rows from an unfiltered, unlimited table handle");
+                    "Paimon metadata delete fallback can only delete all rows or complete partitions from an unlimited table handle");
         }
         try {
             Catalog sessionCatalog = catalog.forSession(session);
             FileStoreTable fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "delete");
-            long currentRowCount = currentVisibleRowCount(fileStoreTable);
+            Optional<List<Map<String, String>>> deletePartitionSpecs = Optional.empty();
+            if (!isSafeFullTableDeleteHandle(paimonTableHandle)) {
+                deletePartitionSpecs = partitionDeleteSpecs(paimonTableHandle, fileStoreTable);
+                if (deletePartitionSpecs.isEmpty()) {
+                    throw new TrinoException(NOT_SUPPORTED,
+                            "Paimon metadata delete fallback can only delete all rows or complete partitions from an unlimited table handle");
+                }
+            }
+            long currentRowCount = currentVisibleRowCount(fileStoreTable, deletePartitionSpecs);
             if (deletedRowCount != currentRowCount) {
                 throw new TrinoException(NOT_SUPPORTED,
-                        "Paimon metadata delete fallback can only delete all rows; query deleted "
-                                + deletedRowCount + " rows but table currently contains " + currentRowCount + " rows");
+                        deletePartitionSpecs
+                                .map(specs -> "Paimon metadata delete fallback can only delete complete partitions; query deleted "
+                                        + deletedRowCount + " rows but selected partitions currently contain " + currentRowCount + " rows")
+                                .orElse("Paimon metadata delete fallback can only delete all rows; query deleted "
+                                        + deletedRowCount + " rows but table currently contains " + currentRowCount + " rows"));
             }
-            truncatePaimonTable(fileStoreTable, paimonTableHandle, "delete", "delete rows from", Optional.empty());
+            truncatePaimonTable(fileStoreTable, paimonTableHandle, "delete", "delete rows from", deletePartitionSpecs);
         }
         catch (TrinoException e) {
             throw e;
@@ -850,11 +863,25 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return deletedRowCount;
     }
 
-    private static long currentVisibleRowCount(FileStoreTable fileStoreTable)
+    private static long currentVisibleRowCount(
+            FileStoreTable fileStoreTable,
+            Optional<List<Map<String, String>>> deletePartitionSpecs)
     {
         requireNonNull(fileStoreTable, "fileStoreTable is null");
+        requireNonNull(deletePartitionSpecs, "deletePartitionSpecs is null");
         long rowCount = 0;
-        List<Split> splits = fileStoreTable.newReadBuilder().dropStats().newScan().plan().splits();
+        ReadBuilder readBuilder = fileStoreTable.newReadBuilder().dropStats();
+        if (deletePartitionSpecs.isPresent()) {
+            RowType partitionType = partitionType(fileStoreTable);
+            PartitionPredicate partitionPredicate = requireNonNull(
+                    PartitionPredicate.fromMaps(
+                            partitionType,
+                            deletePartitionSpecs.get(),
+                            fileStoreTable.coreOptions().partitionDefaultName()),
+                    "partitionPredicate is null");
+            readBuilder.withPartitionFilter(partitionPredicate);
+        }
+        List<Split> splits = readBuilder.newScan().plan().splits();
         for (Split split : splits) {
             OptionalLong mergedRowCount = split.mergedRowCount();
             if (mergedRowCount.isPresent()) {
@@ -2674,20 +2701,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 && tableHandle.getDeletePartitionSpecs().isEmpty();
     }
 
-    private static boolean isMetadataDeleteFallbackHandle(PaimonTableHandle tableHandle)
-    {
-        return tableHandle.getFilter().isAll()
-                && tableHandle.getLimit().isEmpty()
-                && tableHandle.getDeletePartitionSpecs().isEmpty();
-    }
-
     private static Optional<List<Map<String, String>>> partitionDeleteSpecs(
             PaimonTableHandle tableHandle,
             FileStoreTable fileStoreTable)
     {
         requireNonNull(tableHandle, "tableHandle is null");
         requireNonNull(fileStoreTable, "fileStoreTable is null");
-        if (tableHandle.getLimit().isPresent() || tableHandle.getProjectedColumns().isPresent()
+        if (tableHandle.getLimit().isPresent()
                 || tableHandle.getFilter().isNone() || fileStoreTable.partitionKeys().isEmpty()) {
             return Optional.empty();
         }

@@ -1746,7 +1746,29 @@ public class PaimonMetadataTableModeTest
                         List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(1)),
                         List.of()),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon metadata delete fallback can only delete rows from an unfiltered, unlimited table handle");
+                "Paimon metadata delete fallback can only delete all rows or complete partitions from an unlimited table handle");
+        assertThat(copiedWithLatestSchema).isFalse();
+        assertThat(truncated).isFalse();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackRejectsPrecomputedPartitionSpecs()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(testingSplit(1, OptionalLong.empty())), List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withDeletePartitionSpecs(List.of(Map.of("ds", "2026-07-01")));
+
+        assertTrinoError(() -> metadata.finishMerge(
+                        SESSION,
+                        PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                        List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(1)),
+                        List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon metadata delete fallback can only delete all rows or complete partitions from an unlimited table handle");
         assertThat(copiedWithLatestSchema).isFalse();
         assertThat(truncated).isFalse();
     }
@@ -1775,9 +1797,95 @@ public class PaimonMetadataTableModeTest
                         List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(1)),
                         List.of()),
                 NOT_SUPPORTED.toErrorCode(),
-                "Paimon metadata delete fallback can only delete rows from an unfiltered, unlimited table handle");
-        assertThat(copiedWithLatestSchema).isFalse();
+                "Paimon metadata delete fallback can only delete all rows or complete partitions from an unlimited table handle");
+        assertThat(copiedWithLatestSchema).isTrue();
         assertThat(truncated).isFalse();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackTruncatesCompletePartitions()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        AtomicBoolean partitionFilterApplied = new AtomicBoolean();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "ds", DataTypes.STRING()),
+                DataTypes.FIELD(1, "id", DataTypes.INT()));
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(
+                copiedWithLatestSchema,
+                truncated,
+                truncatedPartitions,
+                partitionFilterApplied,
+                List.of(testingSplit(2, OptionalLong.empty())),
+                rowType,
+                List.of("ds"),
+                List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonColumnHandle ds = PaimonColumnHandle.of("ds", DataTypes.STRING());
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(ds, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-07-01")))),
+                Optional.of(List.of(id)),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        metadata.finishMerge(SESSION,
+                PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(2)),
+                List.of());
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(partitionFilterApplied).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).containsExactly(Map.of("ds", "2026-07-01"));
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackRejectsPartialPartitionDelete()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        AtomicBoolean partitionFilterApplied = new AtomicBoolean();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "ds", DataTypes.STRING()),
+                DataTypes.FIELD(1, "id", DataTypes.INT()));
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(
+                copiedWithLatestSchema,
+                truncated,
+                truncatedPartitions,
+                partitionFilterApplied,
+                List.of(testingSplit(2, OptionalLong.empty())),
+                rowType,
+                List.of("ds"),
+                List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonColumnHandle ds = PaimonColumnHandle.of("ds", DataTypes.STRING());
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(ds, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-07-01")))),
+                Optional.of(List.of(id)),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        assertTrinoError(() -> metadata.finishMerge(
+                        SESSION,
+                        PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                        List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(1)),
+                        List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon metadata delete fallback can only delete complete partitions; query deleted 1 rows but selected partitions currently contain 2 rows");
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(partitionFilterApplied).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
     }
 
     @Test
@@ -7258,6 +7366,27 @@ public class PaimonMetadataTableModeTest
             List<String> primaryKeys)
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        return metadataDeleteFallbackFileStoreTable(
+                copiedWithLatestSchema,
+                truncated,
+                new AtomicReference<>(),
+                new AtomicBoolean(),
+                splits,
+                rowType,
+                List.of(),
+                primaryKeys);
+    }
+
+    private static FileStoreTable metadataDeleteFallbackFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicBoolean truncated,
+            AtomicReference<List<Map<String, String>>> truncatedPartitions,
+            AtomicBoolean partitionFilterApplied,
+            List<Split> splits,
+            org.apache.paimon.types.RowType rowType,
+            List<String> partitionKeys,
+            List<String> primaryKeys)
+    {
         AtomicReference<FileStoreTable> latestTableRef = new AtomicReference<>();
         BatchTableCommit commit = (BatchTableCommit) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
@@ -7265,6 +7394,12 @@ public class PaimonMetadataTableModeTest
                 (proxy, method, args) -> switch (method.getName()) {
                     case "truncateTable" -> {
                         truncated.set(true);
+                        yield null;
+                    }
+                    case "truncatePartitions" -> {
+                        @SuppressWarnings("unchecked")
+                        List<Map<String, String>> partitions = (List<Map<String, String>>) args[0];
+                        truncatedPartitions.set(partitions);
                         yield null;
                     }
                     case "close", "abort", "withMetricRegistry" -> proxy;
@@ -7283,7 +7418,13 @@ public class PaimonMetadataTableModeTest
                     case "toString" -> "testing-metadata-delete-batch-write-builder";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
-        ReadBuilder readBuilder = readBuilder(splits, rowType);
+        ReadBuilder readBuilder = readBuilder(splits, rowType, partitionFilterApplied);
+        TableSchema schema = TableSchema.create(1, new Schema(
+                rowType.getFields(),
+                partitionKeys,
+                primaryKeys,
+                Map.of(CoreOptions.BUCKET.key(), "-1"),
+                ""));
         FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
@@ -7292,15 +7433,10 @@ public class PaimonMetadataTableModeTest
                     case "newReadBuilder" -> readBuilder;
                     case "bucketMode" -> BucketMode.BUCKET_UNAWARE;
                     case "rowType" -> rowType;
-                    case "partitionKeys" -> List.of();
+                    case "partitionKeys" -> partitionKeys;
                     case "primaryKeys" -> primaryKeys;
-                    case "coreOptions" -> new CoreOptions(new Options(Map.of()));
-                    case "schema" -> TableSchema.create(1, new Schema(
-                            rowType.getFields(),
-                            List.of(),
-                            primaryKeys,
-                            Map.of(CoreOptions.BUCKET.key(), "-1"),
-                            ""));
+                    case "coreOptions" -> new CoreOptions(new Options(schema.options()));
+                    case "schema" -> schema;
                     case "copyWithLatestSchema", "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "latest-metadata-delete-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
@@ -7324,11 +7460,23 @@ public class PaimonMetadataTableModeTest
 
     private static ReadBuilder readBuilder(List<Split> splits, org.apache.paimon.types.RowType rowType)
     {
+        return readBuilder(splits, rowType, new AtomicBoolean());
+    }
+
+    private static ReadBuilder readBuilder(
+            List<Split> splits,
+            org.apache.paimon.types.RowType rowType,
+            AtomicBoolean partitionFilterApplied)
+    {
         return (ReadBuilder) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
                 new Class<?>[] {ReadBuilder.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "dropStats" -> proxy;
+                    case "withPartitionFilter" -> {
+                        partitionFilterApplied.set(true);
+                        yield proxy;
+                    }
                     case "newScan" -> tableScan(splits);
                     case "readType" -> rowType;
                     case "tableName" -> "testing-table";

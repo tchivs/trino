@@ -130,4 +130,53 @@ public class TestPaimonMinioSmokeTest
             assertUpdate("DROP SCHEMA IF EXISTS " + qualifiedSchemaName);
         }
     }
+
+    @Test
+    public void testMinioPartitionPredicateDeleteSmoke()
+    {
+        String tableName = "partition_delete_" + randomNameSuffix();
+        String qualifiedSchemaName = CATALOG + "." + SCHEMA;
+        String qualifiedTableName = qualifiedSchemaName + "." + tableName;
+
+        assertUpdate("CREATE SCHEMA " + qualifiedSchemaName);
+        try {
+            assertUpdate("CREATE TABLE " + qualifiedTableName + " ("
+                    + "orderkey bigint, "
+                    + "status varchar, "
+                    + "ds varchar) "
+                    + "WITH (partitioned_by = ARRAY['ds'])");
+            assertUpdate("INSERT INTO " + qualifiedTableName + " VALUES "
+                    + "(1, 'queued', '2026-07-01'), "
+                    + "(2, 'ready', '2026-07-02'), "
+                    + "(3, 'done', '2026-07-02'), "
+                    + "(4, 'held', '2026-07-03')", 4);
+
+            assertUpdate("DELETE FROM " + qualifiedTableName + " WHERE ds = '2026-07-01'");
+            assertQuery(
+                    "SELECT orderkey, status, ds FROM " + qualifiedTableName + " ORDER BY orderkey",
+                    "VALUES "
+                            + "(CAST(2 AS BIGINT), CAST('ready' AS VARCHAR), CAST('2026-07-02' AS VARCHAR)), "
+                            + "(CAST(3 AS BIGINT), CAST('done' AS VARCHAR), CAST('2026-07-02' AS VARCHAR)), "
+                            + "(CAST(4 AS BIGINT), CAST('held' AS VARCHAR), CAST('2026-07-03' AS VARCHAR))");
+
+            assertUpdate("DELETE FROM " + qualifiedTableName + " WHERE ds IN ('2026-07-02', '2026-07-03')");
+            assertQuery("SELECT count(*) FROM " + qualifiedTableName, "VALUES CAST(0 AS BIGINT)");
+
+            assertUpdate("INSERT INTO " + qualifiedTableName + " VALUES "
+                    + "(5, 'partial', '2026-07-04'), "
+                    + "(6, 'keep', '2026-07-04')", 2);
+            assertQueryFails(
+                    "DELETE FROM " + qualifiedTableName + " WHERE ds = '2026-07-04' AND orderkey = 5",
+                    ".*Paimon.*delete.*");
+            assertQuery(
+                    "SELECT orderkey, status, ds FROM " + qualifiedTableName + " ORDER BY orderkey",
+                    "VALUES "
+                            + "(CAST(5 AS BIGINT), CAST('partial' AS VARCHAR), CAST('2026-07-04' AS VARCHAR)), "
+                            + "(CAST(6 AS BIGINT), CAST('keep' AS VARCHAR), CAST('2026-07-04' AS VARCHAR))");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + qualifiedTableName);
+            assertUpdate("DROP SCHEMA IF EXISTS " + qualifiedSchemaName);
+        }
+    }
 }
