@@ -5775,6 +5775,45 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testListTablesAndRelationTypesSkipPaimonViewsWithoutTrinoDialect()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new SchemaQueryCatalog()
+        {
+            @Override
+            public List<String> listViews(String databaseName)
+            {
+                return databaseName.equals("alpha") ? List.of("spark_view", "trino_view") : List.of();
+            }
+
+            @Override
+            public View getView(Identifier identifier)
+            {
+                if (identifier.getObjectName().equals("spark_view")) {
+                    return new ViewImpl(
+                            identifier,
+                            List.of(DataTypes.FIELD(0, "id", DataTypes.BIGINT())),
+                            "SELECT id FROM spark_table",
+                            Map.of("spark", "SELECT id FROM spark_table"),
+                            null,
+                            Map.of());
+                }
+                return paimonView(identifier, List.of(DataTypes.FIELD(0, "id", DataTypes.BIGINT())));
+            }
+        }, TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.listTables(SESSION, Optional.of("alpha")))
+                .containsExactly(
+                        new SchemaTableName("alpha", "t1"),
+                        new SchemaTableName("alpha", "t2"),
+                        new SchemaTableName("alpha", "trino_view"));
+        assertThat(metadata.getRelationTypes(SESSION, Optional.of("alpha")))
+                .containsExactlyInAnyOrderEntriesOf(Map.of(
+                        new SchemaTableName("alpha", "t1"), RelationType.TABLE,
+                        new SchemaTableName("alpha", "t2"), RelationType.TABLE,
+                        new SchemaTableName("alpha", "trino_view"), RelationType.VIEW));
+    }
+
+    @Test
     public void testListTablesToleratesCatalogWithoutViewListing()
     {
         PaimonMetadata metadata = new PaimonMetadata(new SchemaQueryCatalog() {
@@ -5793,6 +5832,30 @@ public class PaimonMetadataTableModeTest
                 .containsExactlyInAnyOrderEntriesOf(Map.of(
                         new SchemaTableName("alpha", "t1"), RelationType.TABLE,
                         new SchemaTableName("alpha", "t2"), RelationType.TABLE));
+    }
+
+    @Test
+    public void testListTablesDoesNotHideViewDefinitionFailures()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new SchemaQueryCatalog()
+        {
+            @Override
+            public List<String> listViews(String databaseName)
+            {
+                return databaseName.equals("alpha") ? List.of("broken_view") : List.of();
+            }
+
+            @Override
+            public View getView(Identifier identifier)
+            {
+                throw new TrinoException(NOT_SUPPORTED, "View definition uses an unsupported Paimon type");
+            }
+        }, TESTING_TYPE_MANAGER);
+
+        assertTrinoError(
+                () -> metadata.listTables(SESSION, Optional.of("alpha")),
+                NOT_SUPPORTED.toErrorCode(),
+                "View definition uses an unsupported Paimon type");
     }
 
     @Test
@@ -8220,6 +8283,12 @@ public class PaimonMetadataTableModeTest
                 case "beta" -> List.of("v2");
                 default -> List.of();
             };
+        }
+
+        @Override
+        public View getView(Identifier identifier)
+        {
+            return paimonView(identifier, List.of(DataTypes.FIELD(0, "id", DataTypes.BIGINT())));
         }
     }
 

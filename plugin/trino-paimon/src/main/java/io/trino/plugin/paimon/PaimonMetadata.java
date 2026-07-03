@@ -1557,7 +1557,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .orElseGet(() -> listSchemaNames(session))
                 .forEach(schema -> {
                     tables.addAll(listTables(sessionCatalog, schema));
-                    tables.addAll(listViewsIfSupported(sessionCatalog, schema));
+                    tables.addAll(listViewsIfSupported(sessionCatalog, session, schema));
                 });
         return tables;
     }
@@ -1578,13 +1578,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
-    private List<SchemaTableName> listViewsIfSupported(Catalog sessionCatalog, String schemaName)
+    private List<SchemaTableName> listViewsIfSupported(Catalog sessionCatalog, ConnectorSession session, String schemaName)
     {
         try {
-            return listViews(sessionCatalog, schemaName);
+            return listViews(sessionCatalog, session, schemaName);
         }
         catch (TrinoException e) {
-            if (e.getErrorCode().equals(NOT_SUPPORTED.toErrorCode())) {
+            if (isUnsupportedViewListOperation(e)) {
                 return List.of();
             }
             throw e;
@@ -1604,7 +1604,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .orElseGet(() -> listSchemaNames(session))
                 .forEach(schema -> {
                     listTables(sessionCatalog, schema).forEach(tableName -> relationTypes.put(tableName, RelationType.TABLE));
-                    listViewsIfSupported(sessionCatalog, schema).forEach(viewName -> relationTypes.put(viewName, RelationType.VIEW));
+                    listViewsIfSupported(sessionCatalog, session, schema).forEach(viewName -> relationTypes.put(viewName, RelationType.VIEW));
                 });
         return Collections.unmodifiableMap(new LinkedHashMap<>(relationTypes));
     }
@@ -3215,17 +3215,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
             throw paimonViewException(format("Failed to get view '%s'", viewName), e);
         }
 
+        if (!hasTrinoViewDialect(paimonView)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    format("Paimon view '%s' does not contain a Trino SQL dialect", viewName));
+        }
+
         // Convert Paimon View to Trino ConnectorViewDefinition
         List<ConnectorViewDefinition.ViewColumn> columns = paimonView.rowType().getFields().stream()
                 .map(field -> new ConnectorViewDefinition.ViewColumn(field.name(),
                         PaimonTypeUtils.fromPaimonType(field.type(), typeManager).getTypeId(),
                         Optional.ofNullable(field.description()).filter(comment -> !comment.isEmpty())))
                 .collect(toList());
-
-        if (!hasTrinoViewDialect(paimonView)) {
-            throw new TrinoException(NOT_SUPPORTED,
-                    format("Paimon view '%s' does not contain a Trino SQL dialect", viewName));
-        }
 
         String originalSql = paimonView.dialects().get("trino");
         return Optional.of(new ConnectorViewDefinition(originalSql, Optional.empty(), // catalog
@@ -3253,19 +3253,25 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         return schemaName.map(Collections::singletonList)
                 .orElseGet(sessionCatalog::listDatabases).stream()
-                .flatMap(schema -> listViews(sessionCatalog, schema).stream())
+                .flatMap(schema -> listViews(sessionCatalog, session, schema).stream())
                 .collect(toList());
     }
 
-    private List<SchemaTableName> listViews(Catalog sessionCatalog, String schemaName)
+    private List<SchemaTableName> listViews(Catalog sessionCatalog, ConnectorSession session, String schemaName)
+    {
+        return listViewNames(sessionCatalog, schemaName).stream()
+                .map(viewName -> new SchemaTableName(schemaName, viewName))
+                .filter(viewName -> isTrinoView(session, viewName))
+                .collect(toList());
+    }
+
+    private List<String> listViewNames(Catalog sessionCatalog, String schemaName)
     {
         if (SYSTEM_DATABASE_NAME.equals(schemaName)) {
             return List.of();
         }
         try {
-            return sessionCatalog.listViews(schemaName).stream()
-                    .map(viewName -> new SchemaTableName(schemaName, viewName))
-                    .collect(toList());
+            return sessionCatalog.listViews(schemaName);
         }
         catch (Catalog.DatabaseNotExistException e) {
             throw new TrinoException(io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND,
@@ -3276,6 +3282,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         catch (Exception e) {
             throw paimonViewException(format("Failed to list views in schema '%s'", schemaName), e);
+        }
+    }
+
+    private boolean isTrinoView(ConnectorSession session, SchemaTableName viewName)
+    {
+        try {
+            return getView(session, viewName).isPresent();
+        }
+        catch (TrinoException e) {
+            if (isMissingTrinoViewDialect(e, viewName)) {
+                return false;
+            }
+            throw e;
         }
     }
 
@@ -3301,20 +3320,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         if (SYSTEM_DATABASE_NAME.equals(schemaName)) {
             return Map.of();
         }
-        List<String> viewNames;
-        try {
-            viewNames = sessionCatalog.listViews(schemaName);
-        }
-        catch (Catalog.DatabaseNotExistException e) {
-            throw new TrinoException(io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND,
-                    format("Schema '%s' does not exist", schemaName));
-        }
-        catch (UnsupportedOperationException e) {
-            throw unsupportedViewOperation("list", e);
-        }
-        catch (Exception e) {
-            throw paimonViewException(format("Failed to list views in schema '%s'", schemaName), e);
-        }
+        List<String> viewNames = listViewNames(sessionCatalog, schemaName);
 
         Map<SchemaTableName, ConnectorViewDefinition> views = new HashMap<>();
         for (String viewName : viewNames) {
@@ -3335,6 +3341,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         return exception.getErrorCode().equals(NOT_SUPPORTED.toErrorCode())
                 && exception.getMessage().equals(format("Paimon view '%s' does not contain a Trino SQL dialect", viewName));
+    }
+
+    private static boolean isUnsupportedViewListOperation(TrinoException exception)
+    {
+        return exception.getErrorCode().equals(NOT_SUPPORTED.toErrorCode())
+                && exception.getMessage().equals("Paimon catalog does not support view list operations");
     }
 
     @Override

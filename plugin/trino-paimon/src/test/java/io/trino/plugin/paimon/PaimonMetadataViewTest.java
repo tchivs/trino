@@ -239,14 +239,12 @@ public class PaimonMetadataViewTest
     }
 
     @Test
-    public void testListViewsDoesNotRequireViewDefinitions()
+    public void testListViewsSkipsViewsWithoutTrinoDialect()
     {
-        PaimonMetadata metadata = new PaimonMetadata(
-                new TestingPaimonCatalog(view(Map.of("spark", "SELECT id FROM spark_table"))),
-                TESTING_TYPE_MANAGER);
+        PaimonMetadata metadata = new PaimonMetadata(new MixedDialectViewCatalog(), TESTING_TYPE_MANAGER);
 
-        assertThat(metadata.listViews(SESSION, Optional.of(VIEW_NAME.getSchemaName())))
-                .containsExactly(VIEW_NAME);
+        assertThat(metadata.listViews(SESSION, Optional.of("test_schema")))
+                .containsExactly(new SchemaTableName("test_schema", "trino_view"));
     }
 
     @Test
