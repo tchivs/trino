@@ -26,10 +26,14 @@ import java.util.Collections;
 import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public record PaimonSplit(String splitSerialized, Double weight) implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(PaimonSplit.class);
+
     public PaimonSplit(@JsonProperty(value = "splitSerialized", required = true) String splitSerialized,
             @JsonProperty(value = "weight", required = true) Double weight)
     {
@@ -123,6 +127,6 @@ public record PaimonSplit(String splitSerialized, Double weight) implements Conn
     @JsonIgnore
     public long getRetainedSizeInBytes()
     {
-        return ConnectorSplit.super.getRetainedSizeInBytes();
+        return INSTANCE_SIZE + estimatedSizeOf(splitSerialized);
     }
 }

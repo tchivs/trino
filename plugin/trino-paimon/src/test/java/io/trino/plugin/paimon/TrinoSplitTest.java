@@ -167,6 +167,16 @@ public class TrinoSplitTest
     }
 
     @Test
+    public void testSplitRetainedSizeIncludesSerializedSplit()
+    {
+        PaimonSplit shortSplit = new PaimonSplit("serialized", 0.1);
+        PaimonSplit longSplit = new PaimonSplit("serialized-with-extra-payload", 0.1);
+
+        assertThat(shortSplit.getRetainedSizeInBytes()).isPositive();
+        assertThat(longSplit.getRetainedSizeInBytes()).isGreaterThan(shortSplit.getRetainedSizeInBytes());
+    }
+
+    @Test
     public void testFromSplitRejectsNullSplit()
     {
         assertThatThrownBy(() -> PaimonSplit.fromSplit(null, 0.1))
