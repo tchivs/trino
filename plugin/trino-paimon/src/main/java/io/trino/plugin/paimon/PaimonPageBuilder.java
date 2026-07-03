@@ -107,6 +107,11 @@ public final class PaimonPageBuilder
         return pageBuilder.getPositionCount();
     }
 
+    public long getSizeInBytes()
+    {
+        return pageBuilder.getSizeInBytes();
+    }
+
     public void appendRow(InternalRow row)
     {
         requireNonNull(row, "row is null");

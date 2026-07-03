@@ -1666,6 +1666,63 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPaimonPageSourceReportsBufferedPageBuilderMemory()
+    {
+        AtomicReference<PaimonPageSource> pageSourceReference = new AtomicReference<>();
+        AtomicBoolean memoryObserved = new AtomicBoolean();
+        RecordReader<InternalRow> reader = new RecordReader<>()
+        {
+            private boolean returned;
+
+            @Override
+            public RecordIterator<InternalRow> readBatch()
+            {
+                if (returned) {
+                    return null;
+                }
+                returned = true;
+                return new RecordIterator<>()
+                {
+                    private int position;
+
+                    @Override
+                    public InternalRow next()
+                    {
+                        if (position == 0) {
+                            position++;
+                            return GenericRow.of(7L);
+                        }
+                        if (position == 1) {
+                            position++;
+                            memoryObserved.set(true);
+                            assertThat(pageSourceReference.get().getMemoryUsage()).isGreaterThan(0);
+                        }
+                        return null;
+                    }
+
+                    @Override
+                    public void releaseBatch() {}
+                };
+            }
+
+            @Override
+            public void close() {}
+        };
+        PaimonPageSource pageSource = new PaimonPageSource(
+                reader,
+                List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
+                OptionalLong.empty());
+        pageSourceReference.set(pageSource);
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 0)).isEqualTo(7L);
+        assertThat(memoryObserved).isTrue();
+        assertThat(pageSource.getMemoryUsage()).isZero();
+    }
+
+    @Test
     void testPageSourceArrayConversionRequiresArrayOrVectorLogicalType()
     {
         io.trino.spi.type.ArrayType arrayType = new io.trino.spi.type.ArrayType(INTEGER);

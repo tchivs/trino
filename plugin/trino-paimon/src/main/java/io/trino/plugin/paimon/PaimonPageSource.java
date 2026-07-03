@@ -117,7 +117,7 @@ public class PaimonPageSource
     @Override
     public long getMemoryUsage()
     {
-        return 0;
+        return pageBuilder.getSizeInBytes();
     }
 
     @Nullable
