@@ -1606,6 +1606,66 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPaimonPageSourceValidatesColumnsBeforeOpeningReader()
+    {
+        TrackingRecordReader reader = new TrackingRecordReader(GenericRow.of(1L));
+
+        assertThatThrownBy(() -> new PaimonPageSource(reader, List.of(new ColumnHandle() {}),
+                OptionalLong.empty()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Paimon page source requires PaimonColumnHandle, got:");
+
+        assertThat(reader.readBatchCalls()).isZero();
+        assertThat(reader.releaseBatchCalls()).isZero();
+        assertThat(reader.closeCalls()).isZero();
+    }
+
+    @Test
+    void testPaimonPageSourceClosesReaderImmediatelyForLimitZero()
+            throws IOException
+    {
+        TrackingRecordReader reader = new TrackingRecordReader(GenericRow.of(1L));
+        PaimonPageSource pageSource = new PaimonPageSource(
+                reader,
+                List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
+                OptionalLong.of(0));
+
+        assertThat(reader.readBatchCalls()).isEqualTo(1);
+        assertThat(pageSource.getNextPage()).isNull();
+        assertThat(pageSource.isFinished()).isTrue();
+        assertThat(reader.releaseBatchCalls()).isEqualTo(1);
+        assertThat(reader.closeCalls()).isEqualTo(1);
+
+        pageSource.close();
+        assertThat(reader.releaseBatchCalls()).isEqualTo(1);
+        assertThat(reader.closeCalls()).isEqualTo(1);
+    }
+
+    @Test
+    void testPaimonPageSourceClosesReaderWhenExhausted()
+            throws IOException
+    {
+        TrackingRecordReader reader = new TrackingRecordReader(GenericRow.of(7L));
+        PaimonPageSource pageSource = new PaimonPageSource(
+                reader,
+                List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
+                OptionalLong.empty());
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 0)).isEqualTo(7L);
+        assertThat(pageSource.isFinished()).isTrue();
+        assertThat(reader.releaseBatchCalls()).isEqualTo(1);
+        assertThat(reader.closeCalls()).isEqualTo(1);
+        assertThat(pageSource.getNextPage()).isNull();
+
+        pageSource.close();
+        assertThat(reader.releaseBatchCalls()).isEqualTo(1);
+        assertThat(reader.closeCalls()).isEqualTo(1);
+    }
+
+    @Test
     void testPageSourceArrayConversionRequiresArrayOrVectorLogicalType()
     {
         io.trino.spi.type.ArrayType arrayType = new io.trino.spi.type.ArrayType(INTEGER);
@@ -2633,6 +2693,71 @@ public class PaimonPageSourceTest
 
         @Override
         public void close() {}
+    }
+
+    private static class TrackingRecordReader
+            implements RecordReader<InternalRow>
+    {
+        private final List<InternalRow> rows;
+        private final AtomicInteger readBatchCalls = new AtomicInteger();
+        private final AtomicInteger releaseBatchCalls = new AtomicInteger();
+        private final AtomicInteger closeCalls = new AtomicInteger();
+        private boolean returned;
+
+        private TrackingRecordReader(InternalRow row)
+        {
+            this.rows = List.of(requireNonNull(row, "row is null"));
+        }
+
+        @Override
+        public RecordIterator<InternalRow> readBatch()
+        {
+            readBatchCalls.incrementAndGet();
+            if (returned) {
+                return null;
+            }
+            returned = true;
+            return new RecordIterator<>()
+            {
+                private int position;
+
+                @Override
+                public InternalRow next()
+                {
+                    if (position >= rows.size()) {
+                        return null;
+                    }
+                    return rows.get(position++);
+                }
+
+                @Override
+                public void releaseBatch()
+                {
+                    releaseBatchCalls.incrementAndGet();
+                }
+            };
+        }
+
+        @Override
+        public void close()
+        {
+            closeCalls.incrementAndGet();
+        }
+
+        private int readBatchCalls()
+        {
+            return readBatchCalls.get();
+        }
+
+        private int releaseBatchCalls()
+        {
+            return releaseBatchCalls.get();
+        }
+
+        private int closeCalls()
+        {
+            return closeCalls.get();
+        }
     }
 
     private static class FailingRecordReader

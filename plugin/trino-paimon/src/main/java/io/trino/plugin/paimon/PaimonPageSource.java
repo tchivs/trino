@@ -45,6 +45,7 @@ public class PaimonPageSource
     private final PaimonPageBuilder pageBuilder;
 
     private boolean isFinished;
+    private boolean closed;
     private long numReturn;
 
     public PaimonPageSource(RecordReader<InternalRow> reader, List<? extends ColumnHandle> projectedColumns,
@@ -52,7 +53,7 @@ public class PaimonPageSource
     {
         this.limit = requireNonNull(limit, "limit is null");
         checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
-        this.iterator = requireNonNull(reader, "reader is null").toCloseableIterator();
+        RecordReader<InternalRow> recordReader = requireNonNull(reader, "reader is null");
         List<Type> columnTypes = new ArrayList<>();
         List<DataType> logicalTypes = new ArrayList<>();
         requireNonNull(projectedColumns, "projectedColumns is null");
@@ -66,6 +67,7 @@ public class PaimonPageSource
         }
 
         this.pageBuilder = new PaimonPageBuilder(columnTypes, logicalTypes);
+        this.iterator = recordReader.toCloseableIterator();
     }
 
     @Override
@@ -122,16 +124,17 @@ public class PaimonPageSource
     private Page nextPage()
             throws IOException
     {
+        if (isFinished) {
+            return null;
+        }
         int count = 0;
         while (count < ROWS_PER_REQUEST && !pageBuilder.isFull()) {
             if (limit.isPresent() && numReturn + count >= limit.getAsLong()) {
-                isFinished = true;
-                return returnPage(count);
+                return finishPage(count);
             }
 
             if (!iterator.hasNext()) {
-                isFinished = true;
-                return returnPage(count);
+                return finishPage(count);
             }
 
             InternalRow row = iterator.next();
@@ -140,6 +143,16 @@ public class PaimonPageSource
         }
 
         return returnPage(count);
+    }
+
+    @Nullable
+    private Page finishPage(int count)
+            throws IOException
+    {
+        isFinished = true;
+        Page page = returnPage(count);
+        close();
+        return page;
     }
 
     private Page returnPage(int count)
@@ -155,8 +168,16 @@ public class PaimonPageSource
     public void close()
             throws IOException
     {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        isFinished = true;
         try {
             this.iterator.close();
+        }
+        catch (IOException e) {
+            throw e;
         }
         catch (Exception e) {
             throw new IOException(e);
