@@ -183,13 +183,20 @@ public class TableChangesFunction
         throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "Unsupported argument value for " + key + ": " + argumentValue.getClass().getName());
     }
 
-    private static void validateIncrementalWindow(String argumentName, Slice value)
+    private static String normalizeIncrementalWindow(String argumentName, Slice value)
     {
         String[] parts = value.toStringUtf8().split(",", -1);
-        if (parts.length != 2 || parts[0].isBlank() || parts[1].isBlank()) {
+        if (parts.length != 2) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
                     argumentName + " must be two non-empty values separated by a comma");
         }
+        String start = parts[0].strip();
+        String end = parts[1].strip();
+        if (start.isBlank() || end.isBlank()) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
+                    argumentName + " must be two non-empty values separated by a comma");
+        }
+        return start + "," + end;
     }
 
     private static void validateNonBlankValue(String argumentName, Slice value)
@@ -240,8 +247,10 @@ public class TableChangesFunction
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
                     INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT + " requires " + INCREMENTAL_BETWEEN);
         }
-        incrementalBetweenValue.ifPresent(value -> validateIncrementalWindow(INCREMENTAL_BETWEEN, value));
-        incrementalBetweenTimestamp.ifPresent(value -> validateIncrementalWindow(INCREMENTAL_BETWEEN_TIMESTAMP, value));
+        Optional<String> normalizedIncrementalBetweenValue = incrementalBetweenValue
+                .map(value -> normalizeIncrementalWindow(INCREMENTAL_BETWEEN, value));
+        Optional<String> normalizedIncrementalBetweenTimestamp = incrementalBetweenTimestamp
+                .map(value -> normalizeIncrementalWindow(INCREMENTAL_BETWEEN_TIMESTAMP, value));
         incrementalToAutoTag.ifPresent(value -> validateNonBlankValue(INCREMENTAL_TO_AUTO_TAG, value));
 
         Optional<String> incrementalBetweenScanMode = Optional.empty();
@@ -260,12 +269,12 @@ public class TableChangesFunction
                     "system.table_changes")
                     .copyWithLatestSchema();
             Map<String, String> options = new HashMap<>();
-            if (incrementalBetweenValue.isPresent()) {
-                options.put(CoreOptions.INCREMENTAL_BETWEEN.key(), incrementalBetweenValue.orElseThrow().toStringUtf8());
+            if (normalizedIncrementalBetweenValue.isPresent()) {
+                options.put(CoreOptions.INCREMENTAL_BETWEEN.key(), normalizedIncrementalBetweenValue.orElseThrow());
             }
-            if (incrementalBetweenTimestamp.isPresent()) {
+            if (normalizedIncrementalBetweenTimestamp.isPresent()) {
                 options.put(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
-                        incrementalBetweenTimestamp.orElseThrow().toStringUtf8());
+                        normalizedIncrementalBetweenTimestamp.orElseThrow());
             }
             incrementalBetweenScanMode.ifPresent(scanMode ->
                     options.put(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), scanMode));

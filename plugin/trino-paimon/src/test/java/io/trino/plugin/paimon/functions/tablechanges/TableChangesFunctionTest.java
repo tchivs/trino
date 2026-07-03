@@ -113,6 +113,24 @@ public class TableChangesFunctionTest
     }
 
     @Test
+    public void testAnalyzeNormalizesIncrementalWindowWhitespace()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(table(DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
+
+        TableFunctionAnalysis snapshotAnalysis = function.analyze(SESSION, null, arguments(Map.of(
+                INCREMENTAL_BETWEEN, " 1 , 2 ")), new RecordingAccessControl());
+        assertThat(((PaimonTableHandle) snapshotAnalysis.getHandle()).getDynamicOptions())
+                .containsEntry(CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2");
+
+        TableFunctionAnalysis timestampAnalysis = function.analyze(SESSION, null, arguments(Map.of(
+                INCREMENTAL_BETWEEN_TIMESTAMP, " 1000 , 2000 ")), new RecordingAccessControl());
+        assertThat(((PaimonTableHandle) timestampAnalysis.getHandle()).getDynamicOptions())
+                .containsEntry(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(), "1000,2000");
+    }
+
+    @Test
     public void testAnalyzePassesIncrementalTimestampAndDefaultScanMode()
     {
         TableChangesFunction function = new TableChangesFunction(
