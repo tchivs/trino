@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon.catalog;
 
+import io.airlift.log.Logger;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.paimon.ClassLoaderUtils;
@@ -56,13 +57,15 @@ import org.apache.paimon.view.ViewChange;
 import java.io.IOException;
 import java.security.Principal;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.options.CatalogOptions.METASTORE;
@@ -72,17 +75,33 @@ public class PaimonCatalog
         implements
         Catalog
 {
+    private static final Logger LOG = Logger.get(PaimonCatalog.class);
+
+    public static final int DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE = 1000;
+
     private final Options options;
 
     private final TrinoFileSystemFactory paimonFileSystemFactory;
 
-    private final ConcurrentMap<SessionCatalogKey, Catalog> catalogs = new ConcurrentHashMap<>();
+    private final int sessionCatalogCacheMaximumSize;
+
+    private final Map<SessionCatalogKey, Catalog> catalogs = new LinkedHashMap<>(16, 0.75f, true);
     private final ThreadLocal<Catalog> currentCatalog = new ThreadLocal<>();
 
     public PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory)
     {
+        this(options, paimonFileSystemFactory, DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE);
+    }
+
+    public PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory,
+            int sessionCatalogCacheMaximumSize)
+    {
         this.options = requireNonNull(options, "options is null");
         this.paimonFileSystemFactory = requireNonNull(paimonFileSystemFactory, "paimonFileSystemFactory is null");
+        checkArgument(sessionCatalogCacheMaximumSize > 0,
+                "sessionCatalogCacheMaximumSize must be greater than zero: %s",
+                sessionCatalogCacheMaximumSize);
+        this.sessionCatalogCacheMaximumSize = sessionCatalogCacheMaximumSize;
     }
 
     public void initSession(ConnectorSession connectorSession)
@@ -94,9 +113,44 @@ public class PaimonCatalog
     public Catalog forSession(ConnectorSession connectorSession)
     {
         requireNonNull(connectorSession, "connectorSession is null");
-        return catalogs.computeIfAbsent(
-                SessionCatalogKey.from(requireNonNull(connectorSession.getIdentity(), "connectorSession identity is null")),
-                ignored -> createCatalog(connectorSession));
+        SessionCatalogKey key = SessionCatalogKey.from(requireNonNull(connectorSession.getIdentity(), "connectorSession identity is null"));
+        synchronized (catalogs) {
+            Catalog catalog = catalogs.get(key);
+            if (catalog != null) {
+                return catalog;
+            }
+        }
+
+        Catalog createdCatalog = createCatalog(connectorSession);
+        Catalog catalogToClose = null;
+        Catalog evictedCatalog = null;
+        Catalog result;
+        synchronized (catalogs) {
+            Catalog existingCatalog = catalogs.get(key);
+            if (existingCatalog != null) {
+                result = existingCatalog;
+                catalogToClose = createdCatalog;
+            }
+            else {
+                result = createdCatalog;
+                catalogs.put(key, createdCatalog);
+                evictedCatalog = evictCatalogIfNeeded();
+            }
+        }
+        closeCatalogQuietly(catalogToClose);
+        closeCatalogQuietly(evictedCatalog);
+        return result;
+    }
+
+    private Catalog evictCatalogIfNeeded()
+    {
+        if (catalogs.size() <= sessionCatalogCacheMaximumSize) {
+            return null;
+        }
+        Iterator<Entry<SessionCatalogKey, Catalog>> iterator = catalogs.entrySet().iterator();
+        Catalog evictedCatalog = iterator.next().getValue();
+        iterator.remove();
+        return evictedCatalog;
     }
 
     private Catalog createCatalog(ConnectorSession connectorSession)
@@ -698,7 +752,12 @@ public class PaimonCatalog
     {
         currentCatalog.remove();
         Exception failure = null;
-        for (Catalog catalog : catalogs.values()) {
+        List<Catalog> catalogsToClose;
+        synchronized (catalogs) {
+            catalogsToClose = List.copyOf(catalogs.values());
+            catalogs.clear();
+        }
+        for (Catalog catalog : catalogsToClose) {
             try {
                 catalog.close();
             }
@@ -711,9 +770,28 @@ public class PaimonCatalog
                 }
             }
         }
-        catalogs.clear();
         if (failure != null) {
             throw failure;
+        }
+    }
+
+    int cachedCatalogCount()
+    {
+        synchronized (catalogs) {
+            return catalogs.size();
+        }
+    }
+
+    private static void closeCatalogQuietly(@Nullable Catalog catalog)
+    {
+        if (catalog == null) {
+            return;
+        }
+        try {
+            catalog.close();
+        }
+        catch (Exception ignored) {
+            LOG.warn(ignored, "Failed to close stale Paimon session catalog");
         }
     }
 

@@ -28,11 +28,25 @@ public class PaimonMetadataFactory
     private final TypeManager typeManager;
 
     @Inject
+    public PaimonMetadataFactory(Options options, TrinoFileSystemFactory fileSystemFactory, TypeManager typeManager,
+            PaimonConfig config)
+    {
+        this(options, fileSystemFactory, typeManager,
+                requireNonNull(config, "config is null").getCatalogSessionCacheMaximumSize());
+    }
+
     public PaimonMetadataFactory(Options options, TrinoFileSystemFactory fileSystemFactory, TypeManager typeManager)
+    {
+        this(options, fileSystemFactory, typeManager, PaimonCatalog.DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE);
+    }
+
+    private PaimonMetadataFactory(Options options, TrinoFileSystemFactory fileSystemFactory, TypeManager typeManager,
+            int sessionCatalogCacheMaximumSize)
     {
         this.catalog = new PaimonCatalog(
                 requireNonNull(options, "options is null"),
-                requireNonNull(fileSystemFactory, "fileSystemFactory is null"));
+                requireNonNull(fileSystemFactory, "fileSystemFactory is null"),
+                sessionCatalogCacheMaximumSize);
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 

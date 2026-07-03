@@ -161,7 +161,7 @@ public class PaimonConnectorFactory
                     new ClassLoaderSafeConnectorSplitManager(paimonSplitManager, classLoader),
                     new ClassLoaderSafeConnectorPageSourceProvider(paimonPageSourceProvider, classLoader),
                     new ClassLoaderSafeConnectorPageSinkProvider(paimonPageSinkProvider, classLoader),
-                    paimonNodePartitioningProvider, paimonSchemaProperties, paimonTableOptions,
+                    paimonNodePartitioningProvider, paimonMetadata.catalog(), paimonSchemaProperties, paimonTableOptions,
                     paimonSessionProperties, connectorTableFunctions, functionProvider);
         }
     }

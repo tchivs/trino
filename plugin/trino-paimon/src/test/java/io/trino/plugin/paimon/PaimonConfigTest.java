@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static io.trino.plugin.paimon.catalog.PaimonCatalog.DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class PaimonConfigTest
@@ -127,6 +128,22 @@ public class PaimonConfigTest
         assertThat(config.getS3PathStyleAccess()).isTrue();
         assertThat(config.getFsNativeS3Enabled()).isTrue();
         assertThat(config.getFsHadoopEnabled()).isFalse();
+        assertThat(config.getCatalogSessionCacheMaximumSize()).isEqualTo(DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE);
+    }
+
+    @Test
+    public void testCatalogSessionCacheMaximumSizeIsConnectorOnly()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setWarehouse("/tmp/warehouse")
+                .setCatalogSessionCacheMaximumSize(10);
+
+        Options options = config.toOptions();
+
+        assertThat(config.getCatalogSessionCacheMaximumSize()).isEqualTo(10);
+        assertThat(options.toMap())
+                .containsEntry("warehouse", "/tmp/warehouse")
+                .doesNotContainKey("catalog.session-cache.maximum-size");
     }
 
     @Test

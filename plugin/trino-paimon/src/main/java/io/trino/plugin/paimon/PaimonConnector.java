@@ -14,6 +14,7 @@
 package io.trino.plugin.paimon;
 
 import com.google.common.collect.ImmutableSet;
+import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorCapabilities;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -47,6 +48,7 @@ public class PaimonConnector
     private final ConnectorPageSourceProvider trinoPageSourceProvider;
     private final ConnectorPageSinkProvider trinoPageSinkProvider;
     private final ConnectorNodePartitioningProvider trinoNodePartitioningProvider;
+    private final PaimonCatalog paimonCatalog;
     private final List<PropertyMetadata<?>> schemaProperties;
     private final List<PropertyMetadata<?>> tableProperties;
     private final List<PropertyMetadata<?>> sessionProperties;
@@ -55,7 +57,8 @@ public class PaimonConnector
 
     public PaimonConnector(ConnectorMetadata trinoMetadata, ConnectorSplitManager trinoSplitManager,
             ConnectorPageSourceProvider trinoPageSourceProvider, ConnectorPageSinkProvider trinoPageSinkProvider,
-            ConnectorNodePartitioningProvider trinoNodePartitioningProvider, PaimonSchemaProperties paimonSchemaProperties,
+            ConnectorNodePartitioningProvider trinoNodePartitioningProvider, PaimonCatalog paimonCatalog,
+            PaimonSchemaProperties paimonSchemaProperties,
             PaimonTableOptions paimonTableOptions, PaimonSessionProperties paimonSessionProperties,
             Set<ConnectorTableFunction> tableFunctions, FunctionProvider functionProvider)
     {
@@ -65,6 +68,7 @@ public class PaimonConnector
         this.trinoPageSinkProvider = requireNonNull(trinoPageSinkProvider, "trinoPageSinkProvider is null");
         this.trinoNodePartitioningProvider = requireNonNull(trinoNodePartitioningProvider,
                 "trinoNodePartitioningProvider is null");
+        this.paimonCatalog = requireNonNull(paimonCatalog, "paimonCatalog is null");
         this.schemaProperties = paimonSchemaProperties.getSchemaProperties();
         this.tableProperties = paimonTableOptions.getTableProperties();
         this.sessionProperties = paimonSessionProperties.getSessionProperties();
@@ -144,5 +148,16 @@ public class PaimonConnector
     public Optional<FunctionProvider> getFunctionProvider()
     {
         return Optional.of(functionProvider);
+    }
+
+    @Override
+    public void shutdown()
+    {
+        try {
+            paimonCatalog.close();
+        }
+        catch (Exception e) {
+            throw new RuntimeException("Failed to close Paimon catalog", e);
+        }
     }
 }

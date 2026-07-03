@@ -70,6 +70,9 @@ public class PaimonCatalogTest
         assertThatThrownBy(() -> new PaimonCatalog(new Options(), null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("paimonFileSystemFactory is null");
+        assertThatThrownBy(() -> new PaimonCatalog(new Options(), new LocalFileSystemFactory(root), 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("sessionCatalogCacheMaximumSize must be greater than zero: 0");
         assertThatThrownBy(() -> catalog().initSession(null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("connectorSession is null");
@@ -195,6 +198,37 @@ public class PaimonCatalogTest
     }
 
     @Test
+    public void testCatalogEvictsLeastRecentlyUsedSessionCatalog()
+            throws Exception
+    {
+        RecordingFileSystemFactory fileSystemFactory = new RecordingFileSystemFactory(root);
+        PaimonCatalog catalog = catalog(fileSystemFactory, 2);
+        TestingConnectorSession alice = session("alice");
+        TestingConnectorSession bob = session("bob");
+        TestingConnectorSession carol = session("carol");
+
+        catalog.initSession(alice);
+        catalog.createDatabase("alice_db", false, Map.of());
+        catalog.initSession(bob);
+        catalog.createDatabase("bob_db", false, Map.of());
+        catalog.initSession(alice);
+        catalog.initSession(carol);
+        catalog.createDatabase("carol_db", false, Map.of());
+
+        assertThat(catalog.cachedCatalogCount()).isEqualTo(2);
+        assertThat(fileSystemFactory.createCalls()).hasValue(3);
+
+        catalog.initSession(alice);
+        assertThat(catalog.listDatabases()).contains("alice_db").doesNotContain("bob_db", "carol_db");
+        assertThat(fileSystemFactory.createCalls()).hasValue(3);
+
+        catalog.initSession(bob);
+        assertThat(catalog.listDatabases()).contains("bob_db").doesNotContain("alice_db", "carol_db");
+        assertThat(catalog.cachedCatalogCount()).isEqualTo(2);
+        assertThat(fileSystemFactory.createCalls()).hasValue(4);
+    }
+
+    @Test
     public void testCatalogDelegatesPaimonDefaultMethodsToCurrentCatalog()
             throws Exception
     {
@@ -240,9 +274,14 @@ public class PaimonCatalogTest
 
     private PaimonCatalog catalog(TrinoFileSystemFactory fileSystemFactory)
     {
+        return catalog(fileSystemFactory, PaimonCatalog.DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE);
+    }
+
+    private PaimonCatalog catalog(TrinoFileSystemFactory fileSystemFactory, int sessionCatalogCacheMaximumSize)
+    {
         Options options = new Options();
         options.set(WAREHOUSE, "local:///warehouse");
-        return new PaimonCatalog(options, fileSystemFactory);
+        return new PaimonCatalog(options, fileSystemFactory, sessionCatalogCacheMaximumSize);
     }
 
     private static View view(Identifier identifier, String query, String comment)

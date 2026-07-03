@@ -19,6 +19,8 @@ import org.apache.paimon.options.Options;
 import java.util.HashMap;
 import java.util.Map;
 
+import static io.trino.plugin.paimon.catalog.PaimonCatalog.DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE;
+
 /**
  * Configuration class for Paimon connector to declare configuration properties
  * so that Airlift Bootstrap framework knows they are being consumed.
@@ -33,6 +35,7 @@ public class PaimonConfig
     private String s3Region;
     private Boolean fsNativeS3Enabled;
     private Boolean fsHadoopEnabled;
+    private int catalogSessionCacheMaximumSize = DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE;
 
     public String getWarehouse()
     {
@@ -127,6 +130,18 @@ public class PaimonConfig
     public PaimonConfig setFsHadoopEnabled(Boolean fsHadoopEnabled)
     {
         this.fsHadoopEnabled = fsHadoopEnabled;
+        return this;
+    }
+
+    public int getCatalogSessionCacheMaximumSize()
+    {
+        return catalogSessionCacheMaximumSize;
+    }
+
+    @Config("catalog.session-cache.maximum-size")
+    public PaimonConfig setCatalogSessionCacheMaximumSize(int catalogSessionCacheMaximumSize)
+    {
+        this.catalogSessionCacheMaximumSize = catalogSessionCacheMaximumSize;
         return this;
     }
 
