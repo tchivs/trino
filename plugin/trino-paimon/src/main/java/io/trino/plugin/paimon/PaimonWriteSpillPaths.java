@@ -14,6 +14,11 @@
 package io.trino.plugin.paimon;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -29,10 +34,13 @@ final class PaimonWriteSpillPaths
     static String[] split(String writeSpillPath)
     {
         requireNonNull(writeSpillPath, "writeSpillPath is null");
-        String[] tempDirs = writeSpillPath.length() > 0 ? writeSpillPath.split(PATH_SEPARATOR_REGEX, -1) : new String[0];
+        String[] tempDirs = writeSpillPath.length() > 0 ? normalizedEntries(writeSpillPath) : new String[0];
         checkArgument(tempDirs.length > 0, "write.spill-path must contain at least one path");
         checkArgument(Stream.of(tempDirs).noneMatch(String::isBlank),
                 "write.spill-path must not contain empty path entries");
+        for (String tempDir : tempDirs) {
+            prepareDirectory(tempDir);
+        }
         return tempDirs;
     }
 
@@ -41,7 +49,29 @@ final class PaimonWriteSpillPaths
         if (writeSpillPath == null || writeSpillPath.isBlank()) {
             return true;
         }
-        return Stream.of(writeSpillPath.split(PATH_SEPARATOR_REGEX, -1))
+        return Stream.of(normalizedEntries(writeSpillPath))
                 .noneMatch(String::isBlank);
+    }
+
+    private static String[] normalizedEntries(String writeSpillPath)
+    {
+        Set<String> paths = new LinkedHashSet<>();
+        for (String path : writeSpillPath.split(PATH_SEPARATOR_REGEX, -1)) {
+            paths.add(path.trim());
+        }
+        return paths.toArray(new String[0]);
+    }
+
+    private static void prepareDirectory(String tempDir)
+    {
+        Path path = Path.of(tempDir);
+        try {
+            Files.createDirectories(path);
+        }
+        catch (IOException | SecurityException e) {
+            throw new IllegalArgumentException("Failed to prepare Paimon write spill path: " + tempDir, e);
+        }
+        checkArgument(Files.isDirectory(path), "write.spill-path entry must be a directory: %s", tempDir);
+        checkArgument(Files.isWritable(path), "write.spill-path entry must be writable: %s", tempDir);
     }
 }

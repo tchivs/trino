@@ -17,12 +17,18 @@ import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotBlank;
 import org.apache.paimon.options.Options;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 
 import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static io.trino.plugin.paimon.catalog.PaimonCatalog.DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class PaimonConfigTest
 {
@@ -188,6 +194,29 @@ public class PaimonConfigTest
                 "writeSpillPathEntriesValid",
                 "must not contain empty path entries",
                 AssertTrue.class);
+    }
+
+    @Test
+    public void testWriteSpillPathsAreTrimmedDeduplicatedAndCreated(@TempDir Path tempDir)
+    {
+        Path firstPath = tempDir.resolve("first");
+        Path secondPath = tempDir.resolve("second");
+
+        assertThat(PaimonWriteSpillPaths.split(" " + firstPath + ", " + secondPath + File.pathSeparator + firstPath + " "))
+                .containsExactly(firstPath.toString(), secondPath.toString());
+        assertThat(firstPath).isDirectory();
+        assertThat(secondPath).isDirectory();
+    }
+
+    @Test
+    public void testWriteSpillPathRejectsFile(@TempDir Path tempDir)
+            throws IOException
+    {
+        Path file = Files.createFile(tempDir.resolve("spill-file"));
+
+        assertThatThrownBy(() -> PaimonWriteSpillPaths.split(file.toString()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Failed to prepare Paimon write spill path");
     }
 
     @Test
