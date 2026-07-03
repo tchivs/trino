@@ -17,12 +17,14 @@ import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.paimon.ClassLoaderUtils;
 import io.trino.plugin.paimon.fileio.PaimonFileIOLoader;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.security.SelectedRole;
 import jakarta.annotation.Nullable;
 import org.apache.paimon.PagedList;
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.catalog.CachingCatalog;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.catalog.CatalogFactory;
@@ -32,11 +34,15 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.catalog.TableQueryAuthResult;
 import org.apache.paimon.consumer.ConsumerInfo;
+import org.apache.paimon.factories.FactoryUtil;
+import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.fs.Path;
 import org.apache.paimon.function.Function;
 import org.apache.paimon.function.FunctionChange;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.partition.Partition;
 import org.apache.paimon.partition.PartitionStatistics;
+import org.apache.paimon.privilege.PrivilegedCatalog;
 import org.apache.paimon.rest.responses.GetTagResponse;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
@@ -47,6 +53,7 @@ import org.apache.paimon.utils.SnapshotNotExistException;
 import org.apache.paimon.view.View;
 import org.apache.paimon.view.ViewChange;
 
+import java.io.IOException;
 import java.security.Principal;
 import java.util.HashMap;
 import java.util.List;
@@ -56,7 +63,9 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
 import static java.util.Objects.requireNonNull;
+import static org.apache.paimon.options.CatalogOptions.METASTORE;
 import static org.apache.paimon.options.CatalogOptions.RESOLVING_FILE_IO_ENABLED;
 
 public class PaimonCatalog
@@ -94,6 +103,7 @@ public class PaimonCatalog
     {
         return ClassLoaderUtils.runWithContextClassLoader(() -> {
             TrinoFileSystem trinoFileSystem = paimonFileSystemFactory.create(connectorSession);
+            PaimonFileIOLoader fileIOLoader = new PaimonFileIOLoader(trinoFileSystem);
             // Avoid referencing HadoopUtils.HADOOP_LOAD_DEFAULT_CONFIG directly, as loading
             // HadoopUtils triggers NoClassDefFoundError for org.apache.hadoop.conf.Configuration
             // when Hadoop is not on the classpath. Use the string key instead.
@@ -102,9 +112,45 @@ public class PaimonCatalog
             Options catalogOptions = Options.fromMap(catalogOptionMap);
             catalogOptions.set(RESOLVING_FILE_IO_ENABLED, false);
             CatalogContext catalogContext = CatalogContext.create(catalogOptions,
-                    new PaimonFileIOLoader(trinoFileSystem), null);
+                    fileIOLoader, null);
+            if (usesTrinoFileIoCatalog(catalogOptions)) {
+                return createTrinoFileIoCatalog(catalogOptions, catalogContext, fileIOLoader);
+            }
             return CatalogFactory.createCatalog(catalogContext);
         }, this.getClass().getClassLoader());
+    }
+
+    private static boolean usesTrinoFileIoCatalog(Options catalogOptions)
+    {
+        String metastore = catalogOptions.get(METASTORE);
+        return "filesystem".equals(metastore) || "jdbc".equals(metastore);
+    }
+
+    private static Catalog createTrinoFileIoCatalog(
+            Options catalogOptions,
+            CatalogContext catalogContext,
+            PaimonFileIOLoader fileIOLoader)
+    {
+        Path warehousePath = CatalogFactory.warehouse(catalogContext);
+        FileIO fileIO = fileIOLoader.load(warehousePath);
+        fileIO.configure(catalogContext);
+        try {
+            fileIO.checkOrMkdirs(warehousePath);
+        }
+        catch (IOException | RuntimeException e) {
+            throw new TrinoException(PAIMON_METADATA_ERROR,
+                    "Failed to access Paimon warehouse '%s' with Trino file system. Verify the warehouse path and filesystem configuration."
+                            .formatted(warehousePath),
+                    e);
+        }
+
+        CatalogFactory catalogFactory = FactoryUtil.discoverFactory(
+                CatalogFactory.class.getClassLoader(),
+                CatalogFactory.class,
+                catalogOptions.get(METASTORE));
+        Catalog catalog = catalogFactory.create(fileIO, warehousePath, catalogContext);
+        catalog = CachingCatalog.tryToCreate(catalog, catalogOptions);
+        return PrivilegedCatalog.tryToCreate(catalog, catalogOptions);
     }
 
     @Override

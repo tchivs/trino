@@ -13,9 +13,12 @@
  */
 package io.trino.plugin.paimon.catalog;
 
+import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.filesystem.TrinoInputFile;
 import io.trino.filesystem.local.LocalFileSystemFactory;
+import io.trino.spi.TrinoException;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.catalog.Catalog;
@@ -28,6 +31,7 @@ import org.apache.paimon.view.ViewImpl;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
@@ -95,6 +99,21 @@ public class PaimonCatalogTest
 
         assertThat(catalog.options().keySet())
                 .noneMatch(key -> key.startsWith("table.runtime." + "file.format."));
+    }
+
+    @Test
+    public void testCatalogInitReportsWarehouseAccessFailureWithoutHadoopFallback()
+    {
+        Options options = new Options();
+        options.set(WAREHOUSE, "s3://bucket/warehouse");
+        PaimonCatalog catalog = new PaimonCatalog(options, ignored -> failingFileSystem());
+
+        assertThatThrownBy(() -> catalog.initSession(TestingConnectorSession.SESSION))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("Failed to access Paimon warehouse 's3://bucket/warehouse' with Trino file system")
+                .hasMessageNotContaining("Hadoop configuration is not available")
+                .hasRootCauseInstanceOf(IOException.class)
+                .hasRootCauseMessage("simulated S3 probe failure");
     }
 
     @Test
@@ -249,6 +268,51 @@ public class PaimonCatalogTest
                         .withExtraCredentials(extraCredentials)
                         .build())
                 .build();
+    }
+
+    private static TrinoFileSystem failingFileSystem()
+    {
+        return (TrinoFileSystem) Proxy.newProxyInstance(
+                PaimonCatalogTest.class.getClassLoader(),
+                new Class<?>[] {TrinoFileSystem.class},
+                (proxy, method, args) -> {
+                    if (method.getDeclaringClass() == Object.class) {
+                        return handleObjectMethod(method.getName(), proxy, args);
+                    }
+                    if (method.getName().equals("newInputFile")) {
+                        return failingInputFile((Location) args[0]);
+                    }
+                    throw new AssertionError("Unexpected filesystem call: " + method.getName());
+                });
+    }
+
+    private static TrinoInputFile failingInputFile(Location location)
+    {
+        return (TrinoInputFile) Proxy.newProxyInstance(
+                PaimonCatalogTest.class.getClassLoader(),
+                new Class<?>[] {TrinoInputFile.class},
+                (proxy, method, args) -> {
+                    if (method.getDeclaringClass() == Object.class) {
+                        return handleObjectMethod(method.getName(), proxy, args);
+                    }
+                    if (method.getName().equals("exists")) {
+                        throw new IOException("simulated S3 probe failure");
+                    }
+                    if (method.getName().equals("location")) {
+                        return location;
+                    }
+                    throw new AssertionError("Unexpected input file call: " + method.getName());
+                });
+    }
+
+    private static Object handleObjectMethod(String name, Object proxy, Object[] args)
+    {
+        return switch (name) {
+            case "toString" -> proxy.getClass().getInterfaces()[0].getSimpleName() + " proxy";
+            case "hashCode" -> System.identityHashCode(proxy);
+            case "equals" -> proxy == args[0];
+            default -> throw new AssertionError("Unexpected Object method: " + name);
+        };
     }
 
     @SuppressWarnings("unchecked")
