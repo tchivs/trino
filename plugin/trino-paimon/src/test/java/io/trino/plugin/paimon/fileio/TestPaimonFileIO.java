@@ -108,6 +108,38 @@ public class TestPaimonFileIO
     }
 
     @Test
+    public void testObjectStoreDirectoryOperationsTolerateFailedHeadForMissingDirectoryPrefix()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new MissingDirectoryPrefixHeadFileSystem());
+        Path warehousePath = new Path("memory:///warehouse");
+        Path databasePath = new Path(warehousePath, "minio_smoke.db");
+        Path sourceFile = new Path(warehousePath, ".schema-0.tmp");
+        Path targetFile = new Path(databasePath, sourceFile.getName());
+
+        fileIO.checkOrMkdirs(warehousePath);
+        assertThat(fileIO.mkdirs(databasePath)).isTrue();
+
+        assertThat(fileIO.listDirectories(warehousePath))
+                .singleElement()
+                .satisfies(status -> {
+                    assertThat(status.isDir()).isTrue();
+                    assertThat(status.getPath().toString()).isEqualTo(databasePath.toString());
+                });
+
+        fileIO.writeFile(sourceFile, "schema", false);
+        assertThat(fileIO.rename(sourceFile, databasePath)).isTrue();
+        assertThat(fileIO.exists(sourceFile)).isFalse();
+        assertThat(fileIO.readFileUtf8(targetFile)).isEqualTo("schema");
+
+        assertThatThrownBy(() -> fileIO.delete(databasePath, false))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("is not empty");
+        assertThat(fileIO.delete(databasePath, true)).isTrue();
+        assertThat(fileIO.exists(databasePath)).isFalse();
+    }
+
+    @Test
     public void testListStatusReturnsOnlyDirectChildren()
             throws IOException
     {
@@ -581,7 +613,7 @@ public class TestPaimonFileIO
         public TrinoInputFile newInputFile(Location location)
         {
             TrinoInputFile delegate = super.newInputFile(location);
-            if (Set.of("warehouse", "warehouse/minio_smoke.db").contains(location.path())) {
+            if (location.path().equals("warehouse") || location.path().endsWith(".db")) {
                 return new FailedHeadInputFile(delegate);
             }
             return delegate;

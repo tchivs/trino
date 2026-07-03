@@ -181,7 +181,7 @@ public class PaimonFileIO
             throws IOException
     {
         Location location = Location.of(path.toString());
-        if (!isDirectory(location)) {
+        if (!isDirectoryForObjectStorePrefix(location)) {
             return new FileStatus[0];
         }
         return trinoFileSystem.listDirectories(location).stream()
@@ -256,7 +256,7 @@ public class PaimonFileIO
             throws IOException
     {
         Location location = Location.of(path.toString());
-        if (isDirectory(location)) {
+        if (isDirectoryForObjectStorePrefix(location)) {
             if (!recursive) {
                 if (hasChildForNonRecursiveDelete(location)) {
                     throw new IOException("Directory " + location + " is not empty");
@@ -291,7 +291,7 @@ public class PaimonFileIO
     {
         Location sourceLocation = Location.of(source.toString());
         Location targetLocation = Location.of(target.toString());
-        boolean sourceIsDirectory = isDirectory(sourceLocation);
+        boolean sourceIsDirectory = isDirectoryForObjectStorePrefix(sourceLocation);
         if (!sourceIsDirectory && !existFile(sourceLocation)) {
             return false;
         }
@@ -300,11 +300,11 @@ public class PaimonFileIO
             throw new IOException("S3 does not support directory renames");
         }
 
-        if (isDirectory(targetLocation)) {
+        if (isDirectoryForObjectStorePrefix(targetLocation)) {
             targetLocation = targetLocation.appendPath(source.getName());
             target = new Path(targetLocation.toString());
         }
-        if (isDirectory(targetLocation) || existFile(targetLocation)) {
+        if (isDirectoryForObjectStorePrefix(targetLocation) || existFile(targetLocation)) {
             return false;
         }
 
@@ -330,6 +330,24 @@ public class PaimonFileIO
             throws IOException
     {
         return isDirectory(location, true);
+    }
+
+    private boolean isDirectoryForObjectStorePrefix(Location location)
+            throws IOException
+    {
+        if (!objectStore) {
+            return isDirectory(location);
+        }
+        try {
+            if (existFile(location)) {
+                return false;
+            }
+        }
+        catch (IOException ignored) {
+            // Some S3-compatible stores fail HEAD for absent directory-prefix objects. Continue
+            // with directory marker/list probes, which are the authoritative object-store checks.
+        }
+        return isDirectory(location, false);
     }
 
     private boolean isDirectory(Location location, boolean checkExactFile)
