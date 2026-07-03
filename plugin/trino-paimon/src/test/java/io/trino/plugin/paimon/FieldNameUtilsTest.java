@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -34,6 +35,10 @@ public class FieldNameUtilsTest
 
         assertThat(FieldNameUtils.fieldNames(rowType))
                 .containsExactly("id", "name");
+        assertThat(FieldNameUtils.fieldNameIndexes(rowType))
+                .containsExactly(
+                        Map.entry("id", 0),
+                        Map.entry("name", 1));
     }
 
     @Test
@@ -42,11 +47,17 @@ public class FieldNameUtilsTest
         assertThatThrownBy(() -> FieldNameUtils.fieldNames(null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("rowType is null");
+        assertThatThrownBy(() -> FieldNameUtils.fieldNameIndexes(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("rowType is null");
 
         RowType duplicateRowType = DataTypes.ROW(
                 DataTypes.FIELD(0, "ID", DataTypes.INT()),
                 DataTypes.FIELD(1, "id", DataTypes.STRING()));
         assertThatThrownBy(() -> FieldNameUtils.fieldNames(duplicateRowType))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon row type contains case-insensitive duplicate field name 'id'");
+        assertThatThrownBy(() -> FieldNameUtils.fieldNameIndexes(duplicateRowType))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("Paimon row type contains case-insensitive duplicate field name 'id'");
     }

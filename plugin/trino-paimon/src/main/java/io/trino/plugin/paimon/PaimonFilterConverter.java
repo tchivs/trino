@@ -112,7 +112,7 @@ public class PaimonFilterConverter
 
         Map<PaimonColumnHandle, Domain> domainMap = tupleDomain.getDomains().get();
         List<Predicate> conjuncts = new ArrayList<>();
-        List<String> fieldNames = FieldNameUtils.fieldNames(rowType);
+        Map<String, Integer> fieldNameIndexes = FieldNameUtils.fieldNameIndexes(rowType);
         for (Map.Entry<PaimonColumnHandle, Domain> entry : domainMap.entrySet()) {
             PaimonColumnHandle columnHandle = entry.getKey();
             Domain domain = entry.getValue();
@@ -126,9 +126,9 @@ public class PaimonFilterConverter
                 int position = nestedColumn.get();
                 field = field.substring(0, position);
             }
-            // Fix case-sensitivity issue: fieldNames are lowercase, so convert field to lowercase for lookup
-            int index = fieldNames.indexOf(FieldNameUtils.toLowerCase(field));
-            if (index != -1) {
+            // Fix case-sensitivity issue: fieldNameIndexes keys are lowercase, so convert field to lowercase for lookup
+            Integer index = fieldNameIndexes.get(FieldNameUtils.toLowerCase(field));
+            if (index != null) {
                 try {
                     conjuncts.add(toPredicate(index, columnHandle.getColumnName(), columnHandle.logicalType(),
                             columnHandle.getTrinoType(), domain, nestedColumn.isPresent()));

@@ -13,11 +13,15 @@
  */
 package io.trino.plugin.paimon;
 
+import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -35,17 +39,26 @@ public class FieldNameUtils
      */
     public static List<String> fieldNames(RowType rowType)
     {
+        return List.copyOf(fieldNameIndexes(rowType).keySet());
+    }
+
+    /**
+     * Get lowercase field names mapped to their positions in the RowType.
+     */
+    public static Map<String, Integer> fieldNameIndexes(RowType rowType)
+    {
         Set<String> fieldNames = new HashSet<>();
-        return requireNonNull(rowType, "rowType is null").getFields().stream()
-                .map(field -> requireNonNull(field, "rowType contains null field").name())
-                .map(FieldNameUtils::toLowerCase)
-                .peek(fieldName -> {
-                    if (!fieldNames.add(fieldName)) {
-                        throw new IllegalStateException(
-                                "Paimon row type contains case-insensitive duplicate field name '%s'".formatted(fieldName));
-                    }
-                })
-                .collect(Collectors.toList());
+        Map<String, Integer> indexes = new LinkedHashMap<>();
+        List<DataField> fields = requireNonNull(rowType, "rowType is null").getFields();
+        for (int index = 0; index < fields.size(); index++) {
+            String fieldName = toLowerCase(requireNonNull(fields.get(index), "rowType contains null field").name());
+            if (!fieldNames.add(fieldName)) {
+                throw new IllegalStateException(
+                        "Paimon row type contains case-insensitive duplicate field name '%s'".formatted(fieldName));
+            }
+            indexes.put(fieldName, index);
+        }
+        return Collections.unmodifiableMap(indexes);
     }
 
     /**

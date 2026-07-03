@@ -562,11 +562,11 @@ public class PaimonTableHandle
         requireNonNull(field, "field is null");
         Table paimonTable = metadataTable(catalog, session);
         RowType readRowType = effectiveReadRowType(paimonTable);
-        List<String> lowerCaseFieldNames = FieldNameUtils.fieldNames(readRowType);
+        Map<String, Integer> lowerCaseFieldIndexes = FieldNameUtils.fieldNameIndexes(readRowType);
         List<String> originFieldNames = readRowType.getFieldNames();
-        // Fix case-sensitivity: lowerCaseFieldNames contains lowercase names, so convert field to lowercase for lookup
-        int index = lowerCaseFieldNames.indexOf(FieldNameUtils.toLowerCase(field));
-        if (index == -1) {
+        // Fix case-sensitivity: lowerCaseFieldIndexes contains lowercase names, so convert field to lowercase for lookup
+        Integer index = lowerCaseFieldIndexes.get(FieldNameUtils.toLowerCase(field));
+        if (index == null) {
             throw new TrinoException(COLUMN_NOT_FOUND,
                     String.format("Column '%s' does not exist in Paimon table '%s.%s'", field, schemaName, tableName));
         }
@@ -607,9 +607,9 @@ public class PaimonTableHandle
         requireNonNull(fieldName, "fieldName is null");
         requireNonNull(typeManager, "typeManager is null");
         RowType readRowType = effectiveReadRowType(table);
-        List<String> lowerCaseFieldNames = FieldNameUtils.fieldNames(readRowType);
-        int index = lowerCaseFieldNames.indexOf(FieldNameUtils.toLowerCase(fieldName));
-        if (index == -1) {
+        Map<String, Integer> lowerCaseFieldIndexes = FieldNameUtils.fieldNameIndexes(readRowType);
+        Integer index = lowerCaseFieldIndexes.get(FieldNameUtils.toLowerCase(fieldName));
+        if (index == null) {
             throw new TrinoException(COLUMN_NOT_FOUND,
                     "Column '%s' does not exist in Paimon table '%s'".formatted(fieldName, table.name()));
         }
@@ -634,8 +634,8 @@ public class PaimonTableHandle
         if (!PaimonColumnHandle.isHiddenColumnName(columnName)) {
             return false;
         }
-        return !FieldNameUtils.fieldNames(requireNonNull(table, "table is null").rowType())
-                .contains(FieldNameUtils.toLowerCase(columnName));
+        return !FieldNameUtils.fieldNameIndexes(requireNonNull(table, "table is null").rowType())
+                .containsKey(FieldNameUtils.toLowerCase(columnName));
     }
 
     public PaimonTableHandle copy(TupleDomain<PaimonColumnHandle> filter)
