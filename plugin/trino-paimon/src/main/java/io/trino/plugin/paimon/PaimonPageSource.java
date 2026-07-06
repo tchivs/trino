@@ -83,6 +83,12 @@ public class PaimonPageSource
     }
 
     @Override
+    public OptionalLong getCompletedPositions()
+    {
+        return OptionalLong.of(numReturn);
+    }
+
+    @Override
     public boolean isFinished()
     {
         return isFinished;

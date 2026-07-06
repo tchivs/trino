@@ -165,6 +165,25 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testCompletedPositionsReportsReturnedRows()
+    {
+        GenericRow row = new GenericRow(1);
+        row.setField(0, 7);
+        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(row), List.of(
+                PaimonColumnHandle.of("id", DataTypes.INT())),
+                OptionalLong.empty());
+
+        assertThat(pageSource.getCompletedPositions()).hasValue(0);
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(pageSource.getCompletedPositions()).hasValue(1);
+        assertThat(pageSource.getNextPage()).isNull();
+        assertThat(pageSource.getCompletedPositions()).hasValue(1);
+    }
+
+    @Test
     void testPaimonRowKindCanBeUpdatedByPaimonReaderWrappers()
     {
         PaimonRow row = new PaimonRow(new Page(1, writeNativeValue(INTEGER, 7L)), RowKind.INSERT,
