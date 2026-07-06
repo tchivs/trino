@@ -15,6 +15,7 @@ package io.trino.plugin.paimon;
 
 import com.google.inject.Inject;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
+import io.trino.plugin.paimon.format.TrinoPaimonFileFormat;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeSink;
@@ -359,6 +360,7 @@ public class PaimonPageSinkProvider
         BatchTableWrite write = null;
         IOManager ioManager = null;
         try {
+            validateTrinoManagedFileFormatWriteType(table);
             BatchWriteBuilder batchWriteBuilder = table.newBatchWriteBuilder();
             if (overwrite) {
                 batchWriteBuilder.withOverwrite();
@@ -383,6 +385,18 @@ public class PaimonPageSinkProvider
             }
             failure = PaimonPageSink.closeIoManager(ioManager, failure);
             throw failure;
+        }
+    }
+
+    private static void validateTrinoManagedFileFormatWriteType(FileStoreTable table)
+    {
+        CoreOptions coreOptions = table.coreOptions();
+        if (coreOptions.rowTrackingEnabled()) {
+            return;
+        }
+        String fileFormat = coreOptions.fileFormatString();
+        if (CoreOptions.FILE_FORMAT_PARQUET.equals(fileFormat) || CoreOptions.FILE_FORMAT_ORC.equals(fileFormat)) {
+            TrinoPaimonFileFormat.validateWriteType(fileFormat, table.rowType());
         }
     }
 

@@ -77,6 +77,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class PaimonPageSinkProviderTest
 {
+    private static final String UNSUPPORTED_FORMAT_WRITE_MESSAGE = "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes";
+    private static final String ORC_TIME_WRITE_MESSAGE = "Trino Paimon ORC writer does not support Paimon TIME columns; use Parquet or Paimon's native writer for ORC TIME data";
+    private static final RowType ID_ROW_TYPE = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+
     @Test
     public void testSupportedWriteBucketModes()
     {
@@ -1032,8 +1036,30 @@ public class PaimonPageSinkProviderTest
     @Test
     public void testPageSinkProviderWrapsWriterInitializationUnsupportedFailures()
     {
-        UnsupportedOperationException writerFailure = new UnsupportedOperationException(
-                "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
+        UnsupportedOperationException writerFailure = new UnsupportedOperationException(UNSUPPORTED_FORMAT_WRITE_MESSAGE);
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
+                writerInitializationFailingFileStoreTable(new AtomicReference<>(), writerFailure,
+                        Map.of(CoreOptions.FILE_FORMAT.key(), CoreOptions.FILE_FORMAT_JSON))));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(
+                        PaimonColumnHandle.of("payload", DataTypes.VARIANT(), TESTING_TYPE_MANAGER)));
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        assertThatThrownBy(() -> provider.createPageSink(null, session, (ConnectorInsertTableHandle) tableHandle, null))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector: "
+                            + UNSUPPORTED_FORMAT_WRITE_MESSAGE);
+                    assertThat(exception.getCause()).isSameAs(writerFailure);
+                });
+    }
+
+    @Test
+    public void testPageSinkProviderRejectsUnsupportedDefaultParquetTypesBeforeWriterInitialization()
+    {
+        UnsupportedOperationException writerFailure = new UnsupportedOperationException("writer should not initialize");
         PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
                 writerInitializationFailingFileStoreTable(new AtomicReference<>(), writerFailure)));
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
@@ -1047,9 +1073,103 @@ public class PaimonPageSinkProviderTest
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector: "
-                            + "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
-                    assertThat(exception.getCause()).isSameAs(writerFailure);
+                            + UNSUPPORTED_FORMAT_WRITE_MESSAGE);
+                    assertThat(exception.getCause()).isNotSameAs(writerFailure);
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage(UNSUPPORTED_FORMAT_WRITE_MESSAGE);
                 });
+    }
+
+    @Test
+    public void testPageSinkProviderRejectsOrcTimeColumnsBeforeWriterInitialization()
+    {
+        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "event_time", DataTypes.TIME(3)));
+        AtomicReference<IOManager> writeIoManager = new AtomicReference<>();
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(writeReadyFileStoreTable(
+                new AtomicBoolean(),
+                new AtomicReference<>(),
+                new AtomicBoolean(),
+                List.of(),
+                Map.of(CoreOptions.FILE_FORMAT.key(), CoreOptions.FILE_FORMAT_ORC),
+                List.of(),
+                BucketMode.HASH_FIXED,
+                new AtomicReference<>(),
+                writeIoManager,
+                rowType)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(PaimonColumnHandle.of("event_time", DataTypes.TIME(3))));
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        assertThatThrownBy(() -> provider.createPageSink(null, session, (ConnectorInsertTableHandle) tableHandle, null))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector: "
+                            + ORC_TIME_WRITE_MESSAGE);
+                    assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
+                            .hasMessage(ORC_TIME_WRITE_MESSAGE);
+                });
+        assertThat(writeIoManager.get()).isNull();
+    }
+
+    @Test
+    public void testPageSinkProviderDoesNotRejectNativeFileFormatsUnsupportedOnlyByTrinoWriter()
+    {
+        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.VARIANT()));
+        AtomicReference<IOManager> writeIoManager = new AtomicReference<>();
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(writeReadyFileStoreTable(
+                new AtomicBoolean(),
+                new AtomicReference<>(),
+                new AtomicBoolean(),
+                List.of(),
+                Map.of(CoreOptions.FILE_FORMAT.key(), CoreOptions.FILE_FORMAT_JSON),
+                List.of(),
+                BucketMode.HASH_FIXED,
+                new AtomicReference<>(),
+                writeIoManager,
+                rowType)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(
+                        PaimonColumnHandle.of("payload", DataTypes.VARIANT(), TESTING_TYPE_MANAGER)));
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        ConnectorPageSink pageSink = provider.createPageSink(null, session, (ConnectorInsertTableHandle) tableHandle, null);
+
+        assertThat(writeIoManager.get()).isNotNull();
+        pageSink.abort();
+    }
+
+    @Test
+    public void testPageSinkProviderDoesNotRejectRowTrackingTablesUnsupportedOnlyByTrinoWriter()
+    {
+        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "picture", DataTypes.BLOB()));
+        AtomicReference<IOManager> writeIoManager = new AtomicReference<>();
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(writeReadyFileStoreTable(
+                new AtomicBoolean(),
+                new AtomicReference<>(),
+                new AtomicBoolean(),
+                List.of(),
+                Map.of(
+                        CoreOptions.ROW_TRACKING_ENABLED.key(), "true",
+                        CoreOptions.DATA_EVOLUTION_ENABLED.key(), "true"),
+                List.of(),
+                BucketMode.HASH_FIXED,
+                new AtomicReference<>(),
+                writeIoManager,
+                rowType)));
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(PaimonColumnHandle.of("picture", DataTypes.BLOB())));
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        ConnectorPageSink pageSink = provider.createPageSink(null, session, (ConnectorInsertTableHandle) tableHandle, null);
+
+        assertThat(writeIoManager.get()).isNotNull();
+        pageSink.abort();
     }
 
     @Test
@@ -1371,6 +1491,31 @@ public class PaimonPageSinkProviderTest
             AtomicReference<MemoryPoolFactory> writeBufferPool,
             AtomicReference<IOManager> writeIoManager)
     {
+        return writeReadyFileStoreTable(
+                copiedWithLatestSchema,
+                copyWithoutTimeTravelOptions,
+                overwriteEnabled,
+                partitionKeys,
+                options,
+                primaryKeys,
+                bucketMode,
+                writeBufferPool,
+                writeIoManager,
+                ID_ROW_TYPE);
+    }
+
+    private static FileStoreTable writeReadyFileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            AtomicBoolean overwriteEnabled,
+            List<String> partitionKeys,
+            Map<String, String> options,
+            List<String> primaryKeys,
+            BucketMode bucketMode,
+            AtomicReference<MemoryPoolFactory> writeBufferPool,
+            AtomicReference<IOManager> writeIoManager,
+            RowType rowType)
+    {
         org.apache.paimon.table.sink.BatchTableWrite writer = writer(writeBufferPool, writeIoManager);
         org.apache.paimon.table.sink.BatchWriteBuilder batchWriteBuilder = (org.apache.paimon.table.sink.BatchWriteBuilder) Proxy
                 .newProxyInstance(
@@ -1383,7 +1528,7 @@ public class PaimonPageSinkProviderTest
                                 yield proxy;
                             }
                             case "tableName" -> "testing";
-                            case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+                            case "rowType" -> rowType;
                             case "newWriteSelector" -> Optional.empty();
                             case "toString" -> "testing-batch-write-builder";
                             default -> throw new UnsupportedOperationException(method.getName());
@@ -1394,13 +1539,13 @@ public class PaimonPageSinkProviderTest
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "bucketMode" -> bucketMode;
-                    case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+                    case "rowType" -> rowType;
                     case "partitionKeys" -> partitionKeys;
                     case "primaryKeys" -> primaryKeys;
                     case "options" -> options;
                     case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> TableSchema.create(1, new Schema(
-                            DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())).getFields(),
+                            rowType.getFields(),
                             partitionKeys,
                             primaryKeys,
                             mergeOptions(options, Map.of(CoreOptions.BUCKET.key(), "7")),
@@ -1424,13 +1569,13 @@ public class PaimonPageSinkProviderTest
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "bucketMode" -> bucketMode;
-                    case "rowType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+                    case "rowType" -> rowType;
                     case "partitionKeys" -> partitionKeys;
                     case "primaryKeys" -> primaryKeys;
                     case "options" -> options;
                     case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> TableSchema.create(1, new Schema(
-                            DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())).getFields(),
+                            rowType.getFields(),
                             partitionKeys,
                             primaryKeys,
                             mergeOptions(options, Map.of(CoreOptions.BUCKET.key(), "7")),
@@ -1463,6 +1608,14 @@ public class PaimonPageSinkProviderTest
             AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
             RuntimeException writerFailure)
     {
+        return writerInitializationFailingFileStoreTable(copyWithoutTimeTravelOptions, writerFailure, Map.of());
+    }
+
+    private static FileStoreTable writerInitializationFailingFileStoreTable(
+            AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
+            RuntimeException writerFailure,
+            Map<String, String> options)
+    {
         RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.VARIANT()));
         FileStoreTable latestTable = (FileStoreTable) Proxy.newProxyInstance(
                 PaimonPageSinkProviderTest.class.getClassLoader(),
@@ -1471,12 +1624,13 @@ public class PaimonPageSinkProviderTest
                     case "bucketMode" -> BucketMode.HASH_FIXED;
                     case "rowType" -> rowType;
                     case "partitionKeys" -> List.of();
-                    case "coreOptions" -> new CoreOptions(new Options());
+                    case "options" -> options;
+                    case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> TableSchema.create(1, new Schema(
                             rowType.getFields(),
                             List.of(),
                             List.of(),
-                            Map.of(),
+                            options,
                             ""));
                     case "newBatchWriteBuilder" -> throw writerFailure;
                     case "copyWithLatestSchema", "copy" -> proxy;
@@ -1499,12 +1653,13 @@ public class PaimonPageSinkProviderTest
                     case "bucketMode" -> BucketMode.HASH_FIXED;
                     case "rowType" -> rowType;
                     case "partitionKeys" -> List.of();
-                    case "coreOptions" -> new CoreOptions(new Options());
+                    case "options" -> options;
+                    case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> TableSchema.create(1, new Schema(
                             rowType.getFields(),
                             List.of(),
                             List.of(),
-                            Map.of(),
+                            options,
                             ""));
                     case "toString" -> "stale-writer-initialization-failing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());

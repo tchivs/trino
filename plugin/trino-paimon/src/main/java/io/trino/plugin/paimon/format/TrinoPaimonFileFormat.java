@@ -71,11 +71,7 @@ public class TrinoPaimonFileFormat
     @Override
     public FormatWriterFactory createWriterFactory(RowType type)
     {
-        validateSupportedWriteType(type);
-        if (ORC.equals(formatIdentifier) && containsTimeType(type)) {
-            throw new UnsupportedOperationException(
-                    "Trino Paimon ORC writer does not support Paimon TIME columns; use Parquet or Paimon's native writer for ORC TIME data");
-        }
+        validateWriteType(formatIdentifier, type);
         return new TrinoPaimonFormatWriterFactory(
                 formatIdentifier,
                 type,
@@ -179,6 +175,17 @@ public class TrinoPaimonFileFormat
         requireNonNull(fieldName, "fieldName is null");
         return rowType.getFieldNames().stream()
                 .anyMatch(field -> fieldName.equalsIgnoreCase(field));
+    }
+
+    public static void validateWriteType(String formatIdentifier, RowType type)
+    {
+        requireNonNull(formatIdentifier, "formatIdentifier is null");
+        requireNonNull(type, "type is null");
+        validateSupportedWriteType(type);
+        if (ORC.equals(formatIdentifier) && containsTimeType(type)) {
+            throw new UnsupportedOperationException(
+                    "Trino Paimon ORC writer does not support Paimon TIME columns; use Parquet or Paimon's native writer for ORC TIME data");
+        }
     }
 
     private static void validateSupportedWriteType(RowType rowType)
