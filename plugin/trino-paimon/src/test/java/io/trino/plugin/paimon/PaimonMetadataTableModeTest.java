@@ -1947,6 +1947,75 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testFinishMergeMetadataDeleteFallbackRejectsNegativeCurrentRowCount()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(testingSplit(-1, OptionalLong.empty())), List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.finishMerge(
+                        SESSION,
+                        PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                        List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(1)),
+                        List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon metadata delete fallback cannot determine the current row count because Paimon reported a negative split row count: -1");
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackRejectsOverflowingCurrentRowCount()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(
+                        testingSplit(Long.MAX_VALUE - 1, OptionalLong.empty()),
+                        testingSplit(10, OptionalLong.empty())),
+                List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.finishMerge(
+                        SESSION,
+                        PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                        List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(1)),
+                        List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon metadata delete fallback cannot determine the current row count because Paimon split row counts exceed the supported range");
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+    }
+
+    @Test
+    public void testFinishMergeMetadataDeleteFallbackRejectsOverflowingMergedCurrentRowCount()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        FileStoreTable table = metadataDeleteFallbackFileStoreTable(copiedWithLatestSchema, truncated,
+                List.of(
+                        testingSplit(100, OptionalLong.of(Long.MAX_VALUE - 1)),
+                        testingSplit(100, OptionalLong.of(10))),
+                List.of("id"));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.finishMerge(
+                        SESSION,
+                        PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle),
+                        List.of(PaimonMetadataDeleteMergeSink.encodeDeletedRowCount(1)),
+                        List.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon metadata delete fallback cannot determine the current row count because Paimon split row counts exceed the supported range");
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+    }
+
+    @Test
     public void testFinishMergeMetadataDeleteFallbackRejectsPrimaryKeyTableWithoutMergedRowCounts()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();

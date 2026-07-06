@@ -887,10 +887,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
         for (Split split : splits) {
             OptionalLong mergedRowCount = split.mergedRowCount();
             if (mergedRowCount.isPresent()) {
-                rowCount = Math.addExact(rowCount, mergedRowCount.getAsLong());
+                rowCount = addCurrentVisibleRowCount(rowCount, mergedRowCount.getAsLong());
             }
             else if (fileStoreTable.primaryKeys().isEmpty()) {
-                rowCount = Math.addExact(rowCount, split.rowCount());
+                rowCount = addCurrentVisibleRowCount(rowCount, split.rowCount());
             }
             else {
                 throw new TrinoException(NOT_SUPPORTED,
@@ -898,6 +898,20 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
         }
         return rowCount;
+    }
+
+    private static long addCurrentVisibleRowCount(long currentRowCount, long splitRowCount)
+    {
+        if (splitRowCount < 0) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon metadata delete fallback cannot determine the current row count because Paimon reported a negative split row count: "
+                            + splitRowCount);
+        }
+        if (Long.MAX_VALUE - currentRowCount < splitRowCount) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon metadata delete fallback cannot determine the current row count because Paimon split row counts exceed the supported range");
+        }
+        return currentRowCount + splitRowCount;
     }
 
     static PaimonTableHandle getOutputTableHandle(ConnectorOutputTableHandle tableHandle)
