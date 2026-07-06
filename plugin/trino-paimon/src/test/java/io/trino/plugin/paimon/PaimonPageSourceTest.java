@@ -1898,6 +1898,41 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPaimonPageSourceCloseUsesPluginClassLoader()
+            throws IOException
+    {
+        AtomicReference<ClassLoader> closeClassLoader = new AtomicReference<>();
+        RecordReader<InternalRow> reader = new RecordReader<>()
+        {
+            @Override
+            public RecordIterator<InternalRow> readBatch()
+            {
+                return null;
+            }
+
+            @Override
+            public void close()
+            {
+                closeClassLoader.set(Thread.currentThread().getContextClassLoader());
+            }
+        };
+        PaimonPageSource pageSource = new PaimonPageSource(reader, List.of(
+                PaimonColumnHandle.of("id", DataTypes.INT())),
+                OptionalLong.empty());
+        ClassLoader previousClassLoader = Thread.currentThread().getContextClassLoader();
+        ClassLoader nonPaimonClassLoader = new ClassLoader(null) {};
+        try {
+            Thread.currentThread().setContextClassLoader(nonPaimonClassLoader);
+            pageSource.close();
+        }
+        finally {
+            Thread.currentThread().setContextClassLoader(previousClassLoader);
+        }
+
+        assertThat(closeClassLoader).hasValue(PaimonPageSource.class.getClassLoader());
+    }
+
+    @Test
     void testPaimonPageSourceClosesReaderWhenExhausted()
             throws IOException
     {

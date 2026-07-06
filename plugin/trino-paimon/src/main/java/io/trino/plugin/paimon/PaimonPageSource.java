@@ -26,6 +26,7 @@ import org.apache.paimon.utils.CloseableIterator;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
@@ -178,6 +179,25 @@ public class PaimonPageSource
 
     @Override
     public void close()
+            throws IOException
+    {
+        try {
+            ClassLoaderUtils.runWithContextClassLoader(() -> {
+                try {
+                    closeInternal();
+                    return null;
+                }
+                catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }, PaimonPageSource.class.getClassLoader());
+        }
+        catch (UncheckedIOException e) {
+            throw e.getCause();
+        }
+    }
+
+    private void closeInternal()
             throws IOException
     {
         if (closed) {
