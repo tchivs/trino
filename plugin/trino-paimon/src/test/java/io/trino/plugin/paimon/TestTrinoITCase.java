@@ -115,6 +115,8 @@ public class TestTrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.direct_projection_schema_evolution_orc");
             sql("DROP TABLE IF EXISTS paimon.default.direct_type_evolution");
             sql("DROP TABLE IF EXISTS paimon.default.direct_type_evolution_orc");
+            sql("DROP TABLE IF EXISTS paimon.default.direct_filter_values");
+            sql("DROP TABLE IF EXISTS paimon.default.direct_duplicate_projection_filter_values");
             sql("DROP TABLE IF EXISTS paimon.default.csv_values");
             sql("DROP TABLE IF EXISTS paimon.default.vector_directive_values");
             sql("DROP TABLE IF EXISTS paimon.default.vector_directive_add_column");
@@ -1512,6 +1514,23 @@ public class TestTrinoITCase
         assertThat(sql("SELECT id, payload FROM paimon.default.direct_filter_values "
                 + "WHERE category = 'keep' ORDER BY id"))
                 .isEqualTo("[[1, alpha], [3, gamma]]");
+    }
+
+    @Test
+    public void testDirectParquetReadWithDuplicateProjectedFilterColumn()
+    {
+        sql("CREATE TABLE paimon.default.direct_duplicate_projection_filter_values ("
+                + "id bigint, "
+                + "payload varchar) "
+                + "WITH (file_format = 'PARQUET')");
+        sql("INSERT INTO paimon.default.direct_duplicate_projection_filter_values VALUES "
+                + "(1, 'alpha'), "
+                + "(2, 'beta'), "
+                + "(3, 'gamma')");
+
+        assertThat(sql("SELECT id, id FROM paimon.default.direct_duplicate_projection_filter_values "
+                + "WHERE id = 2"))
+                .isEqualTo("[[2, 2]]");
     }
 
     @Test

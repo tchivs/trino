@@ -1262,11 +1262,10 @@ public class PaimonPageSourceProvider
         return parquetSourceChannel + 1;
     }
 
-    private static TupleDomain<ColumnDescriptor> buildParquetTupleDomain(Map<List<String>, ColumnDescriptor> descriptorsByPath,
+    static TupleDomain<ColumnDescriptor> buildParquetTupleDomain(Map<List<String>, ColumnDescriptor> descriptorsByPath,
             List<String> columns, List<Domain> domains, Map<String, org.apache.parquet.schema.Type> fieldsByName)
     {
-        com.google.common.collect.ImmutableMap.Builder<ColumnDescriptor, Domain> predicateBuilder = com.google.common.collect.ImmutableMap
-                .builder();
+        Map<ColumnDescriptor, Domain> predicateDomains = new HashMap<>();
         for (int i = 0; i < columns.size(); i++) {
             if (columns.get(i) != null && domains.get(i) != null) {
                 String columnName = FieldNameUtils.toLowerCase(columns.get(i));
@@ -1276,13 +1275,17 @@ public class PaimonPageSourceProvider
                         ColumnDescriptor descriptor = descriptorsByPath
                                 .get(com.google.common.collect.ImmutableList.of(parquetType.getName()));
                         if (descriptor != null) {
-                            predicateBuilder.put(descriptor, domains.get(i));
+                            Domain previous = predicateDomains.putIfAbsent(descriptor, domains.get(i));
+                            if (previous != null && !previous.equals(domains.get(i))) {
+                                throw new IllegalStateException("Parquet predicate contains conflicting domains for field '%s'"
+                                        .formatted(columnName));
+                            }
                         }
                     }
                 }
             }
         }
-        return TupleDomain.withColumnDomains(predicateBuilder.buildOrThrow());
+        return TupleDomain.withColumnDomains(predicateDomains);
     }
 
     static Map<String, OrcColumn> orcFieldsByLowercaseName(List<OrcColumn> columns)

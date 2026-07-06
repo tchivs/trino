@@ -1420,6 +1420,32 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testParquetTupleDomainDeduplicatesRepeatedProjectedFilterColumns()
+    {
+        org.apache.parquet.schema.MessageType schema = Types.buildMessage()
+                .addField(parquetField("id"))
+                .named("schema");
+        org.apache.parquet.column.ColumnDescriptor descriptor = schema.getColumns().get(0);
+        Domain idDomain = Domain.singleValue(BIGINT, 2L);
+
+        TupleDomain<org.apache.parquet.column.ColumnDescriptor> tupleDomain = PaimonPageSourceProvider.buildParquetTupleDomain(
+                Map.of(ImmutableList.of("id"), descriptor),
+                List.of("id", "ID", "missing"),
+                List.of(idDomain, idDomain, Domain.singleValue(BIGINT, 3L)),
+                Map.of("id", schema.getFields().get(0)));
+
+        assertThat(tupleDomain.getDomains()).hasValue(Map.of(descriptor, idDomain));
+
+        assertThatThrownBy(() -> PaimonPageSourceProvider.buildParquetTupleDomain(
+                Map.of(ImmutableList.of("id"), descriptor),
+                List.of("id", "ID"),
+                List.of(idDomain, Domain.singleValue(BIGINT, 3L)),
+                Map.of("id", schema.getFields().get(0))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Parquet predicate contains conflicting domains for field 'id'");
+    }
+
+    @Test
     void testParquetColumnAdaptationDoesNotHideExistingUnreadableColumns()
     {
         ParquetPageSource.Builder pageSourceBuilder = ParquetPageSource.builder();
