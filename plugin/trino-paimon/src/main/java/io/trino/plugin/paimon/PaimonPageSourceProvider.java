@@ -484,9 +484,20 @@ public class PaimonPageSourceProvider
                         .formatted(lowerFieldName));
             }
         }
-        return canSkipDirectReadFile(dataFileColumns, filterDomains, dataFieldNames);
+        List<String> lowercaseDataFileColumns = new ArrayList<>(dataFileColumns.size());
+        for (String dataFileColumn : dataFileColumns) {
+            if (dataFileColumn == null) {
+                lowercaseDataFileColumns.add(null);
+            }
+            else {
+                lowercaseDataFileColumns.add(FieldNameUtils.toLowerCase(dataFileColumn));
+            }
+        }
+        return canSkipDirectReadFile(lowercaseDataFileColumns, filterDomains, dataFieldNames);
     }
 
+    // Callers pass lower-case data file column names to avoid repeated normalization
+    // while planning direct reads.
     private static boolean canSkipDirectReadFile(List<String> dataFileColumns, List<Domain> filterDomains, Set<String> dataFieldNames)
     {
         requireNonNull(dataFileColumns, "dataFileColumns is null");
@@ -502,7 +513,7 @@ public class PaimonPageSourceProvider
                 continue;
             }
             String dataFileColumn = dataFileColumns.get(index);
-            if ((dataFileColumn == null || !dataFieldNames.contains(FieldNameUtils.toLowerCase(dataFileColumn)))
+            if ((dataFileColumn == null || !dataFieldNames.contains(dataFileColumn))
                     && !domain.includesNullableValue(null)) {
                 return true;
             }
@@ -1162,9 +1173,11 @@ public class PaimonPageSourceProvider
             // Build requested schema from requested columns
             List<org.apache.parquet.schema.Type> requestedFields = new ArrayList<>();
             for (String columnName : columns) {
-                // Use lowercase for case-insensitive lookup
-                if (columnName != null && fieldsByName.containsKey(FieldNameUtils.toLowerCase(columnName))) {
-                    requestedFields.add(fieldsByName.get(FieldNameUtils.toLowerCase(columnName)));
+                if (columnName != null) {
+                    org.apache.parquet.schema.Type field = fieldsByName.get(FieldNameUtils.toLowerCase(columnName));
+                    if (field != null) {
+                        requestedFields.add(field);
+                    }
                 }
             }
 
