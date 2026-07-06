@@ -947,7 +947,7 @@ public class PaimonPageSourceTest
     }
 
     @Test
-    void testDirectReaderDomainsRejectCaseInsensitiveDuplicateDomainHandles()
+    void testDirectReaderDomainsDeduplicateCaseInsensitiveDuplicateDomainHandles()
     {
         PaimonColumnHandle upperIdColumn = PaimonColumnHandle.of("ID", DataTypes.BIGINT());
         PaimonColumnHandle lowerIdColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
@@ -956,9 +956,8 @@ public class PaimonPageSourceTest
                 upperIdColumn, idDomain,
                 lowerIdColumn, idDomain));
 
-        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderDomains(List.of("id"), filter, false))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("Filter contains conflicting domains for field 'id'");
+        assertThat(PaimonPageSourceProvider.directReaderDomains(List.of("id", "ID"), filter, false))
+                .containsExactly(idDomain, idDomain);
     }
 
     @Test

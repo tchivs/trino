@@ -799,7 +799,7 @@ public class PaimonPageSourceProvider
                 .forEach((k, v) -> {
                     String fieldName = FieldNameUtils.toLowerCase(k.getColumnName());
                     Domain previous = domainMap.putIfAbsent(fieldName, v);
-                    if (previous != null) {
+                    if (previous != null && !previous.equals(v)) {
                         throw new IllegalStateException("Filter contains conflicting domains for field '%s'"
                                 .formatted(fieldName));
                     }
