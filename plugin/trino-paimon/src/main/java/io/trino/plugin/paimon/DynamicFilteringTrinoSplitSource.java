@@ -55,6 +55,9 @@ public class DynamicFilteringTrinoSplitSource
     private boolean splitsPlanningStarted;
 
     @GuardedBy("this")
+    private CompletableFuture<PaimonSplitSource> delegateSplitSourceFuture;
+
+    @GuardedBy("this")
     private PaimonSplitSource delegateSplitSource;
 
     @GuardedBy("this")
@@ -77,6 +80,8 @@ public class DynamicFilteringTrinoSplitSource
         checkArgument(maxSize > 0, "Cannot fetch a batch of zero size");
         long timeLeft = computeTimeLeft();
 
+        boolean planSplits = false;
+        CompletableFuture<PaimonSplitSource> splitSourceFuture;
         synchronized (this) {
             if (closed) {
                 return CompletableFuture.completedFuture(FINISHED_BATCH);
@@ -94,23 +99,61 @@ public class DynamicFilteringTrinoSplitSource
 
             // Start split planning if not yet started
             if (!splitsPlanningStarted) {
-                delegateSplitSource = planSplits();
                 splitsPlanningStarted = true;
+                delegateSplitSourceFuture = new CompletableFuture<>();
+                planSplits = true;
             }
+            splitSourceFuture = requireNonNull(delegateSplitSourceFuture, "delegateSplitSourceFuture is null");
         }
 
-        // Delegate to actual split source
-        return delegateSplitSource.getNextBatch(maxSize);
+        if (!planSplits) {
+            return splitSourceFuture.thenCompose(splitSource -> closeAware(splitSource.getNextBatch(maxSize)));
+        }
+
+        PaimonSplitSource plannedSplitSource;
+        try {
+            plannedSplitSource = planSplits();
+        }
+        catch (RuntimeException | Error e) {
+            synchronized (this) {
+                splitsPlanningStarted = false;
+                delegateSplitSourceFuture = null;
+            }
+            splitSourceFuture.completeExceptionally(e);
+            throw e;
+        }
+
+        boolean closedAfterPlanning;
+        synchronized (this) {
+            closedAfterPlanning = closed;
+            if (!closedAfterPlanning) {
+                delegateSplitSource = plannedSplitSource;
+            }
+        }
+        if (closedAfterPlanning) {
+            plannedSplitSource.close();
+        }
+        splitSourceFuture.complete(plannedSplitSource);
+        if (closedAfterPlanning) {
+            return CompletableFuture.completedFuture(FINISHED_BATCH);
+        }
+
+        return closeAware(plannedSplitSource.getNextBatch(maxSize));
     }
 
     @Override
     public void close()
     {
+        PaimonSplitSource splitSource;
         synchronized (this) {
-            closed = true;
-            if (delegateSplitSource != null) {
-                delegateSplitSource.close();
+            if (closed) {
+                return;
             }
+            closed = true;
+            splitSource = delegateSplitSource;
+        }
+        if (splitSource != null) {
+            splitSource.close();
         }
     }
 
@@ -122,6 +165,9 @@ public class DynamicFilteringTrinoSplitSource
                 return true;
             }
             if (!splitsPlanningStarted) {
+                return false;
+            }
+            if (delegateSplitSource == null) {
                 return false;
             }
             return delegateSplitSource.isFinished();

@@ -43,6 +43,10 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -638,6 +642,54 @@ public class DynamicFilteringTrinoSplitSourceTest
         assertThat(batch.isNoMoreSplits()).isTrue();
     }
 
+    @Test
+    public void testCloseDoesNotBlockWhileSplitPlanningIsRunning()
+            throws Exception
+    {
+        CountDownLatch planningStarted = new CountDownLatch(1);
+        CountDownLatch releasePlanning = new CountDownLatch(1);
+        RecordingCatalog catalog = new RecordingCatalog(false, blockingPlanningTable(planningStarted, releasePlanning));
+        DynamicFilteringTrinoSplitSource splitSource = new DynamicFilteringTrinoSplitSource(
+                new PaimonTableHandle(
+                        "schema",
+                        "table",
+                        Collections.emptyMap(),
+                        TupleDomain.all(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        OptionalLong.empty()),
+                TestingConnectorSession.builder()
+                        .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                        .build(),
+                catalog,
+                dynamicFilter(TupleDomain.all(), false),
+                new Duration(0, MILLISECONDS));
+
+        ExecutorService planningExecutor = Executors.newSingleThreadExecutor();
+        ExecutorService closeExecutor = Executors.newSingleThreadExecutor();
+        try {
+            Future<CompletableFuture<ConnectorSplitSource.ConnectorSplitBatch>> planningFuture =
+                    planningExecutor.submit(() -> splitSource.getNextBatch(100));
+            assertThat(planningStarted.await(5, SECONDS)).isTrue();
+
+            Future<?> closeFuture = closeExecutor.submit(splitSource::close);
+            closeFuture.get(1, SECONDS);
+            assertThat(splitSource.isFinished()).isTrue();
+
+            releasePlanning.countDown();
+            ConnectorSplitSource.ConnectorSplitBatch batch = planningFuture.get(5, SECONDS).get(5, SECONDS);
+
+            assertThat(batch.getSplits()).isEmpty();
+            assertThat(batch.isNoMoreSplits()).isTrue();
+            assertThat(splitSource.isFinished()).isTrue();
+        }
+        finally {
+            releasePlanning.countDown();
+            planningExecutor.shutdownNow();
+            closeExecutor.shutdownNow();
+        }
+    }
+
     private static DynamicFilter dynamicFilter(TupleDomain<ColumnHandle> predicate, boolean awaitable)
     {
         return new DynamicFilter()
@@ -867,6 +919,49 @@ public class DynamicFilteringTrinoSplitSourceTest
                     case "readType" -> DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
                     case "tableName" -> "runtime-failing-dynamic-planning-table";
                     case "toString" -> "runtime-failing-dynamic-planning-read-builder";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Table blockingPlanningTable(CountDownLatch planningStarted, CountDownLatch releasePlanning)
+    {
+        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+        return (Table) Proxy.newProxyInstance(
+                DynamicFilteringTrinoSplitSourceTest.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
+                    case "newReadBuilder" -> blockingPlanningReadBuilder(rowType, planningStarted, releasePlanning);
+                    case "rowType" -> rowType;
+                    case "toString" -> "blocking-dynamic-planning-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder blockingPlanningReadBuilder(
+            RowType rowType,
+            CountDownLatch planningStarted,
+            CountDownLatch releasePlanning)
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                DynamicFilteringTrinoSplitSourceTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "dropStats", "withFilter", "withLimit" -> proxy;
+                    case "newScan" -> {
+                        planningStarted.countDown();
+                        try {
+                            assertThat(releasePlanning.await(5, SECONDS)).isTrue();
+                        }
+                        catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException(e);
+                        }
+                        yield tableScan();
+                    }
+                    case "readType" -> rowType;
+                    case "tableName" -> "blocking-dynamic-planning-table";
+                    case "toString" -> "blocking-dynamic-planning-read-builder";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
