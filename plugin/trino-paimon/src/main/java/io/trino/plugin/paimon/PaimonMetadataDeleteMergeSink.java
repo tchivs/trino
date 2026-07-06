@@ -23,6 +23,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.ConnectorMergeSink.DELETE_OPERATION_NUMBER;
 import static io.trino.spi.type.TinyintType.TINYINT;
@@ -57,7 +58,14 @@ public class PaimonMetadataDeleteMergeSink
                                 + operation);
             }
         }
-        deletedRowCount = addExact(deletedRowCount, page.getPositionCount());
+        try {
+            deletedRowCount = addExact(deletedRowCount, page.getPositionCount());
+        }
+        catch (ArithmeticException e) {
+            throw new TrinoException(PAIMON_COMMIT_ERROR,
+                    "Paimon metadata-delete merge row count exceeds the supported range",
+                    e);
+        }
     }
 
     private static void validateInputPage(Page page)

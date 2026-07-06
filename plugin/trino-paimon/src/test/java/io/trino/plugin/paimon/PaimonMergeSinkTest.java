@@ -24,12 +24,14 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowKind;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.ConnectorMergeSink.DELETE_OPERATION_NUMBER;
 import static io.trino.spi.connector.ConnectorMergeSink.INSERT_OPERATION_NUMBER;
@@ -156,6 +158,22 @@ public class PaimonMergeSinkTest
     }
 
     @Test
+    public void testMetadataDeleteMergeSinkRejectsOverflowingDeletedRowCount()
+            throws ReflectiveOperationException
+    {
+        PaimonMetadataDeleteMergeSink mergeSink = new PaimonMetadataDeleteMergeSink();
+        setDeletedRowCount(mergeSink, Long.MAX_VALUE);
+
+        assertThatThrownBy(() -> mergeSink.storeMergedRows(new Page(1,
+                integerBlock(10),
+                tinyintBlock(DELETE_OPERATION_NUMBER),
+                integerBlock(100))))
+                .isInstanceOfSatisfying(TrinoException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode()))
+                .hasMessage("Paimon metadata-delete merge row count exceeds the supported range");
+    }
+
+    @Test
     public void testMetadataDeleteMergeSinkEmptyPageIsNoOp()
     {
         PaimonMetadataDeleteMergeSink mergeSink = new PaimonMetadataDeleteMergeSink();
@@ -233,6 +251,14 @@ public class PaimonMergeSinkTest
             TINYINT.writeLong(builder, value);
         }
         return builder.build();
+    }
+
+    private static void setDeletedRowCount(PaimonMetadataDeleteMergeSink mergeSink, long deletedRowCount)
+            throws ReflectiveOperationException
+    {
+        Field field = PaimonMetadataDeleteMergeSink.class.getDeclaredField("deletedRowCount");
+        field.setAccessible(true);
+        field.setLong(mergeSink, deletedRowCount);
     }
 
     private static BatchTableWrite writer()
