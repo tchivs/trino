@@ -1264,6 +1264,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         try {
             statistics = table.statistics();
         }
+        catch (TrinoException e) {
+            throw e;
+        }
         catch (RuntimeException e) {
             return TableStatistics.empty();
         }

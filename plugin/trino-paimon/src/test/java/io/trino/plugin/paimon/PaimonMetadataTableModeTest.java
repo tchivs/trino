@@ -512,6 +512,19 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testTableStatisticsPreservesMappedTrinoFailures()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+        TrinoException failure = new TrinoException(PAIMON_METADATA_ERROR, "mapped statistics failure");
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(failingStatisticsTable(rowType, failure)),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.getTableStatistics(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
+                .isSameAs(failure);
+    }
+
+    @Test
     public void testTableStatisticsDoesNotApplyFullTableStatsToFilteredOrLimitedHandles()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
@@ -7838,13 +7851,18 @@ public class PaimonMetadataTableModeTest
 
     private static Table failingStatisticsTable(org.apache.paimon.types.RowType rowType)
     {
+        return failingStatisticsTable(rowType, new RuntimeException("stats file is unreadable"));
+    }
+
+    private static Table failingStatisticsTable(org.apache.paimon.types.RowType rowType, RuntimeException failure)
+    {
         return (Table) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
                 new Class<?>[] {Table.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "copy" -> proxy;
                     case "rowType" -> rowType;
-                    case "statistics" -> throw new RuntimeException("stats file is unreadable");
+                    case "statistics" -> throw failure;
                     case "toString" -> "failing-statistics-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
