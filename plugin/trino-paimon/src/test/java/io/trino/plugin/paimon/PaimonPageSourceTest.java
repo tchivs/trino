@@ -2398,6 +2398,24 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDeletionVectorWrapperSupports64BitStartPositions()
+    {
+        long largeStartPosition = (long) Integer.MAX_VALUE + 5;
+        PositionTrackingPageSource source = new PositionTrackingPageSource(new Page(3, bigintBlock(10, 20, 30)),
+                largeStartPosition);
+        PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(source,
+                Optional.of(deletionVectorDeleting(largeStartPosition + 1)));
+
+        Page page = wrapper.getNextPage();
+
+        assertThat(source.completedPositionsReadBeforePage()).isTrue();
+        assertThat(page.getPositionCount()).isEqualTo(2);
+        assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 0)).isEqualTo(10L);
+        assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 1)).isEqualTo(30L);
+        assertThat(wrapper.getCompletedPositions()).hasValue(2);
+    }
+
+    @Test
     void testDeletionVectorWrapperClosesSourceWhenDeletionFilteringFails()
     {
         AtomicBoolean closed = new AtomicBoolean();

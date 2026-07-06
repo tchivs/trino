@@ -21,12 +21,10 @@ import org.apache.paimon.deletionvectors.DeletionVector;
 
 import java.io.IOException;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 
 import static io.trino.plugin.base.util.Closables.closeAllSuppress;
-import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 public class PaimonPageSourceWrapper
@@ -81,7 +79,7 @@ public class PaimonPageSourceWrapper
     public Page getNextPage()
     {
         try {
-            OptionalInt startPosition = deletionVector.isPresent() ? OptionalInt.of(startPosition()) : OptionalInt.empty();
+            OptionalLong startPosition = deletionVector.isPresent() ? OptionalLong.of(startPosition()) : OptionalLong.empty();
             Page next = source.getNextPage();
             if (next == null) {
                 return next;
@@ -102,15 +100,15 @@ public class PaimonPageSourceWrapper
         }
     }
 
-    private int startPosition()
+    private long startPosition()
     {
-        return toIntExact(source.getCompletedPositions()
+        return source.getCompletedPositions()
                 .orElseThrow(() -> new IllegalStateException(
-                        "Deletion-vector page source requires completed positions")));
+                        "Deletion-vector page source requires completed positions"));
     }
 
     @VisibleForTesting
-    Page convertToRetained(Page page, DeletionVector deletionVector, int startPosition, int pageCount)
+    Page convertToRetained(Page page, DeletionVector deletionVector, long startPosition, int pageCount)
     {
         int[] retained = new int[pageCount];
         int retainedLength = 0;
