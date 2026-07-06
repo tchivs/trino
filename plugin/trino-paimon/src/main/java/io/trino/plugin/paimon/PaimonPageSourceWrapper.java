@@ -36,6 +36,7 @@ public class PaimonPageSourceWrapper
     private final ConnectorPageSource source;
 
     private final Optional<DeletionVector> deletionVector;
+    private long completedPositions;
 
     public PaimonPageSourceWrapper(ConnectorPageSource source, Optional<DeletionVector> deletionVector)
     {
@@ -58,6 +59,9 @@ public class PaimonPageSourceWrapper
     @Override
     public OptionalLong getCompletedPositions()
     {
+        if (deletionVector.isPresent()) {
+            return OptionalLong.of(completedPositions);
+        }
         return source.getCompletedPositions();
     }
 
@@ -88,7 +92,9 @@ public class PaimonPageSourceWrapper
 
             int pageCount = next.getPositionCount();
 
-            return convertToRetained(next, deletionVector.get(), startPosition.orElseThrow(), pageCount);
+            Page retained = convertToRetained(next, deletionVector.get(), startPosition.orElseThrow(), pageCount);
+            completedPositions += retained.getPositionCount();
+            return retained;
         }
         catch (RuntimeException e) {
             closeAllSuppress(e, this);

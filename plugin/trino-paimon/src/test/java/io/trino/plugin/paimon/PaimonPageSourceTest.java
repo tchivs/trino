@@ -2384,12 +2384,17 @@ public class PaimonPageSourceTest
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(source,
                 Optional.of(deletionVectorDeleting(6)));
 
+        assertThat(wrapper.getCompletedPositions()).hasValue(0);
+
         Page page = wrapper.getNextPage();
 
         assertThat(source.completedPositionsReadBeforePage()).isTrue();
         assertThat(page.getPositionCount()).isEqualTo(2);
         assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 0)).isEqualTo(10L);
         assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 1)).isEqualTo(30L);
+        assertThat(wrapper.getCompletedPositions()).hasValue(2);
+        assertThat(wrapper.getNextPage()).isNull();
+        assertThat(wrapper.getCompletedPositions()).hasValue(2);
     }
 
     @Test
