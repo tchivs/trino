@@ -790,6 +790,54 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectReadSchemaPlanMapsHistoricalFieldsAndCachesSkipDecision()
+    {
+        List<DataField> tableFields = List.of(
+                new DataField(1, "renamed_id", DataTypes.INT()),
+                new DataField(2, "category", DataTypes.STRING()),
+                new DataField(3, "added_nullable", DataTypes.STRING()));
+        List<DataField> dataFields = List.of(
+                new DataField(1, "old_id", DataTypes.INT()),
+                new DataField(99, "category", DataTypes.STRING()));
+
+        PaimonPageSourceProvider.DirectReadSchemaPlan plan = PaimonPageSourceProvider.directReadSchemaPlan(
+                List.of("renamed_id", "category", "added_nullable"),
+                Arrays.asList(null, Domain.singleValue(VARCHAR, Slices.utf8Slice("keep")), Domain.onlyNull(VARCHAR)),
+                tableFields,
+                dataFields);
+
+        assertThat(plan.dataSchemaFields()).containsExactlyElementsOf(dataFields);
+        assertThat(plan.dataFileColumns()).containsExactly("old_id", null, "added_nullable");
+        assertThat(plan.directReaderSupported()).isTrue();
+        assertThat(plan.skipFile()).isTrue();
+    }
+
+    @Test
+    void testDirectReadSchemaPlanFallsBackForMissingProjectedDefaults()
+    {
+        List<DataField> dataFields = List.of(
+                new DataField(1, "id", DataTypes.INT()));
+        DataField defaultAddedField = new DataField(2, "added", DataTypes.STRING()).newDefaultValue("'fallback'");
+        DataField requiredAddedField = new DataField(3, "required_added", DataTypes.STRING().notNull());
+
+        PaimonPageSourceProvider.DirectReadSchemaPlan defaultPlan = PaimonPageSourceProvider.directReadSchemaPlan(
+                List.of("added"),
+                Collections.singletonList(null),
+                List.of(defaultAddedField),
+                dataFields);
+        PaimonPageSourceProvider.DirectReadSchemaPlan requiredPlan = PaimonPageSourceProvider.directReadSchemaPlan(
+                List.of("required_added"),
+                Collections.singletonList(null),
+                List.of(requiredAddedField),
+                dataFields);
+
+        assertThat(defaultPlan.directReaderSupported()).isFalse();
+        assertThat(defaultPlan.skipFile()).isFalse();
+        assertThat(requiredPlan.directReaderSupported()).isFalse();
+        assertThat(requiredPlan.skipFile()).isFalse();
+    }
+
+    @Test
     void testDirectReaderDomainsRejectCaseInsensitiveDomainConflicts()
     {
         PaimonColumnHandle upperIdColumn = PaimonColumnHandle.of("ID", DataTypes.BIGINT());

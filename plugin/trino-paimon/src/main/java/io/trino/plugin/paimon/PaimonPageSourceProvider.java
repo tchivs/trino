@@ -83,6 +83,7 @@ import org.joda.time.DateTimeZone;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -283,6 +284,11 @@ public class PaimonPageSourceProvider
                 Optional<List<IndexFile>> indexFiles = readIndex ? paimonSplit.indexFiles() : Optional.empty();
                 Optional<Predicate> fileIndexFilter = directReadTableContext.fileIndexFilter();
                 SchemaManager schemaManager = new SchemaManager(fileStoreTable.fileIO(), fileStoreTable.location());
+                long tableSchemaId = fileStoreTable.schema().id();
+                List<DataField> tableFields = rowType.getFields();
+                Map<Long, DirectReadSchemaPlan> schemaPlans = new HashMap<>();
+                schemaPlans.put(tableSchemaId, directReadSchemaPlan(projectedFields, filterDomains, tableFields,
+                        tableFields));
                 List<Type> type = columns.stream().map(PaimonColumnHandle::getTrinoType)
                         .collect(Collectors.toList());
                 TrinoFileSystem fileSystem = fileSystemFactory.create(session);
@@ -308,38 +314,28 @@ public class PaimonPageSourceProvider
                             }
                         }
 
-                        // Schema evolution: map table column names to data file column names
-                        // Paimon stores column names in lowercase in ORC/Parquet files,
-                        // so we need to convert to lowercase for file reading
-                        List<String> dataFileColumns;
-                        List<DataField> dataSchemaFields;
-                        long tableSchemaId = fileStoreTable.schema().id();
                         long fileSchemaId = rawFile.schemaId();
-
-                        if (tableSchemaId == fileSchemaId) {
-                            dataSchemaFields = rowType.getFields();
-                            dataFileColumns = currentSchemaFieldNames(projectedFields, dataSchemaFields);
-                        }
-                        else {
-                            dataSchemaFields = schemaManager.schema(fileSchemaId).fields();
-                            // Schema evolution: map table fields to data file fields by ID
-                            dataFileColumns = schemaEvolutionFieldNames(projectedFields, rowType.getFields(),
-                                    dataSchemaFields);
+                        DirectReadSchemaPlan schemaPlan = schemaPlans.get(fileSchemaId);
+                        if (schemaPlan == null) {
+                            schemaPlan = directReadSchemaPlan(projectedFields, filterDomains, tableFields,
+                                    schemaManager.schema(fileSchemaId).fields());
+                            schemaPlans.put(fileSchemaId, schemaPlan);
                         }
 
-                        if (!directReaderSupportsSchemaEvolution(projectedFields, rowType.getFields(), dataSchemaFields)) {
+                        if (!schemaPlan.directReaderSupported()) {
                             return createPaimonReaderPageSource(table, refreshToLatestSchema, readerFilter, paimonSplit,
                                     columns, limit, projectedFields);
                         }
-                        if (canSkipDirectReadFile(dataFileColumns, filterDomains, dataSchemaFields)) {
+                        if (schemaPlan.skipFile()) {
                             continue;
                         }
 
+                        DirectReadSchemaPlan fileSchemaPlan = schemaPlan;
                         Optional<DeletionFile> deletionFile = deletionFileAt(deletionFiles, i);
                         Supplier<ConnectorPageSource> sourceSupplier = () -> {
                             ConnectorPageSource source = createDataPageSource(rawFile.format(),
                                     fileSystem.newInputFile(Location.of(rawFile.path())),
-                                    dataFileColumns, type, directReaderDomains(projectedFields, filter,
+                                    fileSchemaPlan.dataFileColumns(), type, directReaderDomains(projectedFields, filter,
                                             deletionFile.isPresent()));
 
                             if (deletionFile.isEmpty()) {
@@ -501,6 +497,33 @@ public class PaimonPageSourceProvider
             }
         }
         return false;
+    }
+
+    static DirectReadSchemaPlan directReadSchemaPlan(List<String> projectedFields, List<Domain> filterDomains,
+            List<DataField> tableFields, List<DataField> dataFields)
+    {
+        requireNonNull(projectedFields, "projectedFields is null");
+        requireNonNull(filterDomains, "filterDomains is null");
+        requireNonNull(tableFields, "tableFields is null");
+        requireNonNull(dataFields, "dataFields is null");
+
+        // Paimon stores column names in lowercase in ORC/Parquet files. For schema evolution,
+        // resolve current table fields to historical data-file field names by stable field id.
+        List<String> dataFileColumns = schemaEvolutionFieldNames(projectedFields, tableFields, dataFields);
+        boolean directReaderSupported = directReaderSupportsSchemaEvolution(projectedFields, tableFields, dataFields);
+        boolean skipFile = directReaderSupported && canSkipDirectReadFile(dataFileColumns, filterDomains, dataFields);
+        return new DirectReadSchemaPlan(dataFields, dataFileColumns, directReaderSupported, skipFile);
+    }
+
+    record DirectReadSchemaPlan(List<DataField> dataSchemaFields, List<String> dataFileColumns,
+            boolean directReaderSupported, boolean skipFile)
+    {
+        DirectReadSchemaPlan
+        {
+            dataSchemaFields = List.copyOf(requireNonNull(dataSchemaFields, "dataSchemaFields is null"));
+            dataFileColumns = Collections.unmodifiableList(new ArrayList<>(
+                    requireNonNull(dataFileColumns, "dataFileColumns is null")));
+        }
     }
 
     static boolean directReaderSupportsSchemaEvolution(List<String> projectedFields, List<DataField> tableFields,
