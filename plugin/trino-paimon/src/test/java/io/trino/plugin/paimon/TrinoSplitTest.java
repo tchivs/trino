@@ -641,6 +641,24 @@ public class TrinoSplitTest
     }
 
     @Test
+    public void testSplitSourceLimitMergedRowCountSaturatesOnOverflow()
+            throws Exception
+    {
+        PaimonSplit first = PaimonSplit.fromSplit(new TestingSplit(100, Long.MAX_VALUE - 1), 0.1);
+        PaimonSplit second = PaimonSplit.fromSplit(new TestingSplit(100, 100L), 0.1);
+        PaimonSplit third = PaimonSplit.fromSplit(new TestingSplit(100, 1L), 0.1);
+        PaimonSplitSource splitSource = new PaimonSplitSource(List.of(first, second, third), OptionalLong.of(Long.MAX_VALUE));
+
+        ConnectorSplitSource.ConnectorSplitBatch firstBatch = splitSource.getNextBatch(10).get();
+        ConnectorSplitSource.ConnectorSplitBatch secondBatch = splitSource.getNextBatch(10).get();
+
+        assertThat(firstBatch.getSplits()).containsExactly(first, second);
+        assertThat(firstBatch.isNoMoreSplits()).isTrue();
+        assertThat(secondBatch.getSplits()).isEmpty();
+        assertThat(queuedSplitCount(splitSource)).isEqualTo(1);
+    }
+
+    @Test
     public void testSplitSourceDoesNotUsePossiblyDuplicateRowCountForLimit()
             throws Exception
     {

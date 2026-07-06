@@ -70,7 +70,16 @@ public class PaimonSplitSource
         if (limit.isEmpty()) {
             return;
         }
-        split.decodeSplit().mergedRowCount().ifPresent(rowCount -> count += rowCount);
+        split.decodeSplit().mergedRowCount().ifPresent(rowCount -> count = saturatedAdd(count, rowCount));
+    }
+
+    private static long saturatedAdd(long left, long right)
+    {
+        checkArgument(right >= 0, "merged row count must be non-negative: %s", right);
+        if (Long.MAX_VALUE - left < right) {
+            return Long.MAX_VALUE;
+        }
+        return left + right;
     }
 
     @Override
