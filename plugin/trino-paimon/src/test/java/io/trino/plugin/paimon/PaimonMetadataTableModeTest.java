@@ -5221,17 +5221,25 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testUnknownAlterFailureIsNotReportedAsUnsupported()
+    public void testRuntimeAlterFailureUsesPaimonMetadataError()
     {
         IllegalStateException failure = new IllegalStateException("catalog invariant broken");
         PaimonMetadata metadata = new PaimonMetadata(new RuntimeFailingAlterCatalog(failure), TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
         assertThatThrownBy(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))))
-                .isSameAs(failure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to alter Paimon table 'schema.table'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
         assertThatThrownBy(() -> metadata.setTableAuthorization(SESSION, new SchemaTableName("schema", "table"),
                         new TrinoPrincipal(PrincipalType.USER, "table_owner")))
-                .isSameAs(failure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to alter Paimon table 'schema.table'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
     }
 
     @Test

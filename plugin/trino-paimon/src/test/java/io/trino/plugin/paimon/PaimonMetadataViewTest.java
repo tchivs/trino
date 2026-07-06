@@ -761,27 +761,55 @@ public class PaimonMetadataViewTest
     }
 
     @Test
-    public void testUnknownViewRuntimeFailuresAreNotRewrapped()
+    public void testRuntimeViewFailuresUsePaimonMetadataError()
     {
         IllegalStateException failure = new IllegalStateException("catalog invariant broken");
         PaimonMetadata metadata = new PaimonMetadata(new RuntimeFailingViewCatalog(failure), TESTING_TYPE_MANAGER);
 
         assertThatThrownBy(() -> metadata.createView(SESSION, VIEW_NAME, viewDefinition("SELECT value"), false))
-                .isSameAs(failure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to create view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
         assertThatThrownBy(() -> metadata.dropView(SESSION, VIEW_NAME))
-                .isSameAs(failure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to drop view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
         assertThatThrownBy(() -> metadata.getView(SESSION, VIEW_NAME))
-                .isSameAs(failure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to get view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
         assertThatThrownBy(() -> metadata.getViews(SESSION, Optional.of(VIEW_NAME.getSchemaName())))
-                .isSameAs(failure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to list views in schema 'test_schema'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
         assertThatThrownBy(() -> metadata.renameView(SESSION, VIEW_NAME,
                 new SchemaTableName(VIEW_NAME.getSchemaName(), "renamed_view")))
-                .isSameAs(failure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to rename view 'test_schema.test_view' to 'test_schema.renamed_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
         assertThatThrownBy(() -> metadata.setViewComment(SESSION, VIEW_NAME, Optional.of("comment")))
-                .isSameAs(failure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to set comment on view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
         assertThatThrownBy(() -> metadata.setViewAuthorization(SESSION, VIEW_NAME,
                         new io.trino.spi.security.TrinoPrincipal(USER, "view_owner")))
-                .isSameAs(failure);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to set authorization on view 'test_schema.test_view'");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
     }
 
     @Test

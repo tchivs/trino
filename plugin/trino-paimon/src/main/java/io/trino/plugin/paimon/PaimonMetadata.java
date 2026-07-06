@@ -3460,11 +3460,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
                             : unsupportedOperationException.getMessage(),
                     unsupportedOperationException);
         }
-        if (exception instanceof IllegalArgumentException
-                || exception instanceof IllegalStateException
-                || exception instanceof NullPointerException) {
-            return (RuntimeException) exception;
-        }
         if (exception instanceof RuntimeException runtimeException) {
             Throwable cause = runtimeException.getCause();
             if (cause instanceof Exception nestedException) {
