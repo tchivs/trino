@@ -891,6 +891,48 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectReadSchemaPlanFallsBackForTypeMismatchBeforeSkipValidation()
+    {
+        PaimonPageSourceProvider.DirectReadSchemaPlan plan = PaimonPageSourceProvider.directReadSchemaPlan(
+                List.of("id"),
+                List.of(),
+                List.of(new DataField(1, "id", DataTypes.BIGINT())),
+                List.of(new DataField(1, "id", DataTypes.STRING())));
+
+        assertThat(plan.dataFileColumns()).containsExactly("id");
+        assertThat(plan.directReaderSupported()).isFalse();
+        assertThat(plan.skipFile()).isFalse();
+    }
+
+    @Test
+    void testDirectReadSchemaPlanRejectsDuplicateDataSchemaNamesAndIds()
+    {
+        List<String> projectedFields = List.of("id");
+        List<Domain> filterDomains = Collections.singletonList(null);
+        List<DataField> tableFields = List.of(new DataField(1, "id", DataTypes.BIGINT()));
+
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReadSchemaPlan(
+                projectedFields,
+                filterDomains,
+                tableFields,
+                List.of(
+                        new DataField(1, "ID", DataTypes.BIGINT()),
+                        new DataField(2, "id", DataTypes.BIGINT()))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon data file schema contains case-insensitive duplicate field name 'id'");
+
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReadSchemaPlan(
+                projectedFields,
+                filterDomains,
+                tableFields,
+                List.of(
+                        new DataField(1, "old_id", DataTypes.BIGINT()),
+                        new DataField(1, "id", DataTypes.BIGINT()))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon data file schema contains duplicate field id 1");
+    }
+
+    @Test
     void testDirectReaderDomainsRejectCaseInsensitiveDomainConflicts()
     {
         PaimonColumnHandle upperIdColumn = PaimonColumnHandle.of("ID", DataTypes.BIGINT());

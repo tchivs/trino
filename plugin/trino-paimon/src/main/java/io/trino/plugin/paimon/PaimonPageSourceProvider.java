@@ -484,7 +484,18 @@ public class PaimonPageSourceProvider
                         .formatted(lowerFieldName));
             }
         }
+        return canSkipDirectReadFile(dataFileColumns, filterDomains, dataFieldNames);
+    }
 
+    private static boolean canSkipDirectReadFile(List<String> dataFileColumns, List<Domain> filterDomains, Set<String> dataFieldNames)
+    {
+        requireNonNull(dataFileColumns, "dataFileColumns is null");
+        requireNonNull(filterDomains, "filterDomains is null");
+        requireNonNull(dataFieldNames, "dataFieldNames is null");
+        if (dataFileColumns.size() != filterDomains.size()) {
+            throw new IllegalArgumentException("filterDomains count (%s) must match dataFileColumns count (%s)"
+                    .formatted(filterDomains.size(), dataFileColumns.size()));
+        }
         for (int index = 0; index < dataFileColumns.size(); index++) {
             Domain domain = filterDomains.get(index);
             if (domain == null) {
@@ -509,9 +520,39 @@ public class PaimonPageSourceProvider
 
         // Paimon stores column names in lowercase in ORC/Parquet files. For schema evolution,
         // resolve current table fields to historical data-file field names by stable field id.
-        List<String> dataFileColumns = schemaEvolutionFieldNames(projectedFields, tableFields, dataFields);
-        boolean directReaderSupported = directReaderSupportsSchemaEvolution(projectedFields, tableFields, dataFields);
-        boolean skipFile = directReaderSupported && canSkipDirectReadFile(dataFileColumns, filterDomains, dataFields);
+        Map<String, DataField> tableFieldsByName = tableFieldsByLowercaseName(tableFields);
+        DirectReadDataSchemaFields dataSchemaFields = directReadDataSchemaFields(dataFields);
+        List<String> dataFileColumns = new ArrayList<>(projectedFields.size());
+        boolean directReaderSupported = true;
+        for (String projectedField : projectedFields) {
+            String lowerFieldName = FieldNameUtils.toLowerCase(projectedField);
+            DataField tableField = tableFieldsByName.get(lowerFieldName);
+            if (tableField == null) {
+                throw new IllegalStateException("Projected field '%s' does not exist in current Paimon table fields %s"
+                        .formatted(projectedField, tableFields.stream().map(DataField::name).toList()));
+            }
+            DataField dataField = dataSchemaFields.fieldById().get(tableField.id());
+            if (dataField == null) {
+                if (dataSchemaFields.fieldIdByName().containsKey(lowerFieldName)) {
+                    // A same-name field with a different ID belongs to an old dropped column.
+                    dataFileColumns.add(null);
+                }
+                else {
+                    dataFileColumns.add(lowerFieldName);
+                }
+                if (tableField.defaultValue() != null || !tableField.type().isNullable()) {
+                    directReaderSupported = false;
+                }
+                continue;
+            }
+
+            dataFileColumns.add(FieldNameUtils.toLowerCase(dataField.name()));
+            if (!dataField.type().equalsIgnoreNullable(tableField.type())) {
+                directReaderSupported = false;
+            }
+        }
+        boolean skipFile = directReaderSupported
+                && canSkipDirectReadFile(dataFileColumns, filterDomains, dataSchemaFields.fieldNames());
         return new DirectReadSchemaPlan(dataFields, dataFileColumns, directReaderSupported, skipFile);
     }
 
@@ -530,29 +571,8 @@ public class PaimonPageSourceProvider
             List<DataField> dataFields)
     {
         requireNonNull(projectedFields, "projectedFields is null");
-        requireNonNull(tableFields, "tableFields is null");
-        requireNonNull(dataFields, "dataFields is null");
-
-        Map<String, DataField> tableFieldByName = new HashMap<>();
-        for (DataField field : tableFields) {
-            requireNonNull(field, "tableFields contains null field");
-            String lowerName = FieldNameUtils.toLowerCase(field.name());
-            DataField previous = tableFieldByName.putIfAbsent(lowerName, field);
-            if (previous != null) {
-                throw new IllegalStateException("Current Paimon table schema contains case-insensitive duplicate field name '%s'"
-                        .formatted(lowerName));
-            }
-        }
-
-        Map<Integer, DataField> dataFieldById = new HashMap<>();
-        for (DataField field : dataFields) {
-            requireNonNull(field, "dataFields contains null field");
-            DataField previous = dataFieldById.putIfAbsent(field.id(), field);
-            if (previous != null) {
-                throw new IllegalStateException("Paimon data file schema contains duplicate field id %s"
-                        .formatted(field.id()));
-            }
-        }
+        Map<String, DataField> tableFieldByName = tableFieldsByLowercaseName(tableFields);
+        Map<Integer, DataField> dataFieldById = dataFieldsById(dataFields);
 
         for (String projectedField : projectedFields) {
             DataField tableField = tableFieldByName.get(FieldNameUtils.toLowerCase(projectedField));
@@ -572,6 +592,73 @@ public class PaimonPageSourceProvider
             }
         }
         return true;
+    }
+
+    private static Map<String, DataField> tableFieldsByLowercaseName(List<DataField> tableFields)
+    {
+        requireNonNull(tableFields, "tableFields is null");
+        Map<String, DataField> tableFieldByName = new HashMap<>();
+        for (DataField field : tableFields) {
+            requireNonNull(field, "tableFields contains null field");
+            String lowerName = FieldNameUtils.toLowerCase(field.name());
+            DataField previous = tableFieldByName.putIfAbsent(lowerName, field);
+            if (previous != null) {
+                throw new IllegalStateException("Current Paimon table schema contains case-insensitive duplicate field name '%s'"
+                        .formatted(lowerName));
+            }
+        }
+        return tableFieldByName;
+    }
+
+    private static Map<Integer, DataField> dataFieldsById(List<DataField> dataFields)
+    {
+        requireNonNull(dataFields, "dataFields is null");
+        Map<Integer, DataField> dataFieldById = new HashMap<>();
+        for (DataField field : dataFields) {
+            requireNonNull(field, "dataFields contains null field");
+            DataField previous = dataFieldById.putIfAbsent(field.id(), field);
+            if (previous != null) {
+                throw new IllegalStateException("Paimon data file schema contains duplicate field id %s"
+                        .formatted(field.id()));
+            }
+        }
+        return dataFieldById;
+    }
+
+    private static DirectReadDataSchemaFields directReadDataSchemaFields(List<DataField> dataFields)
+    {
+        requireNonNull(dataFields, "dataFields is null");
+        Map<String, Integer> fieldIdByName = new HashMap<>();
+        Map<Integer, DataField> fieldById = new HashMap<>();
+        for (DataField field : dataFields) {
+            requireNonNull(field, "dataFields contains null field");
+            String lowerName = FieldNameUtils.toLowerCase(field.name());
+            Integer previousId = fieldIdByName.putIfAbsent(lowerName, field.id());
+            if (previousId != null) {
+                throw new IllegalStateException("Paimon data file schema contains case-insensitive duplicate field name '%s'"
+                        .formatted(lowerName));
+            }
+            DataField previousField = fieldById.putIfAbsent(field.id(), field);
+            if (previousField != null) {
+                throw new IllegalStateException("Paimon data file schema contains duplicate field id %s"
+                        .formatted(field.id()));
+            }
+        }
+        return new DirectReadDataSchemaFields(fieldIdByName, fieldById);
+    }
+
+    private record DirectReadDataSchemaFields(Map<String, Integer> fieldIdByName, Map<Integer, DataField> fieldById)
+    {
+        private DirectReadDataSchemaFields
+        {
+            fieldIdByName = Map.copyOf(requireNonNull(fieldIdByName, "fieldIdByName is null"));
+            fieldById = Map.copyOf(requireNonNull(fieldById, "fieldById is null"));
+        }
+
+        private Set<String> fieldNames()
+        {
+            return fieldIdByName.keySet();
+        }
     }
 
     static DirectReadTableContext directReadTableContext(
