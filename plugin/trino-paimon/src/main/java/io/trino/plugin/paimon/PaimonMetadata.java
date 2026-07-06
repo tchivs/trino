@@ -1996,15 +1996,21 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         try {
             Catalog sessionCatalog = catalog.forSession(session);
-            org.apache.paimon.view.View paimonView = sessionCatalog.getView(
-                    new Identifier(viewName.getSchemaName(), viewName.getTableName()));
+            Optional<org.apache.paimon.view.View> view = getPaimonView(sessionCatalog, viewName);
+            if (view.isEmpty()) {
+                return Optional.empty();
+            }
+            org.apache.paimon.view.View paimonView = view.get();
             if (!hasTrinoViewDialect(paimonView)) {
                 return Optional.empty();
             }
             return Optional.of(viewColumnsMetadata(paimonView));
         }
-        catch (Catalog.ViewNotExistException | UnsupportedOperationException e) {
-            return Optional.empty();
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (UnsupportedOperationException e) {
+            throw unsupportedViewOperation("read", e);
         }
         catch (Exception e) {
             throw paimonViewException(format("Failed to get view '%s'", viewName), e);

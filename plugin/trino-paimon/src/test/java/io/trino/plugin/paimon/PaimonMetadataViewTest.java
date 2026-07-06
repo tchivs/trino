@@ -152,6 +152,28 @@ public class PaimonMetadataViewTest
     }
 
     @Test
+    public void testListTableColumnsReportsUnsupportedViewRead()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new UnsupportedGetViewPaimonCatalog(),
+                TESTING_TYPE_MANAGER);
+        SchemaTablePrefix prefix = new SchemaTablePrefix(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName());
+
+        assertThatThrownBy(() -> metadata.listTableColumns(SESSION, prefix))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon catalog does not support view read operations");
+                });
+
+        Iterator<TableColumnsMetadata> streamedColumns = metadata.streamTableColumns(SESSION, prefix);
+        assertThatThrownBy(streamedColumns::hasNext)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon catalog does not support view read operations");
+                });
+    }
+
+    @Test
     public void testGetViewsSkipsViewsWithoutTrinoDialect()
     {
         PaimonMetadata metadata = new PaimonMetadata(
@@ -1074,6 +1096,21 @@ public class PaimonMetadataViewTest
 
         @Override
         public List<String> listViews(String databaseName)
+        {
+            throw new UnsupportedOperationException("views are not supported");
+        }
+    }
+
+    private static class UnsupportedGetViewPaimonCatalog
+            extends TestingPaimonCatalog
+    {
+        private UnsupportedGetViewPaimonCatalog()
+        {
+            super(view(Map.of("trino", "SELECT id FROM trino_table")));
+        }
+
+        @Override
+        public View getView(Identifier identifier)
         {
             throw new UnsupportedOperationException("views are not supported");
         }
