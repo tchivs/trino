@@ -838,15 +838,15 @@ public class PaimonRow
 
     /** TrinoMap implementation for {@link InternalMap}. */
     private record TrinoMap(SqlMap sqlMap, Type keyType, Type valueType, DataType keyLogicalType,
-                            DataType valueLogicalType, boolean rejectNullValues) implements InternalMap
+                            DataType valueLogicalType, boolean multiset) implements InternalMap
     {
         private TrinoMap
         {
-            if (rejectNullValues) {
+            if (multiset) {
                 if (!valueType.equals(INTEGER)) {
                     throw new UnsupportedOperationException("Paimon MULTISET requires Trino integer count type metadata");
                 }
-                validateNoNullValues(sqlMap);
+                validateMultisetCounts(sqlMap);
             }
         }
 
@@ -874,14 +874,19 @@ public class PaimonRow
             return new TrinoArrayView(valueBlock, offset, count, valueType, valueLogicalType);
         }
 
-        private static void validateNoNullValues(SqlMap sqlMap)
+        private static void validateMultisetCounts(SqlMap sqlMap)
         {
             Block valueBlock = sqlMap.getRawValueBlock();
             int offset = sqlMap.getRawOffset();
             int count = sqlMap.getSize();
             for (int index = 0; index < count; index++) {
-                if (valueBlock.isNull(offset + index)) {
+                int position = offset + index;
+                if (valueBlock.isNull(position)) {
                     throw new IllegalArgumentException("Paimon MULTISET does not allow null counts");
+                }
+                int value = toIntExact((long) TypeUtils.readNativeValue(INTEGER, valueBlock, position));
+                if (value <= 0) {
+                    throw new IllegalArgumentException("Paimon MULTISET count must be positive: " + value);
                 }
             }
         }

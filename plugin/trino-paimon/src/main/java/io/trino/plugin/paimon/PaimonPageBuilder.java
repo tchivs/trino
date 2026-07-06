@@ -266,6 +266,7 @@ public final class PaimonPageBuilder
             InternalArray valueArray = mapData.valueArray();
             DataType keyType;
             DataType valueType;
+            boolean multiset = false;
             if (logicalType instanceof org.apache.paimon.types.MapType mapType) {
                 keyType = mapType.getKeyType();
                 valueType = mapType.getValueType();
@@ -276,16 +277,22 @@ public final class PaimonPageBuilder
                 }
                 keyType = multisetType.getElementType();
                 valueType = new IntType(false);
+                multiset = true;
             }
             else {
                 throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unhandled Paimon logical type for Map: " + logicalType);
             }
+            boolean validateMultisetCounts = multiset;
             MapBlockBuilder mapBlockBuilder = (MapBlockBuilder) output;
             try {
                 mapBlockBuilder.buildEntry((MapValueBuilder<Throwable>) (keyBuilder, valueBuilder) -> {
                     for (int i = 0; i < keyArray.size(); i++) {
                         appendTo(type.getTypeParameters().get(0), keyType, InternalRowUtils.get(keyArray, i, keyType), keyBuilder);
-                        appendTo(type.getTypeParameters().get(1), valueType, InternalRowUtils.get(valueArray, i, valueType), valueBuilder);
+                        Object mapValue = InternalRowUtils.get(valueArray, i, valueType);
+                        if (validateMultisetCounts) {
+                            validateMultisetCount(mapValue);
+                        }
+                        appendTo(type.getTypeParameters().get(1), valueType, mapValue, valueBuilder);
                     }
                 });
             }
@@ -295,6 +302,17 @@ public final class PaimonPageBuilder
             return;
         }
         throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unhandled type for Block: " + type.getTypeSignature());
+    }
+
+    private static void validateMultisetCount(Object count)
+    {
+        if (count == null) {
+            throw new IllegalArgumentException("Paimon MULTISET does not allow null counts");
+        }
+        int value = ((Number) count).intValue();
+        if (value <= 0) {
+            throw new IllegalArgumentException("Paimon MULTISET count must be positive: " + value);
+        }
     }
 
     private static DataType arrayElementLogicalType(DataType logicalType)

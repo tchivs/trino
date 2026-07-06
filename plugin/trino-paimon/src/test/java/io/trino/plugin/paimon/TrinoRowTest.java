@@ -366,6 +366,13 @@ public class TrinoRowTest
     }
 
     @Test
+    void testMultisetConversionRejectsNonPositiveCounts()
+    {
+        assertMultisetCountRejected(0);
+        assertMultisetCountRejected(-1);
+    }
+
+    @Test
     void testMultisetConversionRequiresIntegerCountType()
     {
         MapType multisetType = new MapType(VARCHAR, BIGINT, new TypeOperators());
@@ -380,6 +387,22 @@ public class TrinoRowTest
         assertThatThrownBy(() -> trinoRow.getMap(0))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("Paimon MULTISET requires Trino integer count type metadata");
+    }
+
+    private static void assertMultisetCountRejected(int count)
+    {
+        MapType multisetType = new MapType(VARCHAR, INTEGER, new TypeOperators());
+        SqlMap multiset = buildMapValue(multisetType, 1, (keyBuilder, valueBuilder) -> {
+            writeNativeValue(VARCHAR, keyBuilder, Slices.utf8Slice("red"));
+            writeNativeValue(INTEGER, valueBuilder, (long) count);
+        });
+
+        PaimonRow trinoRow = new PaimonRow(new Page(1, writeNativeValue(multisetType, multiset)), RowKind.INSERT,
+                List.of(multisetType), List.of(DataTypes.MULTISET(DataTypes.STRING())));
+
+        assertThatThrownBy(() -> trinoRow.getMap(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Paimon MULTISET count must be positive: " + count);
     }
 
     @Test

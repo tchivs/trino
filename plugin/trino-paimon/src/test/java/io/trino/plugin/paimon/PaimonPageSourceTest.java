@@ -1982,6 +1982,27 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPageSourceMultisetConversionRejectsInvalidCounts()
+    {
+        MapType multisetType = new MapType(VARCHAR, INTEGER, new TypeOperators());
+        Map<Object, Object> nullCount = new HashMap<>();
+        nullCount.put(BinaryString.fromString("red"), null);
+
+        assertThatThrownBy(() -> appendSingleColumn(multisetType, DataTypes.MULTISET(DataTypes.STRING()),
+                new GenericMap(nullCount)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Paimon MULTISET does not allow null counts");
+        assertThatThrownBy(() -> appendSingleColumn(multisetType, DataTypes.MULTISET(DataTypes.STRING()),
+                new GenericMap(Map.of(BinaryString.fromString("red"), 0))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Paimon MULTISET count must be positive: 0");
+        assertThatThrownBy(() -> appendSingleColumn(multisetType, DataTypes.MULTISET(DataTypes.STRING()),
+                new GenericMap(Map.of(BinaryString.fromString("red"), -1))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Paimon MULTISET count must be positive: -1");
+    }
+
+    @Test
     void testGetNextPageMapsUnsupportedReadFeaturesToNotSupported()
     {
         UnsupportedOperationException failure =
