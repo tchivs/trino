@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -76,6 +77,77 @@ public class TestPaimonExternalMinioSmokeTest
 
             MaterializedResult rows = queryRunner.execute("SELECT * FROM " + tableName + " LIMIT " + config.limit());
             assertThat(rows.getMaterializedRows()).hasSizeLessThanOrEqualTo(config.limit());
+        }
+    }
+
+    @Test
+    public void testExternalMinioCrudDdlSmoke()
+            throws Exception
+    {
+        assumeTrue(configured("write-enabled").map(Boolean::parseBoolean).orElse(false),
+                "Set paimon.external-minio.write-enabled=true to run the external MinIO CRUD/DDL smoke test");
+
+        ExternalMinioConfig config = ExternalMinioConfig.loadForWrite();
+        String schema = "trino_paimon_smoke_" + randomNameSuffix();
+        String table = "orders_" + randomNameSuffix();
+        String view = "orders_view_" + randomNameSuffix();
+
+        Session session = testSessionBuilder()
+                .setCatalog(CATALOG)
+                .setSchema(schema)
+                .build();
+
+        try (DistributedQueryRunner queryRunner = DistributedQueryRunner.builder(session).build()) {
+            queryRunner.installPlugin(new PaimonPlugin());
+            queryRunner.createCatalog(CATALOG, CATALOG, config.catalogProperties());
+
+            String schemaName = qualifiedName(CATALOG, schema);
+            String tableName = qualifiedName(CATALOG, schema, table);
+            String viewName = qualifiedName(CATALOG, schema, view);
+            try {
+                queryRunner.execute("CREATE SCHEMA " + schemaName);
+                assertThat(queryRunner.execute("SHOW SCHEMAS FROM " + quote(CATALOG)).getOnlyColumnAsSet())
+                        .contains(schema);
+
+                queryRunner.execute("CREATE TABLE " + tableName + " ("
+                        + "orderkey bigint, "
+                        + "status varchar COMMENT 'order status') "
+                        + "COMMENT 'external orders smoke table'");
+                queryRunner.execute("INSERT INTO " + tableName + " VALUES (1, 'ok'), (2, 'ready')");
+                assertThat(queryRunner.execute("SELECT count(*) FROM " + tableName).getOnlyValue())
+                        .isEqualTo(2L);
+
+                String createTable = (String) queryRunner.execute("SHOW CREATE TABLE " + tableName)
+                        .getOnlyValue();
+                assertThat(createTable)
+                        .contains("COMMENT 'external orders smoke table'")
+                        .contains("COMMENT 'order status'");
+
+                queryRunner.execute("ALTER TABLE " + tableName + " RENAME COLUMN status TO state");
+                queryRunner.execute("COMMENT ON COLUMN " + tableName + ".state IS 'current state'");
+                assertThat((String) queryRunner.execute("SHOW CREATE TABLE " + tableName).getOnlyValue())
+                        .contains("state varchar COMMENT 'current state'");
+                assertThat(queryRunner.execute("SELECT state FROM " + tableName + " WHERE orderkey = 1").getOnlyValue())
+                        .isEqualTo("ok");
+
+                queryRunner.execute("CREATE VIEW " + viewName + " AS SELECT orderkey, state FROM " + tableName);
+                assertThat(queryRunner.execute("SELECT count(*) FROM " + viewName).getOnlyValue())
+                        .isEqualTo(2L);
+
+                queryRunner.execute("DELETE FROM " + tableName);
+                assertThat(queryRunner.execute("SELECT count(*) FROM " + tableName).getOnlyValue())
+                        .isEqualTo(0L);
+
+                queryRunner.execute("INSERT INTO " + tableName + " VALUES (3, 'shipped'), (4, 'closed')");
+                queryRunner.execute("TRUNCATE TABLE " + tableName);
+                assertThat(queryRunner.execute("SELECT count(*) FROM " + tableName).getOnlyValue())
+                        .isEqualTo(0L);
+            }
+            finally {
+                queryRunner.execute("DROP VIEW IF EXISTS " + viewName);
+                queryRunner.execute("DROP TABLE IF EXISTS " + tableName);
+                queryRunner.execute("DROP SCHEMA IF EXISTS " + schemaName);
+            }
         }
     }
 
@@ -130,6 +202,16 @@ public class TestPaimonExternalMinioSmokeTest
     {
         static ExternalMinioConfig load()
         {
+            return load(true);
+        }
+
+        static ExternalMinioConfig loadForWrite()
+        {
+            return load(false);
+        }
+
+        private static ExternalMinioConfig load(boolean requireReadTarget)
+        {
             int limit = configured("limit")
                     .map(Integer::parseInt)
                     .orElse(1);
@@ -141,8 +223,8 @@ public class TestPaimonExternalMinioSmokeTest
                     required("secret-key"),
                     configured("region").orElse("us-east-1"),
                     configured("path-style-access").map(Boolean::parseBoolean).orElse(true),
-                    required("schema"),
-                    required("table"),
+                    requireReadTarget ? required("schema") : configured("schema").orElse(""),
+                    requireReadTarget ? required("table") : configured("table").orElse(""),
                     limit);
         }
 
