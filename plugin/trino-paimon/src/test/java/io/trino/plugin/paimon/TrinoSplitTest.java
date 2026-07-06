@@ -609,6 +609,20 @@ public class TrinoSplitTest
     }
 
     @Test
+    public void testSplitSourceDoesNotDecodeSplitsWithoutLimit()
+            throws Exception
+    {
+        PaimonSplit split = new PaimonSplit("serialized", 0.1);
+        PaimonSplitSource splitSource = new PaimonSplitSource(List.of(split), OptionalLong.empty());
+
+        ConnectorSplitSource.ConnectorSplitBatch batch = splitSource.getNextBatch(100).get();
+
+        assertThat(batch.getSplits()).containsExactly(split);
+        assertThat(batch.isNoMoreSplits()).isTrue();
+        assertThat(queuedSplitCount(splitSource)).isEqualTo(0);
+    }
+
+    @Test
     public void testSplitSourceLimitCountsOnlyMergedRowCount()
             throws Exception
     {

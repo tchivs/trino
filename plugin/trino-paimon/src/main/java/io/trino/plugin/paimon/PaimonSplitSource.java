@@ -59,10 +59,18 @@ public class PaimonSplitSource
             if (split == null) {
                 break;
             }
-            split.decodeSplit().mergedRowCount().ifPresent(rowCount -> count += rowCount);
+            countMergedRowsForLimit(split);
             batch.add(split);
         }
         return CompletableFuture.completedFuture(new ConnectorSplitBatch(batch, isFinished()));
+    }
+
+    private void countMergedRowsForLimit(PaimonSplit split)
+    {
+        if (limit.isEmpty()) {
+            return;
+        }
+        split.decodeSplit().mergedRowCount().ifPresent(rowCount -> count += rowCount);
     }
 
     @Override
