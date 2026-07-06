@@ -38,10 +38,8 @@ public class DirectTrinoPageSource
     private PageSourceHandle current;
     private long completedBytes;
     private long completedReadTimeNanos;
-    private long completedSourcePositions;
     private long completedPositions;
     private Metrics completedMetrics = Metrics.EMPTY;
-    private boolean completedSourcePositionsKnown = true;
     private boolean closed;
 
     public DirectTrinoPageSource(LinkedList<ConnectorPageSource> pageSourceQueue)
@@ -92,18 +90,7 @@ public class DirectTrinoPageSource
     @Override
     public OptionalLong getCompletedPositions()
     {
-        if (!completedSourcePositionsKnown) {
-            return OptionalLong.empty();
-        }
-        Optional<ConnectorPageSource> currentSource = currentSource();
-        if (currentSource.isEmpty()) {
-            return OptionalLong.of(completedSourcePositions);
-        }
-        OptionalLong currentCompletedPositions = currentSource.orElseThrow().getCompletedPositions();
-        if (currentCompletedPositions.isEmpty()) {
-            return OptionalLong.empty();
-        }
-        return OptionalLong.of(completedSourcePositions + currentCompletedPositions.getAsLong());
+        return OptionalLong.of(completedPositions);
     }
 
     @Override
@@ -286,21 +273,6 @@ public class DirectTrinoPageSource
         completedBytes += pageSource.getCompletedBytes();
         completedReadTimeNanos += pageSource.getReadTimeNanos();
         completedMetrics = completedMetrics.mergeWith(pageSource.getMetrics());
-        updateCompletedSourcePositions(pageSource);
-    }
-
-    private void updateCompletedSourcePositions(ConnectorPageSource source)
-    {
-        if (!completedSourcePositionsKnown) {
-            return;
-        }
-
-        OptionalLong sourceCompletedPositions = source.getCompletedPositions();
-        if (sourceCompletedPositions.isEmpty()) {
-            completedSourcePositionsKnown = false;
-            return;
-        }
-        completedSourcePositions += sourceCompletedPositions.getAsLong();
     }
 
     private static LinkedList<PageSourceHandle> wrapPageSources(LinkedList<ConnectorPageSource> pageSourceQueue)

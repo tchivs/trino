@@ -1985,6 +1985,25 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectPageSourceCompletedPositionsRespectLimitedPage()
+    {
+        DelegatingStatePageSource source = new DelegatingStatePageSource(
+                new Page(3, bigintBlock(1, 2, 3)),
+                OptionalLong.of(0),
+                0,
+                0);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(source)),
+                OptionalLong.of(2));
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(2);
+        assertThat(pageSource.getCompletedPositions()).hasValue(2);
+        assertThat(pageSource.getNextPage()).isNull();
+        assertThat(pageSource.getCompletedPositions()).hasValue(2);
+    }
+
+    @Test
     void testDirectPageSourceLoadsLimitedPageBeforeClosingSource()
     {
         AtomicBoolean sourceClosed = new AtomicBoolean();
