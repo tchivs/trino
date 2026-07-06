@@ -47,6 +47,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.testing.TestingConnectorSession.SESSION;
@@ -236,11 +237,12 @@ public class TableChangesFunctionProcessorTest
     @Test
     public void testProcessorMapsTerminalCloseFailureToConnectorReadError()
     {
+        CloseFailurePageSource pageSource = new CloseFailurePageSource(true, true);
         TableChangesFunctionProcessor processor = new TableChangesFunctionProcessor(
                 SESSION,
                 handleWithProjectedColumns(),
                 new PaimonSplit("split", 1.0),
-                pageSourceProvider(new CloseFailurePageSource(true, true)));
+                pageSourceProvider(pageSource));
 
         assertThatThrownBy(processor::process)
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
@@ -249,6 +251,27 @@ public class TableChangesFunctionProcessorTest
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("close failure");
                 });
+        assertThat(pageSource.closeCount()).isEqualTo(1);
+    }
+
+    @Test
+    public void testProcessorMapsTerminalRuntimeCloseFailureToConnectorReadError()
+    {
+        RuntimeException closeFailure = new IllegalStateException("runtime close failure");
+        CloseFailurePageSource pageSource = new CloseFailurePageSource(true, closeFailure);
+        TableChangesFunctionProcessor processor = new TableChangesFunctionProcessor(
+                SESSION,
+                handleWithProjectedColumns(),
+                new PaimonSplit("split", 1.0),
+                pageSourceProvider(pageSource));
+
+        assertThatThrownBy(processor::process)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to close Paimon table_changes page source");
+                    assertThat(exception.getCause()).isSameAs(closeFailure);
+                });
+        assertThat(pageSource.closeCount()).isEqualTo(1);
     }
 
     @Test
@@ -535,18 +558,31 @@ public class TableChangesFunctionProcessorTest
         private final boolean finished;
         private final boolean failOnRead;
         private final boolean failOnClose;
-        private final AtomicBoolean closed = new AtomicBoolean();
+        private final RuntimeException runtimeCloseFailure;
+        private final AtomicInteger closeCount = new AtomicInteger();
 
         private CloseFailurePageSource(boolean finished, boolean failOnClose)
         {
-            this(finished, false, failOnClose);
+            this(finished, false, failOnClose, null);
+        }
+
+        private CloseFailurePageSource(boolean finished, RuntimeException runtimeCloseFailure)
+        {
+            this(finished, false, false, runtimeCloseFailure);
         }
 
         private CloseFailurePageSource(boolean finished, boolean failOnRead, boolean failOnClose)
         {
+            this(finished, failOnRead, failOnClose, null);
+        }
+
+        private CloseFailurePageSource(boolean finished, boolean failOnRead, boolean failOnClose,
+                RuntimeException runtimeCloseFailure)
+        {
             this.finished = finished;
             this.failOnRead = failOnRead;
             this.failOnClose = failOnClose;
+            this.runtimeCloseFailure = runtimeCloseFailure;
         }
 
         @Override
@@ -586,7 +622,10 @@ public class TableChangesFunctionProcessorTest
         public void close()
                 throws IOException
         {
-            closed.set(true);
+            closeCount.incrementAndGet();
+            if (runtimeCloseFailure != null) {
+                throw runtimeCloseFailure;
+            }
             if (failOnClose) {
                 throw new IOException("close failure");
             }
@@ -594,7 +633,12 @@ public class TableChangesFunctionProcessorTest
 
         private boolean closed()
         {
-            return closed.get();
+            return closeCount.get() > 0;
+        }
+
+        private int closeCount()
+        {
+            return closeCount.get();
         }
     }
 }

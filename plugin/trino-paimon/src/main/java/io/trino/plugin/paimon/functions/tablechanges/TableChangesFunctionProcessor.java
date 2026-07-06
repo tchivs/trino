@@ -40,6 +40,8 @@ public class TableChangesFunctionProcessor
         implements
         TableFunctionSplitProcessor
 {
+    private static final String CLOSE_PAGE_SOURCE_ERROR = "Failed to close Paimon table_changes page source";
+
     private final ConnectorPageSource pageSource;
 
     public TableChangesFunctionProcessor(ConnectorSession session, PaimonTableHandle handle, PaimonSplit split,
@@ -69,14 +71,17 @@ public class TableChangesFunctionProcessor
     @Override
     public TableFunctionProcessorState process()
     {
+        boolean closing = false;
         try {
             if (pageSource.isFinished()) {
+                closing = true;
                 closeIfNecessary();
                 return FINISHED;
             }
             Page dataPage = pageSource.getNextPage();
             if (dataPage == null) {
                 if (pageSource.isFinished()) {
+                    closing = true;
                     closeIfNecessary();
                     return FINISHED;
                 }
@@ -85,7 +90,9 @@ public class TableChangesFunctionProcessor
             return produced(dataPage);
         }
         catch (RuntimeException e) {
-            closeAllSuppress(e, pageSource);
+            if (!closing) {
+                closeAllSuppress(e, pageSource);
+            }
             throw e;
         }
     }
@@ -95,9 +102,16 @@ public class TableChangesFunctionProcessor
         try {
             pageSource.close();
         }
+        catch (TrinoException e) {
+            throw e;
+        }
         catch (IOException e) {
             throw new TrinoException(PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT,
-                    "Failed to close Paimon table_changes page source", e);
+                    CLOSE_PAGE_SOURCE_ERROR, e);
+        }
+        catch (RuntimeException e) {
+            throw new TrinoException(PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT,
+                    CLOSE_PAGE_SOURCE_ERROR, e);
         }
     }
 }
