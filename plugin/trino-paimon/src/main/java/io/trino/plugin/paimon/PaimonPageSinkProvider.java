@@ -48,8 +48,11 @@ import org.apache.paimon.table.sink.RowPartitionKeyExtractor;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -219,12 +222,18 @@ public class PaimonPageSinkProvider
 
     static void validateWriteColumns(FileStoreTable table, List<PaimonColumnHandle> writeColumns)
     {
+        validateWriteColumnsAndGetLatestFields(table, writeColumns);
+    }
+
+    private static LatestFields validateWriteColumnsAndGetLatestFields(FileStoreTable table, List<PaimonColumnHandle> writeColumns)
+    {
         requireNonNull(table, "table is null");
         requireNonNull(writeColumns, "writeColumns is null");
         if (writeColumns.isEmpty()) {
             throw new IllegalStateException("Paimon page sink requires non-empty write columns");
         }
-        validateNoCaseInsensitiveDuplicateFieldNames(table.rowType().getFields());
+        List<DataField> fields = table.rowType().getFields();
+        Map<String, Integer> fieldIndexes = latestFieldIndexes(fields);
         Set<String> seenColumnNames = new HashSet<>();
         for (PaimonColumnHandle column : writeColumns) {
             requireNonNull(column, "writeColumns contains null column");
@@ -233,12 +242,13 @@ public class PaimonPageSinkProvider
             if (!seenColumnNames.add(lowerColumnName)) {
                 throw new IllegalStateException("Write column '%s' appears more than once".formatted(columnName));
             }
-            DataField latestField = latestField(table.rowType().getFields(), columnName);
+            DataField latestField = latestField(fields, fieldIndexes, columnName);
             if (!latestField.type().equals(column.logicalType())) {
                 throw new IllegalStateException("Write column '%s' type %s does not match latest Paimon table schema type %s"
                         .formatted(columnName, column.logicalType().asSQLString(), latestField.type().asSQLString()));
             }
         }
+        return new LatestFields(fields, fieldIndexes);
     }
 
     static WriteLayout writeLayout(FileStoreTable table, List<PaimonColumnHandle> writeColumns, TypeManager typeManager)
@@ -246,13 +256,13 @@ public class PaimonPageSinkProvider
         requireNonNull(table, "table is null");
         requireNonNull(writeColumns, "writeColumns is null");
         requireNonNull(typeManager, "typeManager is null");
-        validateWriteColumns(table, writeColumns);
-        List<DataField> fields = table.rowType().getFields();
+        LatestFields latestFields = validateWriteColumnsAndGetLatestFields(table, writeColumns);
+        List<DataField> fields = latestFields.fields();
         int[] inputChannels = new int[fields.size()];
         fill(inputChannels, -1);
         for (int inputChannel = 0; inputChannel < writeColumns.size(); inputChannel++) {
             PaimonColumnHandle column = requireNonNull(writeColumns.get(inputChannel), "writeColumns contains null column");
-            int fieldIndex = latestFieldIndex(fields, column.getColumnName());
+            int fieldIndex = latestFieldIndex(fields, latestFields.fieldIndexes(), column.getColumnName());
             inputChannels[fieldIndex] = inputChannel;
         }
         return new WriteLayout(
@@ -300,46 +310,50 @@ public class PaimonPageSinkProvider
         }
     }
 
-    private static DataField latestField(List<DataField> fields, String columnName)
+    private record LatestFields(List<DataField> fields, Map<String, Integer> fieldIndexes)
     {
-        return fields.get(latestFieldIndex(fields, columnName));
+        private LatestFields
+        {
+            requireNonNull(fields, "fields is null");
+            requireNonNull(fieldIndexes, "fieldIndexes is null");
+        }
     }
 
-    private static int latestFieldIndex(List<DataField> fields, String columnName)
+    private static DataField latestField(List<DataField> fields, Map<String, Integer> fieldIndexes, String columnName)
+    {
+        return fields.get(latestFieldIndex(fields, fieldIndexes, columnName));
+    }
+
+    private static int latestFieldIndex(List<DataField> fields, Map<String, Integer> fieldIndexes, String columnName)
     {
         String lowerColumnName = FieldNameUtils.toLowerCase(columnName);
-        int match = -1;
-        for (int index = 0; index < fields.size(); index++) {
-            DataField field = fields.get(index);
-            if (FieldNameUtils.toLowerCase(field.name()).equals(lowerColumnName)) {
-                if (match >= 0) {
-                    throw new IllegalStateException(
-                            "Latest Paimon table schema contains case-insensitive duplicate field name '%s'"
-                                    .formatted(lowerColumnName));
-                }
-                match = index;
-            }
-        }
-        if (match < 0) {
+        Integer fieldIndex = fieldIndexes.get(lowerColumnName);
+        if (fieldIndex == null) {
             throw new IllegalStateException("Write column '%s' is not present in latest Paimon table schema %s"
                     .formatted(columnName, fields.stream().map(DataField::name).collect(Collectors.toList())));
         }
-        return match;
+        return fieldIndex;
     }
 
-    static void validateNoCaseInsensitiveDuplicateFieldNames(List<DataField> fields)
+    static Map<String, Integer> latestFieldIndexes(List<DataField> fields)
     {
         requireNonNull(fields, "fields is null");
-        Set<String> fieldNames = new HashSet<>();
-        for (DataField field : fields) {
-            requireNonNull(field, "fields contains null field");
+        Map<String, Integer> indexes = new LinkedHashMap<>();
+        for (int index = 0; index < fields.size(); index++) {
+            DataField field = requireNonNull(fields.get(index), "fields contains null field");
             String lowerFieldName = FieldNameUtils.toLowerCase(field.name());
-            if (!fieldNames.add(lowerFieldName)) {
+            if (indexes.putIfAbsent(lowerFieldName, index) != null) {
                 throw new IllegalStateException(
                         "Latest Paimon table schema contains case-insensitive duplicate field name '%s'"
                                 .formatted(lowerFieldName));
             }
         }
+        return Collections.unmodifiableMap(indexes);
+    }
+
+    static void validateNoCaseInsensitiveDuplicateFieldNames(List<DataField> fields)
+    {
+        latestFieldIndexes(fields);
     }
 
     static void validateMergeWriteColumns(FileStoreTable table, List<PaimonColumnHandle> writeColumns)

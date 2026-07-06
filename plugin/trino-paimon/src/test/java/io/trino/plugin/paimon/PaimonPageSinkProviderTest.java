@@ -52,6 +52,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.lang.reflect.Proxy;
+import java.util.AbstractList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -517,6 +518,35 @@ public class PaimonPageSinkProviderTest
                 Collections.singletonList(null)))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("fields contains null field");
+    }
+
+    @Test
+    public void testLatestFieldIndexesScansLatestFieldsOnce()
+    {
+        int fieldCount = 200;
+        AtomicInteger fieldReads = new AtomicInteger();
+        List<DataField> fields = new AbstractList<>()
+        {
+            @Override
+            public DataField get(int index)
+            {
+                fieldReads.incrementAndGet();
+                return DataTypes.FIELD(index, "field_" + index, DataTypes.INT());
+            }
+
+            @Override
+            public int size()
+            {
+                return fieldCount;
+            }
+        };
+
+        Map<String, Integer> fieldIndexes = PaimonPageSinkProvider.latestFieldIndexes(fields);
+
+        assertThat(fieldIndexes).hasSize(fieldCount);
+        assertThat(fieldIndexes).containsEntry("field_0", 0);
+        assertThat(fieldIndexes).containsEntry("field_199", 199);
+        assertThat(fieldReads).hasValue(fieldCount);
     }
 
     @Test
