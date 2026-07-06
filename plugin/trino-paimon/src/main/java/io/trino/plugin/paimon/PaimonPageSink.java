@@ -231,12 +231,7 @@ public class PaimonPageSink
     @Override
     public CompletableFuture<?> appendPage(Page page)
     {
-        try {
-            writePage(page, RowKind.INSERT);
-        }
-        catch (Exception e) {
-            throw wrapWriteException(e);
-        }
+        writePage(page, RowKind.INSERT);
         return NOT_BLOCKED;
     }
 
@@ -393,12 +388,21 @@ public class PaimonPageSink
                 || exception instanceof IllegalStateException
                 || exception instanceof NullPointerException
                 || exception instanceof IllegalFormatException) {
-            return (RuntimeException) exception;
+            return new TrinoException(PAIMON_WRITER_DATA_ERROR, writerDataErrorMessage(exception), exception);
         }
         if (exception instanceof RuntimeException runtimeException) {
             return new TrinoException(PAIMON_WRITER_DATA_ERROR, "Failed to write data to Paimon", runtimeException);
         }
         return new TrinoException(PAIMON_WRITER_DATA_ERROR, "Failed to write data to Paimon", exception);
+    }
+
+    private static String writerDataErrorMessage(Exception exception)
+    {
+        String detail = exception.getMessage();
+        if (detail == null || detail.isBlank()) {
+            return "Failed to write data to Paimon";
+        }
+        return "Failed to write data to Paimon: " + detail;
     }
 
     static RuntimeException wrapWriterCloseException(Exception exception)

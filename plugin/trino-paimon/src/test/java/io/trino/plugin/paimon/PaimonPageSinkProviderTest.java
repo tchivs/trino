@@ -894,7 +894,12 @@ public class PaimonPageSinkProviderTest
         UnsupportedOperationException unsupportedWithoutMessage = new UnsupportedOperationException();
         RuntimeException runtimeFailure = new RuntimeException("runtime write failed");
 
-        assertThat(PaimonPageSink.wrapWriteException(contractViolation)).isSameAs(contractViolation);
+        assertThat(PaimonPageSink.wrapWriteException(contractViolation))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: metadata mismatch");
+                    assertThat(exception.getCause()).isSameAs(contractViolation);
+                });
         assertThat(PaimonPageSink.wrapWriteException(alreadyMapped)).isSameAs(alreadyMapped);
         assertThat(PaimonPageSink.wrapWriteException(unsupported))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
@@ -1099,6 +1104,18 @@ public class PaimonPageSinkProviderTest
                     assertThat(exception.getCause()).isSameAs(writeFailure);
                 });
 
+        IllegalArgumentException writeRuntimeFailure = new IllegalArgumentException("bad row");
+        PaimonPageSink failingRuntimeWriteSink = new PaimonPageSink(writer(List.of(), writeRuntimeFailure, null, null),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()));
+
+        assertThatThrownBy(() -> failingRuntimeWriteSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 1L))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: bad row");
+                    assertThat(exception.getCause()).isSameAs(writeRuntimeFailure);
+                });
+
         IOException prepareFailure = new IOException("prepare failed");
         PaimonPageSink failingFinishSink = new PaimonPageSink(writer(List.of(), null, prepareFailure, null),
                 List.of(INTEGER),
@@ -1109,6 +1126,18 @@ public class PaimonPageSinkProviderTest
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
                     assertThat(exception).hasMessage("Failed to write data to Paimon");
                     assertThat(exception.getCause()).isSameAs(prepareFailure);
+                });
+
+        IllegalStateException prepareRuntimeFailure = new IllegalStateException("prepare failed");
+        PaimonPageSink failingRuntimeFinishSink = new PaimonPageSink(writer(List.of(), null, prepareRuntimeFailure, null),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()));
+
+        assertThatThrownBy(() -> failingRuntimeFinishSink.finish().join())
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: prepare failed");
+                    assertThat(exception.getCause()).isSameAs(prepareRuntimeFailure);
                 });
     }
 
@@ -1286,13 +1315,23 @@ public class PaimonPageSinkProviderTest
 
         assertThatThrownBy(() -> new PaimonPageSink(writer((List<CommitMessage>) null), List.of(INTEGER),
                 List.of(DataTypes.INT())).finish())
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("Paimon writer returned null commit messages");
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: Paimon writer returned null commit messages");
+                    assertThat(exception.getCause())
+                            .isInstanceOf(NullPointerException.class)
+                            .hasMessage("Paimon writer returned null commit messages");
+                });
 
         assertThatThrownBy(() -> new PaimonPageSink(writer(Collections.singletonList(null)), List.of(INTEGER),
                 List.of(DataTypes.INT())).finish())
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("Paimon writer returned null commit message");
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: Paimon writer returned null commit message");
+                    assertThat(exception.getCause())
+                            .isInstanceOf(NullPointerException.class)
+                            .hasMessage("Paimon writer returned null commit message");
+                });
     }
 
     private static void assertUnsupportedWriteBucketMode(BucketMode bucketMode)
