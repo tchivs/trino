@@ -269,6 +269,38 @@ public class TrinoFilterConverterTest
     }
 
     @Test
+    public void testUnsafeTimeLiteralConversionRemainsUnsupported()
+    {
+        RowType rowType = new RowType(
+                Collections.singletonList(new DataField(0, "t", new org.apache.paimon.types.TimeType(6))));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PaimonColumnHandle timeColumn = PaimonColumnHandle.of("t", new org.apache.paimon.types.TimeType(6));
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(Map.of(timeColumn,
+                Domain.singleValue(TIME_MICROS, Long.MAX_VALUE)));
+
+        LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
+        LinkedHashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
+
+        assertThat(converter.convert(domain, acceptedDomains, unsupportedDomains)).isEmpty();
+        assertThat(acceptedDomains).isEmpty();
+        assertThat(unsupportedDomains).containsEntry(timeColumn, domain.getDomains().orElseThrow().get(timeColumn));
+    }
+
+    @Test
+    public void testUnsafeMapElementTimeLiteralConversionRemainsUnsupportedForFileIndex()
+    {
+        org.apache.paimon.types.MapType mapType = new org.apache.paimon.types.MapType(
+                new VarCharType(VarCharType.MAX_LENGTH), new org.apache.paimon.types.TimeType(6));
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "properties", mapType)));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "last_seen"), mapType);
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(Map.of(mapElement,
+                Domain.singleValue(TIME_MICROS, Long.MAX_VALUE)));
+
+        assertThat(converter.convertForFileIndex(domain)).isEmpty();
+    }
+
+    @Test
     public void testTupleDomainNoneUsesPaimonPredicateVisitor()
     {
         RowType rowType = new RowType(Collections.singletonList(new DataField(0, "id", new IntType())));

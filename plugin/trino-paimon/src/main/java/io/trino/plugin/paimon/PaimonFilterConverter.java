@@ -135,7 +135,7 @@ public class PaimonFilterConverter
                     acceptedDomains.put(columnHandle, domain);
                     continue;
                 }
-                catch (UnsupportedOperationException exception) {
+                catch (UnsupportedOperationException | ArithmeticException | IllegalArgumentException exception) {
                     LOG.debug(exception, "Predicate is not supported for pushdown");
                 }
             }
