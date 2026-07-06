@@ -110,10 +110,27 @@ class TrinoPaimonFormatWriter
         if (closed) {
             return;
         }
-        closed = true;
-        flush();
-        writer.close();
-        stats = statsCollector.extract();
+        boolean writerCloseAttempted = false;
+        try {
+            flush();
+            writerCloseAttempted = true;
+            writer.close();
+            stats = statsCollector.extract();
+        }
+        catch (IOException | RuntimeException e) {
+            if (!writerCloseAttempted) {
+                try {
+                    writer.close();
+                }
+                catch (IOException | RuntimeException closeFailure) {
+                    e.addSuppressed(closeFailure);
+                }
+            }
+            throw e;
+        }
+        finally {
+            closed = true;
+        }
     }
 
     @Override

@@ -76,6 +76,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -124,6 +126,14 @@ public class TestTrinoPaimonFileFormatProvider
     {
         assertWriterCloseLeavesPaimonOutputStreamOpen("parquet", "snappy");
         assertWriterCloseLeavesPaimonOutputStreamOpen("orc", "zstd");
+    }
+
+    @Test
+    void testWriterCloseReleasesAdapterAfterFlushFailure()
+            throws Exception
+    {
+        assertWriterCloseReleasesAdapterAfterFlushFailure("parquet", "snappy");
+        assertWriterCloseReleasesAdapterAfterFlushFailure("orc", "zstd");
     }
 
     @Test
@@ -426,6 +436,40 @@ public class TestTrinoPaimonFileFormatProvider
         assertThatCode(out::flush).doesNotThrowAnyException();
         assertThatCode(out::close).doesNotThrowAnyException();
         assertThat(out.closed()).isTrue();
+    }
+
+    private static void assertWriterCloseReleasesAdapterAfterFlushFailure(String formatIdentifier, String compression)
+            throws Exception
+    {
+        TrackingPositionOutputStream out = new TrackingPositionOutputStream();
+        Options options = new Options();
+        options.set(CoreOptions.WRITE_BATCH_SIZE, 10);
+        FileFormat trinoFormat = FileFormat.fromIdentifier(formatIdentifier, options);
+        FormatWriter writer = trinoFormat.createWriterFactory(rowType()).create(out, compression);
+        FailingWriterAdapter failingWriterAdapter = installFailingWriterAdapter(writer);
+
+        writer.addElement(rows().get(0));
+
+        assertThatThrownBy(writer::close)
+                .isInstanceOf(IOException.class)
+                .hasMessage("flush failed");
+        assertThat(failingWriterAdapter.writeCount()).isEqualTo(1);
+        assertThat(failingWriterAdapter.closeCount()).isEqualTo(1);
+        assertThat(writer.writerMetadata()).isNull();
+    }
+
+    private static FailingWriterAdapter installFailingWriterAdapter(FormatWriter writer)
+            throws ReflectiveOperationException
+    {
+        Field writerField = TrinoPaimonFormatWriter.class.getDeclaredField("writer");
+        writerField.setAccessible(true);
+        FailingWriterAdapter failingWriterAdapter = new FailingWriterAdapter();
+        Object proxy = Proxy.newProxyInstance(
+                writerField.getType().getClassLoader(),
+                new Class<?>[] {writerField.getType()},
+                failingWriterAdapter);
+        writerField.set(writer, proxy);
+        return failingWriterAdapter;
     }
 
     private void assertWriterMetadataPreservesPaimonColumnStats(String formatIdentifier, String compression)
@@ -970,6 +1014,42 @@ public class TestTrinoPaimonFileFormatProvider
         boolean closed()
         {
             return closed;
+        }
+    }
+
+    private static class FailingWriterAdapter
+            implements java.lang.reflect.InvocationHandler
+    {
+        private int writeCount;
+        private int closeCount;
+
+        @Override
+        public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args)
+                throws Throwable
+        {
+            return switch (method.getName()) {
+                case "write" -> {
+                    writeCount++;
+                    throw new IOException("flush failed");
+                }
+                case "close" -> {
+                    closeCount++;
+                    yield null;
+                }
+                case "getWrittenBytes", "getBufferedBytes" -> 0L;
+                case "toString" -> "FailingWriterAdapter";
+                default -> throw new UnsupportedOperationException("Unexpected method: " + method);
+            };
+        }
+
+        int writeCount()
+        {
+            return writeCount;
+        }
+
+        int closeCount()
+        {
+            return closeCount;
         }
     }
 
