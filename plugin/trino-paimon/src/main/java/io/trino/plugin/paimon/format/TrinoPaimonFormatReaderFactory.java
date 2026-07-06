@@ -44,6 +44,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static java.lang.Math.toIntExact;
+import static java.util.Objects.checkFromIndexSize;
 import static java.util.Objects.requireNonNull;
 
 class TrinoPaimonFormatReaderFactory
@@ -307,6 +308,8 @@ class TrinoPaimonFormatReaderFactory
         private final FileIO fileIO;
         private final Path path;
         private final long length;
+        @Nullable
+        private SeekableInputStream inputStream;
         private boolean closed;
 
         private PaimonTrinoInput(FileIO fileIO, Path path, long length)
@@ -317,34 +320,54 @@ class TrinoPaimonFormatReaderFactory
         }
 
         @Override
-        public void readFully(long position, byte[] buffer, int bufferOffset, int bufferLength)
+        public synchronized void readFully(long position, byte[] buffer, int bufferOffset, int bufferLength)
                 throws IOException
         {
             ensureOpen();
-            try (SeekableInputStream inputStream = fileIO.newInputStream(path)) {
-                inputStream.seek(position);
-                int read = inputStream.readNBytes(buffer, bufferOffset, bufferLength);
-                if (read != bufferLength) {
-                    throw new EOFException("Cannot read %s bytes at %s. File size is %s: %s"
-                            .formatted(bufferLength, position, length, path));
-                }
+            if (position < 0) {
+                throw new IOException("Negative seek offset");
+            }
+            checkFromIndexSize(bufferOffset, bufferLength, buffer.length);
+            if (bufferLength == 0) {
+                return;
+            }
+
+            SeekableInputStream input = inputStream();
+            input.seek(position);
+            int read = input.readNBytes(buffer, bufferOffset, bufferLength);
+            if (read != bufferLength) {
+                throw new EOFException("Cannot read %s bytes at %s. File size is %s: %s"
+                        .formatted(bufferLength, position, length, path));
             }
         }
 
         @Override
-        public int readTail(byte[] buffer, int bufferOffset, int bufferLength)
+        public synchronized int readTail(byte[] buffer, int bufferOffset, int bufferLength)
                 throws IOException
         {
             ensureOpen();
+            checkFromIndexSize(bufferOffset, bufferLength, buffer.length);
+            if (bufferLength == 0) {
+                return 0;
+            }
+
             int readSize = toIntExact(Math.min(length, bufferLength));
             readFully(length - readSize, buffer, bufferOffset, readSize);
             return readSize;
         }
 
         @Override
-        public void close()
+        public synchronized void close()
+                throws IOException
         {
+            if (closed) {
+                return;
+            }
             closed = true;
+            if (inputStream != null) {
+                inputStream.close();
+                inputStream = null;
+            }
         }
 
         private void ensureOpen()
@@ -353,6 +376,15 @@ class TrinoPaimonFormatReaderFactory
             if (closed) {
                 throw new IOException("Input closed: " + path);
             }
+        }
+
+        private SeekableInputStream inputStream()
+                throws IOException
+        {
+            if (inputStream == null) {
+                inputStream = fileIO.newInputStream(path);
+            }
+            return inputStream;
         }
     }
 

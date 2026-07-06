@@ -42,6 +42,7 @@ import org.apache.paimon.format.orc.OrcFileFormatFactory;
 import org.apache.paimon.format.parquet.ParquetFileFormatFactory;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
+import org.apache.paimon.fs.SeekableInputStream;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.io.DataFileRecordReader;
@@ -81,6 +82,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
+import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -176,6 +178,31 @@ public class TestTrinoPaimonFileFormatProvider
     {
         assertTrinoReaderPreservesFilePositionsForPaimonSelection("parquet", "snappy");
         assertTrinoReaderPreservesFilePositionsForPaimonSelection("orc", "zstd");
+    }
+
+    @Test
+    void testTrinoOrcReaderReusesPaimonInputStream()
+            throws Exception
+    {
+        RowType rowType = rowType();
+        List<GenericRow> rows = rows();
+        Path file = new Path(tempDir.resolve("stream-reuse-data.orc").toUri().toString());
+        LocalFileIO fileIO = LocalFileIO.create();
+        FileFormat trinoWriteFormat = FileFormat.fromIdentifier("orc", trinoFormatOptions());
+        try (PositionOutputStream out = fileIO.newOutputStream(file, false);
+                FormatWriter writer = trinoWriteFormat.createWriterFactory(rowType).create(out, "zstd")) {
+            for (GenericRow row : rows) {
+                writer.addElement(row);
+            }
+        }
+
+        CountingFileIO countingFileIO = new CountingFileIO();
+        FileFormat trinoReadFormat = FileFormat.fromIdentifier("orc", trinoFormatOptions());
+
+        assertThat(readRows(trinoReadFormat, rowType, countingFileIO, file))
+                .containsExactlyElementsOf(canonicalizeRows(rowType, rows));
+        assertThat(countingFileIO.newInputStreamCount()).isEqualTo(1);
+        assertThat(countingFileIO.inputStreamCloseCount()).isEqualTo(1);
     }
 
     @Test
@@ -821,6 +848,78 @@ public class TestTrinoPaimonFileFormatProvider
     }
 
     private record PositionedRow(long position, InternalRow row) {}
+
+    private static class CountingFileIO
+            extends LocalFileIO
+    {
+        private int newInputStreamCount;
+        private int inputStreamCloseCount;
+
+        @Override
+        public SeekableInputStream newInputStream(Path path)
+                throws IOException
+        {
+            newInputStreamCount++;
+            return new CountingSeekableInputStream(super.newInputStream(path));
+        }
+
+        int newInputStreamCount()
+        {
+            return newInputStreamCount;
+        }
+
+        int inputStreamCloseCount()
+        {
+            return inputStreamCloseCount;
+        }
+
+        private class CountingSeekableInputStream
+                extends SeekableInputStream
+        {
+            private final SeekableInputStream delegate;
+
+            private CountingSeekableInputStream(SeekableInputStream delegate)
+            {
+                this.delegate = requireNonNull(delegate, "delegate is null");
+            }
+
+            @Override
+            public void seek(long desired)
+                    throws IOException
+            {
+                delegate.seek(desired);
+            }
+
+            @Override
+            public long getPos()
+                    throws IOException
+            {
+                return delegate.getPos();
+            }
+
+            @Override
+            public int read()
+                    throws IOException
+            {
+                return delegate.read();
+            }
+
+            @Override
+            public int read(byte[] buffer, int offset, int length)
+                    throws IOException
+            {
+                return delegate.read(buffer, offset, length);
+            }
+
+            @Override
+            public void close()
+                    throws IOException
+            {
+                inputStreamCloseCount++;
+                delegate.close();
+            }
+        }
+    }
 
     private static class TrackingPositionOutputStream
             extends PositionOutputStream
