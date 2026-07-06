@@ -685,63 +685,50 @@ public class PaimonPageSourceProvider
 
     static RuntimeException wrapPaimonReadException(Exception exception)
     {
-        if (exception instanceof TrinoException trinoException) {
-            return trinoException;
-        }
-        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
-            return unsupportedReadException("Paimon page read uses features which are not supported by the Trino connector",
-                    unsupportedOperationException);
-        }
-        if (exception instanceof OrcCorruptionException || exception instanceof ParquetCorruptionException) {
-            return new TrinoException(PAIMON_BAD_DATA, exception);
-        }
-        if (exception instanceof UncheckedIOException uncheckedIOException) {
-            return cannotOpenSplitException("Failed to open or read Paimon split", uncheckedIOException.getCause());
-        }
-        if (exception instanceof IOException ioException) {
-            return cannotOpenSplitException("Failed to open or read Paimon split", ioException);
-        }
-        if (exception instanceof RuntimeException runtimeException) {
-            Throwable cause = runtimeException.getCause();
-            if (cause instanceof OrcCorruptionException || cause instanceof ParquetCorruptionException) {
-                return new TrinoException(PAIMON_BAD_DATA, cause);
-            }
-            if (cause instanceof IOException ioException) {
-                return cannotOpenSplitException("Failed to open or read Paimon split", ioException);
-            }
-            return runtimeException;
-        }
-        return new RuntimeException(exception);
+        return wrapPaimonReadException(
+                "Failed to open or read Paimon split",
+                "Paimon page read uses features which are not supported by the Trino connector",
+                exception);
     }
 
     static RuntimeException wrapPaimonReadException(String message, Exception exception)
     {
+        return wrapPaimonReadException(message, message, exception);
+    }
+
+    private static RuntimeException wrapPaimonReadException(String cannotOpenSplitMessage, String unsupportedReadMessage,
+            Exception exception)
+    {
+        requireNonNull(exception, "exception is null");
         if (exception instanceof TrinoException trinoException) {
             return trinoException;
         }
         if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
-            return unsupportedReadException(message, unsupportedOperationException);
+            return unsupportedReadException(unsupportedReadMessage, unsupportedOperationException);
         }
         if (exception instanceof OrcCorruptionException || exception instanceof ParquetCorruptionException) {
             return new TrinoException(PAIMON_BAD_DATA, exception);
         }
         if (exception instanceof UncheckedIOException uncheckedIOException) {
-            return cannotOpenSplitException(message, uncheckedIOException.getCause());
+            return cannotOpenSplitException(cannotOpenSplitMessage, uncheckedIOException.getCause());
         }
         if (exception instanceof IOException ioException) {
-            return cannotOpenSplitException(message, ioException);
+            return cannotOpenSplitException(cannotOpenSplitMessage, ioException);
         }
-        if (exception instanceof RuntimeException runtimeException) {
-            Throwable cause = runtimeException.getCause();
-            if (cause instanceof OrcCorruptionException || cause instanceof ParquetCorruptionException) {
-                return new TrinoException(PAIMON_BAD_DATA, cause);
-            }
-            if (cause instanceof IOException ioException) {
-                return cannotOpenSplitException(message, ioException);
-            }
-            return runtimeException;
+        Throwable cause = exception.getCause();
+        if (cause instanceof TrinoException trinoException) {
+            return trinoException;
         }
-        return new RuntimeException(message, exception);
+        if (cause instanceof UnsupportedOperationException unsupportedOperationException) {
+            return unsupportedReadException(unsupportedReadMessage, unsupportedOperationException);
+        }
+        if (cause instanceof OrcCorruptionException || cause instanceof ParquetCorruptionException) {
+            return new TrinoException(PAIMON_BAD_DATA, cause);
+        }
+        if (cause instanceof IOException ioException) {
+            return cannotOpenSplitException(cannotOpenSplitMessage, ioException);
+        }
+        return cannotOpenSplitException(cannotOpenSplitMessage, exception);
     }
 
     static TrinoException unsupportedReadException(String message, UnsupportedOperationException exception)
@@ -750,7 +737,7 @@ public class PaimonPageSourceProvider
         return new TrinoException(NOT_SUPPORTED, message, requireNonNull(exception, "exception is null"));
     }
 
-    static TrinoException cannotOpenSplitException(String message, IOException exception)
+    static TrinoException cannotOpenSplitException(String message, Exception exception)
     {
         requireNonNull(message, "message is null");
         return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, requireNonNull(exception, "exception is null"));

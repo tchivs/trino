@@ -1635,7 +1635,7 @@ public class PaimonPageSourceTest
     }
 
     @Test
-    void testDirectRawFileContractExceptionsAreNotRewrapped()
+    void testDirectRawFileExceptionsUseStableErrorCodes()
     {
         TrinoException unsupported = new TrinoException(NOT_SUPPORTED, "unsupported direct read");
         IllegalStateException contractViolation = new IllegalStateException("metadata mismatch");
@@ -1646,9 +1646,16 @@ public class PaimonPageSourceTest
                 "bad parquet");
         RuntimeException wrappedIoException = new RuntimeException(ioException);
         RuntimeException wrappedParquetCorruption = new RuntimeException(parquetCorruption);
+        RuntimeException wrappedUnsupported = new RuntimeException(unsupported);
+        RuntimeException wrappedUnsupportedRead = new RuntimeException(unsupportedRead);
 
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(unsupported)).isSameAs(unsupported);
-        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(contractViolation)).isSameAs(contractViolation);
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(contractViolation))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).isSameAs(contractViolation);
+                });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(unsupportedRead))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
@@ -1677,9 +1684,20 @@ public class PaimonPageSourceTest
                     assertThat(exception).hasMessage("Failed to open or read Paimon split");
                     assertThat(exception.getCause()).isSameAs(ioException);
                 });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(wrappedUnsupported)).isSameAs(unsupported);
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(wrappedUnsupportedRead))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon page read uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(unsupportedRead);
+                });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", unsupported)).isSameAs(unsupported);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", contractViolation))
-                .isSameAs(contractViolation);
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("reader failed");
+                    assertThat(exception.getCause()).isSameAs(contractViolation);
+                });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException("reader failed", unsupportedRead))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
@@ -1792,6 +1810,25 @@ public class PaimonPageSourceTest
         AtomicBoolean readerClosed = new AtomicBoolean();
         PaimonPageSource pageSource = new PaimonPageSource(
                 new FailingRecordReader(new RuntimeException(failure), null, readerClosed),
+                List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::getNextPage)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+        assertThat(readerClosed).isTrue();
+    }
+
+    @Test
+    void testPaimonPageSourceUnexpectedReaderFailureUsesCannotOpenSplit()
+    {
+        IllegalStateException failure = new IllegalStateException("reader invariant failed");
+        AtomicBoolean readerClosed = new AtomicBoolean();
+        PaimonPageSource pageSource = new PaimonPageSource(
+                new FailingRecordReader(failure, null, readerClosed),
                 List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
                 OptionalLong.empty());
 
