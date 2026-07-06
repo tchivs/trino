@@ -14,6 +14,7 @@
 package io.trino.plugin.paimon;
 
 import com.google.common.collect.ImmutableSet;
+import io.airlift.log.Logger;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorCapabilities;
@@ -43,6 +44,8 @@ public class PaimonConnector
         implements
         Connector
 {
+    private static final Logger LOG = Logger.get(PaimonConnector.class);
+
     private final ConnectorMetadata trinoMetadata;
     private final ConnectorSplitManager trinoSplitManager;
     private final ConnectorPageSourceProvider trinoPageSourceProvider;
@@ -157,7 +160,7 @@ public class PaimonConnector
             paimonCatalog.close();
         }
         catch (Exception e) {
-            throw new RuntimeException("Failed to close Paimon catalog", e);
+            LOG.warn(e, "Failed to close Paimon catalog");
         }
     }
 }

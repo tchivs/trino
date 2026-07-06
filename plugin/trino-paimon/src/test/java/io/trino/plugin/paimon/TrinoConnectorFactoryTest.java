@@ -13,18 +13,37 @@
  */
 package io.trino.plugin.paimon;
 
+import io.trino.plugin.paimon.catalog.PaimonCatalog;
+import io.trino.spi.connector.BucketFunction;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
+import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMetadata;
+import io.trino.spi.connector.ConnectorNodePartitioningProvider;
+import io.trino.spi.connector.ConnectorOutputTableHandle;
+import io.trino.spi.connector.ConnectorPageSinkId;
+import io.trino.spi.connector.ConnectorPageSinkProvider;
+import io.trino.spi.connector.ConnectorPartitioningHandle;
+import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorSplitManager;
+import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.function.FunctionProvider;
+import io.trino.spi.type.Type;
 import io.trino.testing.TestingConnectorContext;
 import org.apache.paimon.options.Options;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TrinoConnectorFactoryTest
@@ -39,6 +58,62 @@ public class TrinoConnectorFactoryTest
         ConnectorFactory factory = new PaimonConnectorFactory();
         Connector connector = factory.create("paimon", config, new TestingConnectorContext());
         assertThat(connector).isNotNull();
+    }
+
+    @Test
+    public void testConnectorShutdownDoesNotPropagateCatalogCloseFailure()
+    {
+        AtomicBoolean closeCalled = new AtomicBoolean();
+        PaimonConnector connector = new PaimonConnector(
+                new ConnectorMetadata() {},
+                new ConnectorSplitManager() {},
+                (transaction, session, split, table, columns, dynamicFilter) -> {
+                    throw new UnsupportedOperationException("not used");
+                },
+                new ConnectorPageSinkProvider()
+                {
+                    @Override
+                    public io.trino.spi.connector.ConnectorPageSink createPageSink(
+                            ConnectorTransactionHandle transactionHandle,
+                            ConnectorSession session,
+                            ConnectorOutputTableHandle outputTableHandle,
+                            ConnectorPageSinkId pageSinkId)
+                    {
+                        throw new UnsupportedOperationException("not used");
+                    }
+
+                    @Override
+                    public io.trino.spi.connector.ConnectorPageSink createPageSink(
+                            ConnectorTransactionHandle transactionHandle,
+                            ConnectorSession session,
+                            ConnectorInsertTableHandle insertTableHandle,
+                            ConnectorPageSinkId pageSinkId)
+                    {
+                        throw new UnsupportedOperationException("not used");
+                    }
+                },
+                new ConnectorNodePartitioningProvider()
+                {
+                    @Override
+                    public BucketFunction getBucketFunction(
+                            ConnectorTransactionHandle transactionHandle,
+                            ConnectorSession session,
+                            ConnectorPartitioningHandle partitioningHandle,
+                            List<Type> partitionChannelTypes,
+                            int bucketCount)
+                    {
+                        throw new UnsupportedOperationException("not used");
+                    }
+                },
+                new FailingClosePaimonCatalog(closeCalled),
+                new PaimonSchemaProperties(),
+                new PaimonTableOptions(),
+                new PaimonSessionProperties(),
+                Set.of(),
+                new FunctionProvider() {});
+
+        assertThatCode(connector::shutdown).doesNotThrowAnyException();
+        assertThat(closeCalled).isTrue();
     }
 
     @Test
@@ -87,5 +162,27 @@ public class TrinoConnectorFactoryTest
         assertThat(config)
                 .containsEntry("s3.aws-access-key", "trino-access")
                 .containsEntry("s3.aws-secret-key", "trino-secret");
+    }
+
+    private static class FailingClosePaimonCatalog
+            extends PaimonCatalog
+    {
+        private final AtomicBoolean closeCalled;
+
+        private FailingClosePaimonCatalog(AtomicBoolean closeCalled)
+        {
+            super(new Options(), identity -> {
+                throw new UnsupportedOperationException("not used");
+            });
+            this.closeCalled = closeCalled;
+        }
+
+        @Override
+        public void close()
+                throws Exception
+        {
+            closeCalled.set(true);
+            throw new IOException("close failed");
+        }
     }
 }
