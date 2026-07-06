@@ -20,6 +20,7 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.source.ReadBuilder;
@@ -256,6 +257,26 @@ public class PaimonSplitManagerTest
 
         assertThat(readBuilder.appliedRowRanges).hasValue(List.of(new Range(5, 5)));
         assertThat(readBuilder.appliedFilters).isEmpty();
+    }
+
+    @Test
+    public void testPushPredicateSkipsEmptyExtremeRowIdRanges()
+    {
+        PaimonColumnHandle rowIdColumn = PaimonColumnHandle.of("_row_id", org.apache.paimon.table.SpecialFields.ROW_ID.type());
+
+        RecordingReadBuilder greaterThanMax = new RecordingReadBuilder();
+        PaimonSplitManager.pushPredicate(greaterThanMax, table(ROW_TYPE), TupleDomain.withColumnDomains(Map.of(
+                rowIdColumn, Domain.create(ValueSet.ofRanges(io.trino.spi.predicate.Range.greaterThan(BIGINT, Long.MAX_VALUE)), false))));
+
+        assertThat(greaterThanMax.appliedRowRanges).hasValue(List.of());
+        assertThat(greaterThanMax.appliedFilters).isEmpty();
+
+        RecordingReadBuilder lessThanMin = new RecordingReadBuilder();
+        PaimonSplitManager.pushPredicate(lessThanMin, table(ROW_TYPE), TupleDomain.withColumnDomains(Map.of(
+                rowIdColumn, Domain.create(ValueSet.ofRanges(io.trino.spi.predicate.Range.lessThan(BIGINT, Long.MIN_VALUE)), false))));
+
+        assertThat(lessThanMin.appliedRowRanges).hasValue(List.of());
+        assertThat(lessThanMin.appliedFilters).isEmpty();
     }
 
     @Test

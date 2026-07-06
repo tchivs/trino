@@ -26,7 +26,6 @@ import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.spi.type.BigintType.BIGINT;
-import static java.lang.Math.addExact;
 import static java.util.Objects.requireNonNull;
 
 final class PaimonRowRangeExtractor
@@ -115,7 +114,10 @@ final class PaimonRowRangeExtractor
             else {
                 lower = (long) range.getLowBoundedValue();
                 if (!range.isLowInclusive()) {
-                    lower = addExact(lower, 1);
+                    if (lower == Long.MAX_VALUE) {
+                        continue;
+                    }
+                    lower++;
                 }
             }
 
@@ -126,7 +128,10 @@ final class PaimonRowRangeExtractor
             else {
                 upper = (long) range.getHighBoundedValue();
                 if (!range.isHighInclusive()) {
-                    upper = addExact(upper, -1);
+                    if (upper == Long.MIN_VALUE) {
+                        continue;
+                    }
+                    upper--;
                 }
             }
 
