@@ -921,7 +921,12 @@ public class PaimonPageSinkProviderTest
                     assertThat(exception.getCause()).isSameAs(writeFailure);
                 });
 
-        assertThat(PaimonPageSink.wrapWriterCloseException(contractViolation)).isSameAs(contractViolation);
+        assertThat(PaimonPageSink.wrapWriterCloseException(contractViolation))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_CLOSE_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to close Paimon writer");
+                    assertThat(exception.getCause()).isSameAs(contractViolation);
+                });
         assertThat(PaimonPageSink.wrapWriterCloseException(alreadyMapped)).isSameAs(alreadyMapped);
         assertThat(PaimonPageSink.wrapWriterCloseException(unsupported))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
@@ -952,7 +957,13 @@ public class PaimonPageSinkProviderTest
         RuntimeException actual = PaimonPageSink.closeWriter(writer(closeFailure), commitFailure);
 
         assertThat(actual).isSameAs(commitFailure);
-        assertThat(actual.getSuppressed()).containsExactly(closeFailure);
+        assertThat(actual.getSuppressed())
+                .singleElement()
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_CLOSE_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to close Paimon writer");
+                    assertThat(exception.getCause()).isSameAs(closeFailure);
+                });
     }
 
     @Test
@@ -962,7 +973,12 @@ public class PaimonPageSinkProviderTest
 
         RuntimeException actual = PaimonPageSink.closeWriter(writer(closeFailure), null);
 
-        assertThat(actual).isSameAs(closeFailure);
+        assertThat(actual)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_CLOSE_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to close Paimon writer");
+                    assertThat(exception.getCause()).isSameAs(closeFailure);
+                });
     }
 
     @Test
@@ -979,6 +995,39 @@ public class PaimonPageSinkProviderTest
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("close failed");
                 });
+    }
+
+    @Test
+    public void testPageSinkAbortWrapsRuntimeIoManagerCloseFailures()
+    {
+        RuntimeException closeFailure = new IllegalStateException("close failed");
+        TestingIoManager ioManager = new TestingIoManager()
+        {
+            @Override
+            public void close()
+                    throws Exception
+            {
+                super.close();
+                throw closeFailure;
+            }
+        };
+        PaimonPageSink pageSink = new PaimonPageSink(
+                writer(),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()),
+                new int[] {0},
+                new Object[] {null},
+                null,
+                null,
+                ioManager);
+
+        assertThatThrownBy(pageSink::abort)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_CLOSE_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to close Paimon writer IO manager");
+                    assertThat(exception.getCause()).isSameAs(closeFailure);
+                });
+        assertThat(ioManager.isClosed()).isTrue();
     }
 
     @Test

@@ -415,7 +415,7 @@ public class PaimonPageSink
                     unsupportedOperationException);
         }
         if (exception instanceof RuntimeException runtimeException) {
-            return runtimeException;
+            return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer", runtimeException);
         }
         return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer", exception);
     }
@@ -426,7 +426,7 @@ public class PaimonPageSink
             return trinoException;
         }
         if (exception instanceof RuntimeException runtimeException) {
-            return runtimeException;
+            return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer IO manager", runtimeException);
         }
         return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer IO manager", exception);
     }
