@@ -797,6 +797,23 @@ public class TrinoFilterConverterTest
     }
 
     @Test
+    public void testMapElementInExpressionDoesNotPartiallyExtractNullValues()
+    {
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties",
+                new org.apache.paimon.types.MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH)));
+        Call expression = new Call(BOOLEAN, IN_PREDICATE_FUNCTION_NAME, List.of(
+                mapElement("properties", properties.getTrinoType(), "region"),
+                new Call(new ArrayType(VARCHAR), ARRAY_CONSTRUCTOR_FUNCTION_NAME,
+                        List.of(
+                                new Constant(Slices.utf8Slice("ap-south"), VARCHAR),
+                                new Constant(null, VARCHAR)))));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties", properties));
+
+        assertThat(PaimonFilterExtractor.extractTrinoColumnHandleForExpressionFilter(constraint)).isEmpty();
+    }
+
+    @Test
     public void testUnsupportedMapElementExpressionsAreNotExtracted()
     {
         PaimonColumnHandle properties = PaimonColumnHandle.of("properties",

@@ -34,6 +34,7 @@ import org.apache.paimon.table.Table;
 import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.RowType;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -309,19 +310,17 @@ public class PaimonFilterExtractor
                             || !(arrayExpression.getType() instanceof ArrayType arrayType)) {
                         return Collections.emptyMap();
                     }
-                    if (arrayExpression.getArguments().stream().anyMatch(argument -> !(argument instanceof Constant))) {
-                        return Collections.emptyMap();
-                    }
                     elementType = arrayType.getElementType();
-                    if (arrayExpression.getArguments().stream()
-                            .map(Constant.class::cast)
-                            .anyMatch(argument -> argument.getValue() == null || !argument.getType().equals(elementType))) {
-                        return Collections.emptyMap();
+                    List<ConnectorExpression> arrayArguments = arrayExpression.getArguments();
+                    values = new ArrayList<>(arrayArguments.size());
+                    for (ConnectorExpression argument : arrayArguments) {
+                        if (!(argument instanceof Constant constant)
+                                || constant.getValue() == null
+                                || !constant.getType().equals(elementType)) {
+                            return Collections.emptyMap();
+                        }
+                        values.add(Range.equal(elementType, constant.getValue()));
                     }
-                    values = arrayExpression.getArguments().stream()
-                            .map(Constant.class::cast)
-                            .map(argument -> Range.equal(argument.getType(), argument.getValue()))
-                            .collect(Collectors.toList());
                 }
                 else {
                     if (!(comparisonValue instanceof Constant elementAtValue)) {
