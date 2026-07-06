@@ -1248,13 +1248,24 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testProjectionIndexesAllowDuplicateProjectedFields()
+    {
+        int[] projectionIndexes = PaimonPageSourceProvider.projectionIndexes(
+                List.of("id", "payload"),
+                List.of("payload", "PAYLOAD", "id"));
+
+        assertThat(projectionIndexes).containsExactly(1, 1, 0);
+        assertThat(PaimonPageSourceProvider.isIdentityProjection(projectionIndexes, 2)).isFalse();
+    }
+
+    @Test
     void testProjectionIndexesRejectCaseInsensitiveDuplicateTableFields()
     {
         assertThatThrownBy(() -> PaimonPageSourceProvider.projectionIndexes(
                 List.of("id", "ID"),
                 List.of("Id")))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessage("Table fields contain case-insensitive duplicate field name 'Id': [id, ID]");
+                .hasMessage("Table fields contain case-insensitive duplicate field name 'ID': [id, ID]");
     }
 
     @Test

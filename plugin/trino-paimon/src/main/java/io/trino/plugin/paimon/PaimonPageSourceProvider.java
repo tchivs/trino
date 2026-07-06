@@ -757,21 +757,21 @@ public class PaimonPageSourceProvider
     {
         requireNonNull(fieldNames, "fieldNames is null");
         requireNonNull(projectedFields, "projectedFields is null");
+        Map<String, Integer> fieldIndexes = new HashMap<>();
+        for (int index = 0; index < fieldNames.size(); index++) {
+            String fieldName = requireNonNull(fieldNames.get(index), "fieldNames contains null field");
+            Integer previousIndex = fieldIndexes.putIfAbsent(FieldNameUtils.toLowerCase(fieldName), index);
+            if (previousIndex != null) {
+                throw new IllegalStateException("Table fields contain case-insensitive duplicate field name '%s': %s"
+                        .formatted(fieldName, fieldNames));
+            }
+        }
+
         int[] indexes = new int[projectedFields.size()];
         for (int projectedIndex = 0; projectedIndex < projectedFields.size(); projectedIndex++) {
             String projectedField = requireNonNull(projectedFields.get(projectedIndex), "projectedFields contains null field");
-            int fieldIndex = -1;
-            for (int index = 0; index < fieldNames.size(); index++) {
-                String fieldName = requireNonNull(fieldNames.get(index), "fieldNames contains null field");
-                if (fieldName.equalsIgnoreCase(projectedField)) {
-                    if (fieldIndex >= 0) {
-                        throw new IllegalStateException("Table fields contain case-insensitive duplicate field name '%s': %s"
-                                .formatted(projectedField, fieldNames));
-                    }
-                    fieldIndex = index;
-                }
-            }
-            if (fieldIndex < 0) {
+            Integer fieldIndex = fieldIndexes.get(FieldNameUtils.toLowerCase(projectedField));
+            if (fieldIndex == null) {
                 throw new IllegalStateException("Projected field '%s' does not exist in table fields %s"
                         .formatted(projectedField, fieldNames));
             }
