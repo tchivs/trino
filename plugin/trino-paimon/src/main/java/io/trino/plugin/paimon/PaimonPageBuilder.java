@@ -25,6 +25,7 @@ import io.trino.spi.block.MapValueBuilder;
 import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.block.RowValueBuilder;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.LongTimestamp;
@@ -63,6 +64,7 @@ import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampT
 import static io.trino.plugin.paimon.PaimonTrinoTypeConversions.paimonTimestampToTrinoTimestampWithTimeZone;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.Chars.truncateToLengthAndTrimSpaces;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.Decimals.encodeShortScaledValue;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -134,7 +136,10 @@ public final class PaimonPageBuilder
         if (type.getBaseName().equals(JSON)) {
             type.writeSlice(output, jsonParse(utf8Slice(((Variant) value).toJson())));
         }
-        else if (type instanceof VarcharType || type instanceof io.trino.spi.type.CharType) {
+        else if (type instanceof CharType charType) {
+            type.writeSlice(output, truncateToLengthAndTrimSpaces(wrappedBuffer(((BinaryString) value).toBytes()), charType));
+        }
+        else if (type instanceof VarcharType) {
             type.writeSlice(output, wrappedBuffer(((BinaryString) value).toBytes()));
         }
         else if (type instanceof VarbinaryType) {

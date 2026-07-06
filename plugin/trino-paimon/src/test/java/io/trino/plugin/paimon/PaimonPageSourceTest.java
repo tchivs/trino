@@ -45,6 +45,7 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.CharType;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.MapType;
@@ -312,6 +313,25 @@ public class PaimonPageSourceTest
 
         assertThat(page.getPositionCount()).isEqualTo(1);
         assertThat(TypeUtils.readNativeValue(JSON_TYPE, page.getBlock(0), 0)).isEqualTo(jsonParse(Slices.utf8Slice(json)));
+        assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
+    void testCharValuesReadFromPaddedPaimonRepresentation()
+    {
+        GenericRow row = new GenericRow(1);
+        row.setField(0, BinaryString.fromString("a    "));
+
+        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(row), List.of(
+                PaimonColumnHandle.of("char_value", DataTypes.CHAR(5))),
+                OptionalLong.empty());
+
+        Page page = pageSource.getNextPage();
+        CharType charType = CharType.createCharType(5);
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(((Slice) TypeUtils.readNativeValue(charType, page.getBlock(0), 0)).toStringUtf8()).isEqualTo("a");
+        assertThat(charType.getObjectValue(SESSION, page.getBlock(0), 0)).isEqualTo("a    ");
         assertThat(pageSource.getNextPage()).isNull();
     }
 
