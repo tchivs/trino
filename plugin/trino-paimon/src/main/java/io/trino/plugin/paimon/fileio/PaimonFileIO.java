@@ -25,6 +25,7 @@ import org.apache.paimon.fs.FileStatus;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.fs.SeekableInputStream;
+import org.apache.paimon.fs.TwoPhaseOutputStream;
 import org.apache.paimon.utils.FileIOUtils;
 
 import java.io.IOException;
@@ -92,6 +93,27 @@ public class PaimonFileIO
             }
             throw e;
         }
+    }
+
+    @Override
+    public TwoPhaseOutputStream newTwoPhaseOutputStream(Path path, boolean overwrite)
+            throws IOException
+    {
+        if (!objectStore) {
+            return FileIO.super.newTwoPhaseOutputStream(path, overwrite);
+        }
+
+        Location location = Location.of(path.toString());
+        if (existFile(location)) {
+            if (!overwrite) {
+                throw new FileAlreadyExistsException(path.toString());
+            }
+            trinoFileSystem.deleteFile(location);
+        }
+
+        return new DirectObjectStoreTwoPhaseOutputStream(
+                path,
+                new PositionOutputStreamWrapper(trinoFileSystem.newOutputFile(location).create()));
     }
 
     @Override
@@ -433,5 +455,110 @@ public class PaimonFileIO
     private static boolean isDirectoryMarker(Location location)
     {
         return location.fileName().equals(DIRECTORY_MARKER_FILE_NAME);
+    }
+
+    private static class DirectObjectStoreTwoPhaseOutputStream
+            extends TwoPhaseOutputStream
+    {
+        private final Path targetPath;
+        private final PositionOutputStream outputStream;
+
+        private boolean closed;
+
+        private DirectObjectStoreTwoPhaseOutputStream(Path targetPath, PositionOutputStream outputStream)
+        {
+            this.targetPath = requireNonNull(targetPath, "targetPath is null");
+            this.outputStream = requireNonNull(outputStream, "outputStream is null");
+        }
+
+        @Override
+        public void write(int b)
+                throws IOException
+        {
+            outputStream.write(b);
+        }
+
+        @Override
+        public void write(byte[] bytes)
+                throws IOException
+        {
+            outputStream.write(bytes);
+        }
+
+        @Override
+        public void write(byte[] bytes, int off, int len)
+                throws IOException
+        {
+            outputStream.write(bytes, off, len);
+        }
+
+        @Override
+        public void flush()
+                throws IOException
+        {
+            outputStream.flush();
+        }
+
+        @Override
+        public long getPos()
+                throws IOException
+        {
+            return outputStream.getPos();
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            if (!closed) {
+                outputStream.close();
+                closed = true;
+            }
+        }
+
+        @Override
+        public Committer closeForCommit()
+                throws IOException
+        {
+            close();
+            return new DirectObjectStoreCommitter(targetPath);
+        }
+    }
+
+    private static class DirectObjectStoreCommitter
+            implements TwoPhaseOutputStream.Committer
+    {
+        private static final long serialVersionUID = 1L;
+
+        private final Path targetPath;
+
+        private DirectObjectStoreCommitter(Path targetPath)
+        {
+            this.targetPath = requireNonNull(targetPath, "targetPath is null");
+        }
+
+        @Override
+        public void commit(FileIO fileIO)
+        {
+            // Trino object-store streams publish data when closeForCommit closes the upload.
+        }
+
+        @Override
+        public void discard(FileIO fileIO)
+                throws IOException
+        {
+            fileIO.deleteQuietly(targetPath);
+        }
+
+        @Override
+        public Path targetPath()
+        {
+            return targetPath;
+        }
+
+        @Override
+        public void clean(FileIO fileIO)
+        {
+        }
     }
 }

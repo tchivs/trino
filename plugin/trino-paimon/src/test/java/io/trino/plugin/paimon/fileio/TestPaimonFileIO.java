@@ -23,10 +23,13 @@ import io.trino.filesystem.TrinoOutputFile;
 import io.trino.filesystem.local.LocalFileSystem;
 import io.trino.filesystem.memory.MemoryFileSystem;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.fs.TwoPhaseOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collection;
@@ -298,6 +301,57 @@ public class TestPaimonFileIO
         assertThat(fileIO.exists(source)).isFalse();
         assertThat(fileIO.exists(target)).isTrue();
         assertThat(fileIO.readFileUtf8(target)).isEqualTo("schema");
+    }
+
+    @Test
+    public void testObjectStoreTwoPhaseOutputStreamCommitsWithoutRename()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/data/data-0.parquet");
+
+        TwoPhaseOutputStream out = fileIO.newTwoPhaseOutputStream(target, false);
+        out.write("data".getBytes(StandardCharsets.UTF_8));
+        assertThat(out.getPos()).isEqualTo(4);
+
+        TwoPhaseOutputStream.Committer committer = out.closeForCommit();
+        committer.commit(fileIO);
+
+        assertThat(committer.targetPath()).isEqualTo(target);
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("data");
+    }
+
+    @Test
+    public void testObjectStoreTwoPhaseOutputStreamDiscardDeletesTarget()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/data/data-0.parquet");
+
+        TwoPhaseOutputStream out = fileIO.newTwoPhaseOutputStream(target, false);
+        out.write("data".getBytes(StandardCharsets.UTF_8));
+
+        TwoPhaseOutputStream.Committer committer = out.closeForCommit();
+        assertThat(fileIO.exists(target)).isTrue();
+
+        committer.discard(fileIO);
+
+        assertThat(fileIO.exists(target)).isFalse();
+    }
+
+    @Test
+    public void testObjectStoreTwoPhaseOutputStreamRejectsExistingTarget()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/data/data-0.parquet");
+
+        fileIO.writeFile(target, "old-data", false);
+
+        assertThatThrownBy(() -> fileIO.newTwoPhaseOutputStream(target, false))
+                .isInstanceOf(FileAlreadyExistsException.class)
+                .hasMessageContaining(target.toString());
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("old-data");
     }
 
     @Test
