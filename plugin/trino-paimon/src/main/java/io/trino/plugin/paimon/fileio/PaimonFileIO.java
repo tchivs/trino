@@ -29,7 +29,9 @@ import org.apache.paimon.fs.TwoPhaseOutputStream;
 import org.apache.paimon.utils.FileIOUtils;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -81,14 +83,30 @@ public class PaimonFileIO
     public PositionOutputStream newOutputStream(Path path, boolean overwrite)
             throws IOException
     {
-        TrinoOutputFile trinoOutputFile = trinoFileSystem.newOutputFile(Location.of(path.toString()));
+        Location location = Location.of(path.toString());
+        TrinoOutputFile trinoOutputFile = trinoFileSystem.newOutputFile(location);
+
+        if (objectStore) {
+            if (!overwrite && existFile(location)) {
+                throw new FileAlreadyExistsException(path.toString());
+            }
+            try {
+                return new PositionOutputStreamWrapper(trinoOutputFile.create());
+            }
+            catch (FileAlreadyExistsException e) {
+                if (overwrite) {
+                    return new ObjectStoreOverwriteOutputStream(trinoOutputFile);
+                }
+                throw e;
+            }
+        }
 
         try {
             return new PositionOutputStreamWrapper(trinoOutputFile.create());
         }
         catch (FileAlreadyExistsException e) {
             if (overwrite) {
-                trinoFileSystem.deleteFile(Location.of(path.toString()));
+                trinoFileSystem.deleteFile(location);
                 return new PositionOutputStreamWrapper(trinoOutputFile.create());
             }
             throw e;
@@ -108,7 +126,7 @@ public class PaimonFileIO
             if (!overwrite) {
                 throw new FileAlreadyExistsException(path.toString());
             }
-            trinoFileSystem.deleteFile(location);
+            throw new IOException("Object-store two-phase overwrite is not supported for existing file: " + path);
         }
 
         return new DirectObjectStoreTwoPhaseOutputStream(
@@ -455,6 +473,80 @@ public class PaimonFileIO
     private static boolean isDirectoryMarker(Location location)
     {
         return location.fileName().equals(DIRECTORY_MARKER_FILE_NAME);
+    }
+
+    private static class ObjectStoreOverwriteOutputStream
+            extends PositionOutputStream
+    {
+        private final TrinoOutputFile outputFile;
+        private final java.nio.file.Path tempFile;
+        private final OutputStream outputStream;
+
+        private boolean closed;
+        private long position;
+
+        private ObjectStoreOverwriteOutputStream(TrinoOutputFile outputFile)
+                throws IOException
+        {
+            this.outputFile = requireNonNull(outputFile, "outputFile is null");
+            this.tempFile = Files.createTempFile("trino-paimon-object-store-overwrite-", ".tmp");
+            this.outputStream = Files.newOutputStream(tempFile);
+        }
+
+        @Override
+        public long getPos()
+        {
+            return position;
+        }
+
+        @Override
+        public void write(int b)
+                throws IOException
+        {
+            outputStream.write(b);
+            position++;
+        }
+
+        @Override
+        public void write(byte[] bytes)
+                throws IOException
+        {
+            outputStream.write(bytes);
+            position += bytes.length;
+        }
+
+        @Override
+        public void write(byte[] bytes, int off, int len)
+                throws IOException
+        {
+            outputStream.write(bytes, off, len);
+            position += len;
+        }
+
+        @Override
+        public void flush()
+                throws IOException
+        {
+            outputStream.flush();
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            if (closed) {
+                return;
+            }
+
+            try {
+                outputStream.close();
+                outputFile.createOrOverwrite(Files.readAllBytes(tempFile));
+            }
+            finally {
+                closed = true;
+                Files.deleteIfExists(tempFile);
+            }
+        }
     }
 
     private static class DirectObjectStoreTwoPhaseOutputStream

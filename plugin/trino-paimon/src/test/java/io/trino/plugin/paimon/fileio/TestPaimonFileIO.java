@@ -22,12 +22,15 @@ import io.trino.filesystem.TrinoInputStream;
 import io.trino.filesystem.TrinoOutputFile;
 import io.trino.filesystem.local.LocalFileSystem;
 import io.trino.filesystem.memory.MemoryFileSystem;
+import io.trino.memory.context.AggregatedMemoryContext;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.TwoPhaseOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.time.Instant;
@@ -304,6 +307,35 @@ public class TestPaimonFileIO
     }
 
     @Test
+    public void testObjectStoreOutputStreamRejectsExistingTargetWhenOverwriteDisabled()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new OverwritingCreateFileSystem());
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/schema/schema-0");
+
+        fileIO.writeFile(target, "old-schema", false);
+
+        assertThatThrownBy(() -> fileIO.writeFile(target, "new-schema", false))
+                .isInstanceOf(FileAlreadyExistsException.class)
+                .hasMessageContaining(target.toString());
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("old-schema");
+    }
+
+    @Test
+    public void testObjectStoreOutputStreamOverwriteDoesNotDeleteBeforeCreate()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new DeleteRejectingFileSystem());
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/schema/schema-0");
+
+        fileIO.writeFile(target, "old-schema", false);
+
+        fileIO.writeFile(target, "new-schema", true);
+
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("new-schema");
+    }
+
+    @Test
     public void testObjectStoreTwoPhaseOutputStreamCommitsWithoutRename()
             throws IOException
     {
@@ -350,6 +382,22 @@ public class TestPaimonFileIO
 
         assertThatThrownBy(() -> fileIO.newTwoPhaseOutputStream(target, false))
                 .isInstanceOf(FileAlreadyExistsException.class)
+                .hasMessageContaining(target.toString());
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("old-data");
+    }
+
+    @Test
+    public void testObjectStoreTwoPhaseOutputStreamRejectsExistingTargetWhenOverwriteEnabled()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new DeleteRejectingFileSystem());
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/data/data-0.parquet");
+
+        fileIO.writeFile(target, "old-data", false);
+
+        assertThatThrownBy(() -> fileIO.newTwoPhaseOutputStream(target, true))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("Object-store two-phase overwrite is not supported")
                 .hasMessageContaining(target.toString());
         assertThat(fileIO.readFileUtf8(target)).isEqualTo("old-data");
     }
@@ -643,6 +691,56 @@ public class TestPaimonFileIO
                 throw new IOException("Cannot list directories under regular file: " + location);
             }
             return super.listDirectories(location);
+        }
+    }
+
+    private static class OverwritingCreateFileSystem
+            extends NoRenameFileSystem
+    {
+        @Override
+        public TrinoOutputFile newOutputFile(Location location)
+        {
+            TrinoOutputFile delegate = super.newOutputFile(location);
+            return new TrinoOutputFile()
+            {
+                @Override
+                public void createOrOverwrite(byte[] data)
+                        throws IOException
+                {
+                    delegate.createOrOverwrite(data);
+                }
+
+                @Override
+                public OutputStream create(AggregatedMemoryContext memoryContext)
+                {
+                    return new ByteArrayOutputStream()
+                    {
+                        @Override
+                        public void close()
+                                throws IOException
+                        {
+                            delegate.createOrOverwrite(toByteArray());
+                        }
+                    };
+                }
+
+                @Override
+                public Location location()
+                {
+                    return delegate.location();
+                }
+            };
+        }
+    }
+
+    private static class DeleteRejectingFileSystem
+            extends NoRenameFileSystem
+    {
+        @Override
+        public void deleteFile(Location location)
+                throws IOException
+        {
+            throw new IOException("deleteFile should not be called for " + location);
         }
     }
 
