@@ -47,6 +47,7 @@ public class PaimonPageSource
     private boolean isFinished;
     private boolean closed;
     private long numReturn;
+    private long readTimeNanos;
 
     public PaimonPageSource(RecordReader<InternalRow> reader, List<? extends ColumnHandle> projectedColumns,
             OptionalLong limit)
@@ -79,7 +80,7 @@ public class PaimonPageSource
     @Override
     public long getReadTimeNanos()
     {
-        return 0;
+        return readTimeNanos;
     }
 
     @Override
@@ -98,6 +99,7 @@ public class PaimonPageSource
     public Page getNextPage()
     {
         return ClassLoaderUtils.runWithContextClassLoader(() -> {
+            long start = System.nanoTime();
             try {
                 return nextPage();
             }
@@ -116,6 +118,9 @@ public class PaimonPageSource
             catch (RuntimeException e) {
                 closeAllSuppress(e, this);
                 throw PaimonPageSourceProvider.wrapPaimonReadException(e);
+            }
+            finally {
+                readTimeNanos += System.nanoTime() - start;
             }
         }, PaimonPageSource.class.getClassLoader());
     }

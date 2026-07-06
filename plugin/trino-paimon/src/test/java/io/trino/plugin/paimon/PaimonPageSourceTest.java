@@ -102,6 +102,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Supplier;
 
 import static io.airlift.slice.Slices.EMPTY_SLICE;
@@ -181,6 +182,58 @@ public class PaimonPageSourceTest
         assertThat(pageSource.getCompletedPositions()).hasValue(1);
         assertThat(pageSource.getNextPage()).isNull();
         assertThat(pageSource.getCompletedPositions()).hasValue(1);
+    }
+
+    @Test
+    void testReadTimeNanosReportsGetNextPageWork()
+    {
+        GenericRow row = new GenericRow(1);
+        row.setField(0, 7);
+        AtomicBoolean returned = new AtomicBoolean();
+        RecordReader<InternalRow> reader = new RecordReader<>()
+        {
+            @Override
+            public RecordIterator<InternalRow> readBatch()
+            {
+                LockSupport.parkNanos(1_000_000);
+                if (!returned.compareAndSet(false, true)) {
+                    return null;
+                }
+                return new RecordIterator<>()
+                {
+                    private boolean hasNext = true;
+
+                    @Override
+                    public InternalRow next()
+                    {
+                        if (!hasNext) {
+                            return null;
+                        }
+                        hasNext = false;
+                        return row;
+                    }
+
+                    @Override
+                    public void releaseBatch() {}
+                };
+            }
+
+            @Override
+            public void close() {}
+        };
+        PaimonPageSource pageSource = new PaimonPageSource(reader, List.of(
+                PaimonColumnHandle.of("id", DataTypes.INT())),
+                OptionalLong.empty());
+
+        assertThat(pageSource.getReadTimeNanos()).isZero();
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        long readTimeAfterFirstPage = pageSource.getReadTimeNanos();
+        assertThat(readTimeAfterFirstPage).isPositive();
+        assertThat(pageSource.getNextPage()).isNull();
+        assertThat(pageSource.getReadTimeNanos()).isGreaterThanOrEqualTo(readTimeAfterFirstPage);
     }
 
     @Test
