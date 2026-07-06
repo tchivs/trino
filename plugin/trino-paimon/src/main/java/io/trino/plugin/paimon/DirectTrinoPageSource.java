@@ -156,13 +156,12 @@ public class DirectTrinoPageSource
         if (current == null) {
             throw new RuntimeException("Current is null, should not invoke advance");
         }
+        PageSourceHandle exhausted = current;
+        current = null;
         try {
-            accumulateCompletedState(current);
-            current.close();
-            current = null;
+            closePageSource(exhausted);
         }
         catch (IOException e) {
-            current = null;
             throw new UncheckedIOException("error happens while advance and close old page source.", e);
         }
         current = pageSourceQueue.poll();
@@ -176,21 +175,19 @@ public class DirectTrinoPageSource
         }
         closed = true;
         IOException exception = null;
-        try {
-            if (current != null) {
-                accumulateCompletedState(current);
-                current.close();
-                current = null;
+        if (current != null) {
+            try {
+                closePageSource(current);
             }
-        }
-        catch (IOException e) {
-            exception = e;
+            catch (IOException e) {
+                exception = e;
+            }
+            current = null;
         }
         try {
             for (PageSourceHandle source : pageSourceQueue) {
                 try {
-                    accumulateCompletedState(source);
-                    source.close();
+                    closePageSource(source);
                 }
                 catch (IOException e) {
                     if (exception == null) {
@@ -276,6 +273,41 @@ public class DirectTrinoPageSource
         completedBytes += pageSource.getCompletedBytes();
         completedReadTimeNanos += pageSource.getReadTimeNanos();
         completedMetrics = completedMetrics.mergeWith(pageSource.getMetrics());
+    }
+
+    private void closePageSource(PageSourceHandle source)
+            throws IOException
+    {
+        IOException failure = null;
+        try {
+            accumulateCompletedState(source);
+        }
+        catch (RuntimeException e) {
+            failure = new IOException("Failed to accumulate completed state before closing Paimon direct page source", e);
+        }
+        try {
+            source.close();
+        }
+        catch (IOException e) {
+            if (failure == null) {
+                failure = e;
+            }
+            else {
+                failure.addSuppressed(e);
+            }
+        }
+        catch (RuntimeException e) {
+            IOException closeFailure = new IOException("Failed to close Paimon direct page source", e);
+            if (failure == null) {
+                failure = closeFailure;
+            }
+            else {
+                failure.addSuppressed(closeFailure);
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     private static LinkedList<PageSourceHandle> wrapPageSources(LinkedList<ConnectorPageSource> pageSourceQueue)

@@ -87,6 +87,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
@@ -2450,6 +2451,68 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectPageSourceCloseStillClosesSourcesWhenCompletedStateFails()
+    {
+        RuntimeException metricsFailure = new RuntimeException("completed state unavailable");
+        AtomicBoolean firstClosed = new AtomicBoolean();
+        AtomicBoolean secondClosed = new AtomicBoolean();
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(
+                new CompletedStateFailingPageSource(metricsFailure, firstClosed),
+                new FailingPageSource(new RuntimeException("unused"), secondClosed))),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::close)
+                .isInstanceOfSatisfying(UncheckedIOException.class, exception -> {
+                    assertThat(exception.getCause()).hasMessage("Failed to accumulate completed state before closing Paimon direct page source");
+                    assertThat(exception.getCause().getCause()).isSameAs(metricsFailure);
+                });
+        assertThat(firstClosed).isTrue();
+        assertThat(secondClosed).isTrue();
+    }
+
+    @Test
+    void testDirectPageSourceCloseStillClosesQueuedSourcesWhenCloseFailsWithRuntimeException()
+    {
+        RuntimeException closeFailure = new RuntimeException("runtime close failed");
+        AtomicBoolean firstClosed = new AtomicBoolean();
+        AtomicBoolean secondClosed = new AtomicBoolean();
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(
+                new RuntimeCloseFailingPageSource(closeFailure, firstClosed),
+                new FailingPageSource(new RuntimeException("unused"), secondClosed))),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::close)
+                .isInstanceOfSatisfying(UncheckedIOException.class, exception -> {
+                    assertThat(exception.getCause()).hasMessage("Failed to close Paimon direct page source");
+                    assertThat(exception.getCause().getCause()).isSameAs(closeFailure);
+                });
+        assertThat(firstClosed).isTrue();
+        assertThat(secondClosed).isTrue();
+    }
+
+    @Test
+    void testDirectPageSourceAdvanceStillClosesSourcesWhenCompletedStateFails()
+    {
+        RuntimeException metricsFailure = new RuntimeException("completed state unavailable");
+        AtomicBoolean firstClosed = new AtomicBoolean();
+        AtomicBoolean secondClosed = new AtomicBoolean();
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(
+                new CompletedStateFailingPageSource(metricsFailure, firstClosed),
+                new FailingPageSource(new RuntimeException("unused"), secondClosed))),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::getNextPage)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).hasMessage("Failed to accumulate completed state before closing Paimon direct page source");
+                    assertThat(exception.getCause().getCause()).isSameAs(metricsFailure);
+                });
+        assertThat(firstClosed).isTrue();
+        assertThat(secondClosed).isTrue();
+    }
+
+    @Test
     void testDirectPageSourceRejectsMalformedInputs()
     {
         assertThatThrownBy(() -> new DirectTrinoPageSource(null, OptionalLong.empty()))
@@ -3617,6 +3680,105 @@ public class PaimonPageSourceTest
             if (closeFailure != null) {
                 throw closeFailure;
             }
+        }
+    }
+
+    private static class CompletedStateFailingPageSource
+            implements ConnectorPageSource
+    {
+        private final RuntimeException failure;
+        private final AtomicBoolean closed;
+
+        private CompletedStateFailingPageSource(RuntimeException failure, AtomicBoolean closed)
+        {
+            this.failure = requireNonNull(failure, "failure is null");
+            this.closed = requireNonNull(closed, "closed is null");
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            throw failure;
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return 0;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return true;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            return null;
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public void close()
+        {
+            closed.set(true);
+        }
+    }
+
+    private static class RuntimeCloseFailingPageSource
+            implements ConnectorPageSource
+    {
+        private final RuntimeException closeFailure;
+        private final AtomicBoolean closed;
+
+        private RuntimeCloseFailingPageSource(RuntimeException closeFailure, AtomicBoolean closed)
+        {
+            this.closeFailure = requireNonNull(closeFailure, "closeFailure is null");
+            this.closed = requireNonNull(closed, "closed is null");
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return 0;
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return 0;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return true;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            return null;
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public void close()
+        {
+            closed.set(true);
+            throw closeFailure;
         }
     }
 
