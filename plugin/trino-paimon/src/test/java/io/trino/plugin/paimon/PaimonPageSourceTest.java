@@ -2778,6 +2778,21 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDeletionVectorWrapperRejectsOverflowingRowPositions()
+    {
+        PositionTrackingPageSource source = new PositionTrackingPageSource(new Page(3, bigintBlock(10, 20, 30)),
+                Long.MAX_VALUE - 1);
+        PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(source,
+                Optional.of(emptyDeletionVector()));
+
+        assertThatThrownBy(wrapper::getNextPage)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Deletion-vector row position overflow for start position %s and page position 2",
+                        Long.MAX_VALUE - 1);
+        assertThat(source.closed()).isTrue();
+    }
+
+    @Test
     void testDeletionVectorWrapperCompletedPositionsSaturateAtLongMaxValue()
             throws Exception
     {
@@ -3560,6 +3575,7 @@ public class PaimonPageSourceTest
         private final long completedPositionsBeforePage;
         private boolean returned;
         private boolean completedPositionsReadBeforePage;
+        private boolean closed;
 
         private PositionTrackingPageSource(Page page, long completedPositionsBeforePage)
         {
@@ -3612,11 +3628,19 @@ public class PaimonPageSourceTest
         }
 
         @Override
-        public void close() {}
+        public void close()
+        {
+            closed = true;
+        }
 
         private boolean completedPositionsReadBeforePage()
         {
             return completedPositionsReadBeforePage;
+        }
+
+        private boolean closed()
+        {
+            return closed;
         }
     }
 

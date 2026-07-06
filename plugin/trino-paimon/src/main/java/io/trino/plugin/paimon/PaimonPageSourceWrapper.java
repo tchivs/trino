@@ -115,7 +115,7 @@ public class PaimonPageSourceWrapper
         int[] retained = new int[pageCount];
         int retainedLength = 0;
         for (int pagePosition = 0; pagePosition < pageCount; pagePosition++) {
-            if (!deletionVector.isDeleted(startPosition + pagePosition)) {
+            if (!deletionVector.isDeleted(deletionVectorRowPosition(startPosition, pagePosition))) {
                 retained[retainedLength++] = pagePosition;
             }
         }
@@ -124,6 +124,18 @@ public class PaimonPageSourceWrapper
         }
 
         return page.getPositions(retained, 0, retainedLength);
+    }
+
+    @VisibleForTesting
+    static long deletionVectorRowPosition(long startPosition, int pagePosition)
+    {
+        try {
+            return Math.addExact(startPosition, pagePosition);
+        }
+        catch (ArithmeticException e) {
+            throw new IllegalStateException("Deletion-vector row position overflow for start position %s and page position %s"
+                    .formatted(startPosition, pagePosition), e);
+        }
     }
 
     @Override
