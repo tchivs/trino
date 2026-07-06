@@ -288,13 +288,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 Collections.emptyMap()));
         Catalog sessionCatalog = catalog.forSession(session);
         Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
-        validateNoCaseInsensitiveDuplicateCreatedFieldNames(table.rowType().getFields(), tableMetadata.getTable());
+        Map<String, DataField> createdFieldsByLowerName = createdTableFieldsByLowerName(table.rowType().getFields(),
+                tableMetadata.getTable());
         Snapshot.Operation createTableOperation = replace
                 ? Snapshot.Operation.CREATE_OR_REPLACE_TABLE_AS_SELECT
                 : Snapshot.Operation.CREATE_TABLE_AS_SELECT;
         return tableHandle.withWriteColumns(tableMetadata.getColumns().stream()
                 .map(column -> {
-                    DataField field = createdTableField(table.rowType().getFields(), column.getName(),
+                    DataField field = createdTableField(createdFieldsByLowerName, column.getName(),
                             tableMetadata.getTable());
                     return PaimonColumnHandle.of(field.name(), field.type(), typeManager);
                 })
@@ -302,27 +303,31 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .withCreateTableOperation(createTableOperation);
     }
 
-    private static void validateNoCaseInsensitiveDuplicateCreatedFieldNames(List<DataField> fields,
-            SchemaTableName tableName)
+    static Map<String, DataField> createdTableFieldsByLowerName(List<DataField> fields, SchemaTableName tableName)
     {
-        Set<String> fieldNames = new HashSet<>();
+        requireNonNull(fields, "fields is null");
+        requireNonNull(tableName, "tableName is null");
+        Map<String, DataField> fieldsByLowerName = new LinkedHashMap<>();
         for (DataField field : fields) {
-            String lowerFieldName = FieldNameUtils.toLowerCase(field.name());
-            if (!fieldNames.add(lowerFieldName)) {
+            DataField createdField = requireNonNull(field, "fields contains null field");
+            String lowerFieldName = FieldNameUtils.toLowerCase(createdField.name());
+            if (fieldsByLowerName.putIfAbsent(lowerFieldName, createdField) != null) {
                 throw new IllegalStateException(
                         "Created Paimon table '%s' schema contains case-insensitive duplicate field name '%s'"
                                 .formatted(tableName, lowerFieldName));
             }
         }
+        return Collections.unmodifiableMap(fieldsByLowerName);
     }
 
-    private static DataField createdTableField(List<DataField> fields, String columnName, SchemaTableName tableName)
+    private static DataField createdTableField(Map<String, DataField> fieldsByLowerName, String columnName,
+            SchemaTableName tableName)
     {
+        requireNonNull(fieldsByLowerName, "fieldsByLowerName is null");
         String lowerColumnName = FieldNameUtils.toLowerCase(columnName);
-        for (DataField field : fields) {
-            if (FieldNameUtils.toLowerCase(field.name()).equals(lowerColumnName)) {
-                return field;
-            }
+        DataField field = fieldsByLowerName.get(lowerColumnName);
+        if (field != null) {
+            return field;
         }
         throw new IllegalStateException(format(
                 "Created Paimon table '%s' is missing write column '%s'",

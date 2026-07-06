@@ -108,6 +108,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.lang.reflect.Proxy;
 import java.time.LocalDate;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -119,6 +120,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
@@ -6277,6 +6279,38 @@ public class PaimonMetadataTableModeTest
         assertThat(handle.getWriteColumns()).hasValueSatisfying(writeColumns ->
                 assertThat(writeColumns).extracting(PaimonColumnHandle::getColumnName)
                         .containsExactly("id", "value"));
+    }
+
+    @Test
+    public void testCreatedTableFieldIndexScansCreatedFieldsOnce()
+    {
+        int fieldCount = 100;
+        AtomicInteger fieldReads = new AtomicInteger();
+        List<DataField> fields = new AbstractList<>()
+        {
+            @Override
+            public DataField get(int index)
+            {
+                fieldReads.incrementAndGet();
+                return DataTypes.FIELD(index, "Column_" + index, DataTypes.INT());
+            }
+
+            @Override
+            public int size()
+            {
+                return fieldCount;
+            }
+        };
+
+        Map<String, DataField> fieldsByLowerName = PaimonMetadata.createdTableFieldsByLowerName(
+                fields,
+                new SchemaTableName("schema", "table"));
+
+        assertThat(fieldReads.get()).isEqualTo(fieldCount);
+        for (int index = 0; index < fieldCount; index++) {
+            assertThat(fieldsByLowerName.get("column_" + index).id()).isEqualTo(index);
+        }
+        assertThat(fieldReads.get()).isEqualTo(fieldCount);
     }
 
     @Test
