@@ -26,6 +26,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
 import static io.trino.plugin.base.util.Closables.closeAllSuppress;
+import static io.trino.plugin.paimon.PaimonLongUtils.saturatedAdd;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -124,15 +125,17 @@ public class DirectTrinoPageSource
                     continue;
                 }
 
-                if (limit.isPresent() && completedPositions + dataPage.getPositionCount() > limit.getAsLong()) {
+                if (limit.isPresent() && dataPage.getPositionCount() > limit.getAsLong() - completedPositions) {
                     int remainingPositions = toIntExact(limit.getAsLong() - completedPositions);
                     Page limitedPage = dataPage.getRegion(0, remainingPositions).getLoadedPage();
-                    completedPositions += limitedPage.getPositionCount();
+                    completedPositions = saturatedAdd(completedPositions, limitedPage.getPositionCount(),
+                            "page position count");
                     close();
                     return limitedPage;
                 }
 
-                completedPositions += dataPage.getPositionCount();
+                completedPositions = saturatedAdd(completedPositions, dataPage.getPositionCount(),
+                        "page position count");
                 return dataPage;
             }
             return null;

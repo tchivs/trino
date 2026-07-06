@@ -32,6 +32,7 @@ import java.util.OptionalLong;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.base.util.Closables.closeAllSuppress;
+import static io.trino.plugin.paimon.PaimonLongUtils.saturatedAdd;
 import static java.util.Objects.requireNonNull;
 
 public class PaimonPageSource
@@ -140,7 +141,7 @@ public class PaimonPageSource
         }
         int count = 0;
         while (count < ROWS_PER_REQUEST && !pageBuilder.isFull()) {
-            if (limit.isPresent() && numReturn + count >= limit.getAsLong()) {
+            if (limit.isPresent() && count >= limit.getAsLong() - numReturn) {
                 return finishPage(count);
             }
 
@@ -171,7 +172,7 @@ public class PaimonPageSource
         if (count == 0) {
             return null;
         }
-        numReturn += count;
+        numReturn = saturatedAdd(numReturn, count, "page position count");
         return pageBuilder.build();
     }
 

@@ -24,6 +24,7 @@ import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.plugin.paimon.PaimonLongUtils.saturatedAdd;
 import static java.util.Objects.requireNonNull;
 
 public class PaimonSplitSource
@@ -70,16 +71,8 @@ public class PaimonSplitSource
         if (limit.isEmpty()) {
             return;
         }
-        split.decodeSplit().mergedRowCount().ifPresent(rowCount -> count = saturatedAdd(count, rowCount));
-    }
-
-    private static long saturatedAdd(long left, long right)
-    {
-        checkArgument(right >= 0, "merged row count must be non-negative: %s", right);
-        if (Long.MAX_VALUE - left < right) {
-            return Long.MAX_VALUE;
-        }
-        return left + right;
+        split.decodeSplit().mergedRowCount()
+                .ifPresent(rowCount -> count = saturatedAdd(count, rowCount, "merged row count"));
     }
 
     @Override

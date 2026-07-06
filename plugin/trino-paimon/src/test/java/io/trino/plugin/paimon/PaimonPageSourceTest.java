@@ -87,6 +87,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -182,6 +183,25 @@ public class PaimonPageSourceTest
         assertThat(pageSource.getCompletedPositions()).hasValue(1);
         assertThat(pageSource.getNextPage()).isNull();
         assertThat(pageSource.getCompletedPositions()).hasValue(1);
+    }
+
+    @Test
+    void testPaimonPageSourceCompletedPositionsSaturateAtLongMaxValue()
+            throws Exception
+    {
+        GenericRow row = new GenericRow(1);
+        row.setField(0, 7);
+        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(row), List.of(
+                PaimonColumnHandle.of("id", DataTypes.INT())),
+                OptionalLong.empty());
+        setLongField(pageSource, "numReturn", Long.MAX_VALUE - 1);
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(pageSource.getCompletedPositions()).hasValue(Long.MAX_VALUE);
+        assertThat(pageSource.getNextPage()).isNull();
+        assertThat(pageSource.getCompletedPositions()).hasValue(Long.MAX_VALUE);
     }
 
     @Test
@@ -2135,6 +2155,41 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectPageSourceLimitNearLongMaxValueDoesNotOverflow()
+            throws Exception
+    {
+        TestingPageSource source = new TestingPageSource(new Page(3, bigintBlock(1, 2, 3)));
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(source)),
+                OptionalLong.of(Long.MAX_VALUE));
+        setLongField(pageSource, "completedPositions", Long.MAX_VALUE - 1);
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 0)).isEqualTo(1L);
+        assertThat(pageSource.getCompletedPositions()).hasValue(Long.MAX_VALUE);
+        assertThat(pageSource.getNextPage()).isNull();
+        assertThat(source.closed()).isTrue();
+    }
+
+    @Test
+    void testDirectPageSourceCompletedPositionsSaturateAtLongMaxValue()
+            throws Exception
+    {
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(
+                new TestingPageSource(new Page(3, bigintBlock(1, 2, 3))))),
+                OptionalLong.empty());
+        setLongField(pageSource, "completedPositions", Long.MAX_VALUE - 1);
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(3);
+        assertThat(pageSource.getCompletedPositions()).hasValue(Long.MAX_VALUE);
+        assertThat(pageSource.getNextPage()).isNull();
+        assertThat(pageSource.getCompletedPositions()).hasValue(Long.MAX_VALUE);
+    }
+
+    @Test
     void testDirectPageSourceLoadsLimitedPageBeforeClosingSource()
     {
         AtomicBoolean sourceClosed = new AtomicBoolean();
@@ -2547,6 +2602,22 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDeletionVectorWrapperCompletedPositionsSaturateAtLongMaxValue()
+            throws Exception
+    {
+        PositionTrackingPageSource source = new PositionTrackingPageSource(new Page(3, bigintBlock(10, 20, 30)),
+                5);
+        PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(source,
+                Optional.of(emptyDeletionVector()));
+        setLongField(wrapper, "completedPositions", Long.MAX_VALUE - 1);
+
+        Page page = wrapper.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(3);
+        assertThat(wrapper.getCompletedPositions()).hasValue(Long.MAX_VALUE);
+    }
+
+    @Test
     void testDeletionVectorWrapperClosesSourceWhenDeletionFilteringFails()
     {
         AtomicBoolean closed = new AtomicBoolean();
@@ -2951,6 +3022,14 @@ public class PaimonPageSourceTest
                     case "toString" -> "testing-inner-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    private static void setLongField(Object target, String fieldName, long value)
+            throws ReflectiveOperationException
+    {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.setLong(target, value);
     }
 
     private static class TestingRecordReader

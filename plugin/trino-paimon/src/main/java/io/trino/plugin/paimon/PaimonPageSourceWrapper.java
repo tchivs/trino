@@ -25,6 +25,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 
 import static io.trino.plugin.base.util.Closables.closeAllSuppress;
+import static io.trino.plugin.paimon.PaimonLongUtils.saturatedAdd;
 import static java.util.Objects.requireNonNull;
 
 public class PaimonPageSourceWrapper
@@ -91,7 +92,8 @@ public class PaimonPageSourceWrapper
             int pageCount = next.getPositionCount();
 
             Page retained = convertToRetained(next, deletionVector.get(), startPosition.orElseThrow(), pageCount);
-            completedPositions += retained.getPositionCount();
+            completedPositions = saturatedAdd(completedPositions, retained.getPositionCount(),
+                    "retained page position count");
             return retained;
         }
         catch (RuntimeException e) {
