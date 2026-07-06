@@ -498,9 +498,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
                                 : "Paimon commit uses features which are not supported by the Trino connector: " + detail,
                         unsupportedOperationException);
             }
-            if (e instanceof IllegalArgumentException || e instanceof IllegalStateException) {
-                throw (RuntimeException) e;
-            }
             if (e instanceof RuntimeException runtimeException) {
                 throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to commit Paimon write fragments", runtimeException);
             }

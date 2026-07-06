@@ -3246,6 +3246,28 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testFinishInsertIllegalStateCommitFailuresUsePaimonCommitError()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        RuntimeException commitFailure = new IllegalStateException("commit state changed");
+        FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(),
+                commitFailure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.finishInsert(SESSION, tableHandle, List.of(commitFragment()), List.of()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to commit Paimon write fragments");
+                    assertThat(exception.getCause()).isSameAs(commitFailure);
+                });
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(committed).isFalse();
+    }
+
+    @Test
     public void testFinishInsertUnsupportedCommitFailuresUseNotSupported()
             throws Exception
     {
