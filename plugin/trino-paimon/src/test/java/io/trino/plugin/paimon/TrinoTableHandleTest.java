@@ -490,9 +490,14 @@ public class TrinoTableHandleTest
     {
         Map<String, String> handleOptions = Map.of(
                 "custom.option", "value",
+                CoreOptions.SCAN_FALLBACK_SNAPSHOT_BRANCH.key(), "snapshot_branch",
+                CoreOptions.SCAN_FALLBACK_DELTA_BRANCH.key(), "delta_branch",
+                CoreOptions.SCAN_FALLBACK_BRANCH.key(), "fallback_branch",
+                CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key(), "true",
                 CoreOptions.SCAN_IGNORE_LOST_FILE.key(), "true",
                 CoreOptions.SCAN_MANIFEST_PARALLELISM.key(), "4",
                 CoreOptions.SCAN_MAX_SPLITS_PER_TASK.key(), "32",
+                CoreOptions.SCAN_PRIMARY_BRANCH.key(), "primary_branch",
                 CoreOptions.STREAMING_READ_OVERWRITE.key(), "true");
         PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
                 Optional.empty(), Optional.empty(), OptionalLong.empty());

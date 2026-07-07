@@ -64,6 +64,12 @@ public class PaimonTableOptionUtils
             CoreOptions.STREAMING_READ_SNAPSHOT_DELAY.key(),
             CoreOptions.STREAMING_READ_OVERWRITE.key(),
             CoreOptions.STREAMING_READ_APPEND_OVERWRITE.key());
+    private static final Set<String> WRITE_DYNAMIC_OPTION_ONLY_KEYS = Set.of(
+            CoreOptions.SCAN_FALLBACK_SNAPSHOT_BRANCH.key(),
+            CoreOptions.SCAN_FALLBACK_DELTA_BRANCH.key(),
+            CoreOptions.SCAN_FALLBACK_BRANCH.key(),
+            CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key(),
+            CoreOptions.SCAN_PRIMARY_BRANCH.key());
     private static final Set<String> EXCLUDED_TABLE_PROPERTY_TRINO_KEYS = EXCLUDED_TABLE_PROPERTY_OPTION_KEYS.stream()
             .map(PaimonTableOptionUtils::convertOptionKey)
             .collect(toUnmodifiableSet());
@@ -130,6 +136,16 @@ public class PaimonTableOptionUtils
             throw new IllegalArgumentException("paimonOptionKey is blank");
         }
         return EXCLUDED_TABLE_PROPERTY_OPTION_KEYS.contains(paimonOptionKey);
+    }
+
+    static boolean isRuntimeOnlyPaimonOptionKeyForWrite(String paimonOptionKey)
+    {
+        requireNonNull(paimonOptionKey, "paimonOptionKey is null");
+        if (StringUtils.isNullOrWhitespaceOnly(paimonOptionKey)) {
+            throw new IllegalArgumentException("paimonOptionKey is blank");
+        }
+        return isRuntimeOnlyPaimonOptionKey(paimonOptionKey)
+                || WRITE_DYNAMIC_OPTION_ONLY_KEYS.contains(paimonOptionKey);
     }
 
     private static void validatePropertyKey(String propertyKey)

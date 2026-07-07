@@ -385,7 +385,7 @@ public class PaimonTableHandle
             }
 
             Map<String, String> dynamicOptions = new HashMap<>(this.dynamicOptions);
-            dynamicOptions.keySet().removeIf(PaimonTableOptionUtils::isRuntimeOnlyPaimonOptionKey);
+            dynamicOptions.keySet().removeIf(PaimonTableOptionUtils::isRuntimeOnlyPaimonOptionKeyForWrite);
             return requireSupportedTable(!dynamicOptions.isEmpty()
                     ? fileStoreTable.copyWithoutTimeTravel(dynamicOptions)
                     : fileStoreTable);

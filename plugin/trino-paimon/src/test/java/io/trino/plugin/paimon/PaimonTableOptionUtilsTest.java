@@ -168,6 +168,21 @@ public class PaimonTableOptionUtilsTest
     }
 
     @Test
+    public void testWriteDynamicOnlyPaimonOptionKeysAreIdentified()
+    {
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_SNAPSHOT_ID.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_FALLBACK_SNAPSHOT_BRANCH.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_FALLBACK_DELTA_BRANCH.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_FALLBACK_BRANCH.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_PRIMARY_BRANCH.key())).isTrue();
+
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key())).isFalse();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.VECTOR_FILE_FORMAT.key())).isFalse();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite("custom.option")).isFalse();
+    }
+
+    @Test
     public void testPaimonOptionsAreExposedAsStrings()
     {
         PaimonTableOptions tableOptions = new PaimonTableOptions();
