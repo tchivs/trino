@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
 
@@ -24,6 +25,7 @@ import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.plugin.paimon.PaimonLongUtils.saturatedAdd;
 import static java.util.Objects.requireNonNull;
 
@@ -71,8 +73,18 @@ public class PaimonSplitSource
         if (limit.isEmpty()) {
             return;
         }
-        split.decodeSplit().mergedRowCount()
-                .ifPresent(rowCount -> count = saturatedAdd(count, rowCount, "merged row count"));
+        try {
+            split.decodeSplit().mergedRowCount()
+                    .ifPresent(rowCount -> count = saturatedAdd(count, rowCount, "merged row count"));
+        }
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (RuntimeException e) {
+            throw new TrinoException(PAIMON_CANNOT_OPEN_SPLIT,
+                    "Failed to decode Paimon split while applying LIMIT pushdown",
+                    e);
+        }
     }
 
     @Override

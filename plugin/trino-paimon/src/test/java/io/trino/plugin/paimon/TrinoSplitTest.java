@@ -623,6 +623,21 @@ public class TrinoSplitTest
     }
 
     @Test
+    public void testSplitSourceLimitDecodeFailureUsesPaimonErrorCode()
+    {
+        PaimonSplit split = new PaimonSplit("not-a-serialized-split", 0.1);
+        PaimonSplitSource splitSource = new PaimonSplitSource(List.of(split), OptionalLong.of(10));
+
+        assertThatThrownBy(() -> splitSource.getNextBatch(100))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to decode Paimon split while applying LIMIT pushdown");
+                    assertThat(exception.getCause()).isInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("splitSerialized must contain a serialized Paimon Split");
+                });
+    }
+
+    @Test
     public void testSplitSourceLimitCountsOnlyMergedRowCount()
             throws Exception
     {
