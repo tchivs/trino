@@ -134,6 +134,7 @@ public class TestTrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.drop_nn_values");
             sql("DROP TABLE IF EXISTS paimon.default.nested_field_values");
             sql("DROP TABLE IF EXISTS paimon.default.not_null_values");
+            sql("DROP TABLE IF EXISTS paimon.default.insert_default_values");
             sql("DROP TABLE IF EXISTS paimon.default.time_orc_values");
             sql("DROP TABLE IF EXISTS paimon.default.time_travel_schema_evolution");
             sql("DROP TABLE IF EXISTS paimon.default.incremental_schema_evolution");
@@ -1224,6 +1225,25 @@ public class TestTrinoITCase
                 .isThrownBy(() -> sql("INSERT INTO paimon.default.not_null_values "
                         + "(not_null_col, nullable_col) VALUES (NULL, 3)"))
                 .withMessageContaining("NULL value not allowed for NOT NULL column: not_null_col");
+    }
+
+    @Test
+    public void testInsertMissingColumnsUsesPaimonDefaultValues()
+            throws Exception
+    {
+        Path tablePath = new Path(warehouse, "default.db/insert_default_values");
+        DataField defaultStatusField = new DataField(1, "status", DataTypes.STRING()).newDefaultValue("'new'");
+        new SchemaManager(LocalFileIO.create(), tablePath).createTable(new Schema(
+                List.of(new DataField(0, "id", DataTypes.INT()), defaultStatusField),
+                Collections.emptyList(),
+                Collections.emptyList(),
+                Collections.singletonMap("bucket", "-1"),
+                ""));
+
+        sql("INSERT INTO paimon.default.insert_default_values (id) VALUES (1)");
+
+        assertThat(sql("SELECT id, status FROM paimon.default.insert_default_values"))
+                .isEqualTo("[[1, new]]");
     }
 
     @Test

@@ -919,13 +919,13 @@ public class PaimonPageSinkProviderTest
         assertThat(PaimonPageSink.wrapWriteException(runtimeFailure))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: runtime write failed");
                     assertThat(exception.getCause()).isSameAs(runtimeFailure);
                 });
         assertThat(PaimonPageSink.wrapWriteException(writeFailure))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: write failed");
                     assertThat(exception.getCause()).isSameAs(writeFailure);
                 });
         assertThat(PaimonPageSink.wrapWriteException(nestedContractViolation))
@@ -1125,7 +1125,7 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> failingWriteSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 1L))))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: write failed");
                     assertThat(exception.getCause()).isSameAs(writeFailure);
                 });
 
@@ -1149,7 +1149,7 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> failingFinishSink.finish().join())
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: prepare failed");
                     assertThat(exception.getCause()).isSameAs(prepareFailure);
                 });
 
@@ -1315,7 +1315,7 @@ public class PaimonPageSinkProviderTest
                 writeNativeValue(jsonType, Slices.utf8Slice("{broken")))))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to write data to Paimon");
+                    assertThat(exception).hasMessage("Failed to write data to Paimon: Failed to parse Variant from JSON");
                     assertThat(exception.getCause()).isInstanceOf(RuntimeException.class)
                             .hasMessage("Failed to parse Variant from JSON");
                     assertThat(exception.getCause().getCause()).isInstanceOf(IOException.class);

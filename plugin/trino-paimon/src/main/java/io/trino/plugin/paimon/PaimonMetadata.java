@@ -424,6 +424,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
     }
 
     @Override
+    public boolean supportsMissingColumnsOnInsert()
+    {
+        return true;
+    }
+
+    @Override
     public Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session,
             ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments,
             Collection<ComputedStatistics> computedStatistics)

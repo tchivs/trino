@@ -184,6 +184,14 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testMetadataSupportsMissingColumnsOnInsert()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table()), TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.supportsMissingColumnsOnInsert()).isTrue();
+    }
+
+    @Test
     public void testSystemSchemaIsExposed()
     {
         PaimonMetadata metadata = new PaimonMetadata(new SchemaQueryCatalog(), TESTING_TYPE_MANAGER);

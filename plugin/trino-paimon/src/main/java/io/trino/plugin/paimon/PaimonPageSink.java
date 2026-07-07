@@ -392,19 +392,34 @@ public class PaimonPageSink
         if (writeFailure instanceof Exception writeException && isWriterDataException(writeException)) {
             return new TrinoException(PAIMON_WRITER_DATA_ERROR, writerDataErrorMessage(writeException), writeException);
         }
+        String message = writerDataErrorMessage(firstCauseWithMessage(exception));
         if (exception instanceof RuntimeException runtimeException) {
-            return new TrinoException(PAIMON_WRITER_DATA_ERROR, "Failed to write data to Paimon", runtimeException);
+            return new TrinoException(PAIMON_WRITER_DATA_ERROR, message, runtimeException);
         }
-        return new TrinoException(PAIMON_WRITER_DATA_ERROR, "Failed to write data to Paimon", exception);
+        return new TrinoException(PAIMON_WRITER_DATA_ERROR, message, exception);
     }
 
-    private static String writerDataErrorMessage(Exception exception)
+    private static String writerDataErrorMessage(Throwable exception)
     {
         String detail = exception.getMessage();
         if (detail == null || detail.isBlank()) {
             return "Failed to write data to Paimon";
         }
         return "Failed to write data to Paimon: " + detail;
+    }
+
+    private static Throwable firstCauseWithMessage(Throwable exception)
+    {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = exception;
+        while (current != null && visited.add(current)) {
+            String message = current.getMessage();
+            if (message != null && !message.isBlank()) {
+                return current;
+            }
+            current = current.getCause();
+        }
+        return exception;
     }
 
     static RuntimeException wrapWriterCloseException(Exception exception)
