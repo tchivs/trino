@@ -107,7 +107,7 @@ public class PaimonTableHandle
     private final Optional<String> createTableOperation;
     private final Map<String, String> dynamicOptions;
 
-    private transient Map<Catalog, Table> tablesByCatalog;
+    private final transient Map<Catalog, Table> tablesByCatalog = Collections.synchronizedMap(new IdentityHashMap<>());
 
     public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions)
     {
@@ -492,14 +492,12 @@ public class PaimonTableHandle
     private Table rawTable(Catalog catalog)
     {
         requireNonNull(catalog, "catalog is null");
-        if (tablesByCatalog != null) {
-            Table table = tablesByCatalog.get(catalog);
-            if (table != null) {
-                return requireSupportedTable(table);
-            }
+        Table table = tablesByCatalog.get(catalog);
+        if (table != null) {
+            return requireSupportedTable(table);
         }
         try {
-            Table table = catalog.getTable(Identifier.create(schemaName, tableName));
+            table = catalog.getTable(Identifier.create(schemaName, tableName));
             cacheTable(catalog, table);
             return requireSupportedTable(table);
         }
@@ -521,9 +519,6 @@ public class PaimonTableHandle
     {
         requireNonNull(catalog, "catalog is null");
         requireNonNull(table, "table is null");
-        if (tablesByCatalog == null) {
-            tablesByCatalog = new IdentityHashMap<>();
-        }
         tablesByCatalog.put(catalog, table);
     }
 

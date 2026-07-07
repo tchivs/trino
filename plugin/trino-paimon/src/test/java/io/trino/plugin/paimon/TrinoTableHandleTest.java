@@ -43,13 +43,11 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -990,6 +988,17 @@ public class TrinoTableHandleTest
         assertThat(codec.fromJson(json)).isEqualTo(expected);
     }
 
+    @Test
+    public void testTableCacheIsNotSerialized()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
+                Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, capturingTable(new AtomicReference<>()));
+
+        assertThat(codec.toJson(handle)).doesNotContain("tablesByCatalog");
+    }
+
     private void testRoundTrip(PaimonTableHandle expected)
     {
         String json = codec.toJson(expected);
@@ -1679,12 +1688,7 @@ public class TrinoTableHandleTest
     }
 
     private static void setCachedTable(PaimonTableHandle handle, Catalog catalog, Table table)
-            throws Exception
     {
-        Field tableField = PaimonTableHandle.class.getDeclaredField("tablesByCatalog");
-        tableField.setAccessible(true);
-        IdentityHashMap<Catalog, Table> tablesByCatalog = new IdentityHashMap<>();
-        tablesByCatalog.put(catalog, table);
-        tableField.set(handle, tablesByCatalog);
+        handle.cacheTable(catalog, table);
     }
 }
