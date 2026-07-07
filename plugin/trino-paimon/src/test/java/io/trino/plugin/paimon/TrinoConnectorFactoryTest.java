@@ -141,11 +141,25 @@ public class TrinoConnectorFactoryTest
         config.put("s3.access-key", "paimon-access");
         config.put("s3.secret-key", "paimon-secret");
 
-        PaimonConnectorFactory.addTrinoS3CredentialProperties(config);
+        PaimonConnectorFactory.addS3CredentialProperties(config);
 
         assertThat(config)
                 .containsEntry("s3.aws-access-key", "paimon-access")
                 .containsEntry("s3.aws-secret-key", "paimon-secret");
+    }
+
+    @Test
+    public void testTrinoNativeObjectStoreCredentialsAreMappedToPaimonCredentials()
+    {
+        Map<String, String> config = new HashMap<>();
+        config.put("s3.aws-access-key", "trino-access");
+        config.put("s3.aws-secret-key", "trino-secret");
+
+        PaimonConnectorFactory.addS3CredentialProperties(config);
+
+        assertThat(config)
+                .containsEntry("s3.access-key", "trino-access")
+                .containsEntry("s3.secret-key", "trino-secret");
     }
 
     @Test
@@ -157,11 +171,27 @@ public class TrinoConnectorFactoryTest
         config.put("s3.aws-access-key", "trino-access");
         config.put("s3.aws-secret-key", "trino-secret");
 
-        PaimonConnectorFactory.addTrinoS3CredentialProperties(config);
+        PaimonConnectorFactory.addS3CredentialProperties(config);
 
         assertThat(config)
                 .containsEntry("s3.aws-access-key", "trino-access")
                 .containsEntry("s3.aws-secret-key", "trino-secret");
+    }
+
+    @Test
+    public void testExplicitPaimonObjectStoreCredentialsArePreserved()
+    {
+        Map<String, String> config = new HashMap<>();
+        config.put("s3.access-key", "paimon-access");
+        config.put("s3.secret-key", "paimon-secret");
+        config.put("s3.aws-access-key", "trino-access");
+        config.put("s3.aws-secret-key", "trino-secret");
+
+        PaimonConnectorFactory.addS3CredentialProperties(config);
+
+        assertThat(config)
+                .containsEntry("s3.access-key", "paimon-access")
+                .containsEntry("s3.secret-key", "paimon-secret");
     }
 
     private static class FailingClosePaimonCatalog

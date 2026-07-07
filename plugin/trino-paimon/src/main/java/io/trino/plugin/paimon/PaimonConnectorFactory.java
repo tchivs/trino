@@ -112,7 +112,7 @@ public class PaimonConnectorFactory
     public Connector create(String catalogName, Map<String, String> config, ConnectorContext context, Module module)
     {
         config = new HashMap<>(config);
-        addTrinoS3CredentialProperties(config);
+        addS3CredentialProperties(config);
         if (config.containsKey(HADOOP_CONF_FILES_KEY)) {
             for (String hadoopXml : config.get(HADOOP_CONF_FILES_KEY).split(",")) {
                 try {
@@ -166,10 +166,12 @@ public class PaimonConnectorFactory
         }
     }
 
-    static void addTrinoS3CredentialProperties(Map<String, String> config)
+    static void addS3CredentialProperties(Map<String, String> config)
     {
         copyIfAbsent(config, PAIMON_S3_ACCESS_KEY, TRINO_S3_ACCESS_KEY);
         copyIfAbsent(config, PAIMON_S3_SECRET_KEY, TRINO_S3_SECRET_KEY);
+        copyIfAbsent(config, TRINO_S3_ACCESS_KEY, PAIMON_S3_ACCESS_KEY);
+        copyIfAbsent(config, TRINO_S3_SECRET_KEY, PAIMON_S3_SECRET_KEY);
     }
 
     private static void copyIfAbsent(Map<String, String> config, String sourceKey, String targetKey)
