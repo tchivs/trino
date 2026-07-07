@@ -25,6 +25,7 @@ import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 
 import java.util.List;
+import java.util.Locale;
 
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
@@ -32,6 +33,7 @@ import static io.trino.testing.containers.Minio.MINIO_ACCESS_KEY;
 import static io.trino.testing.containers.Minio.MINIO_REGION;
 import static io.trino.testing.containers.Minio.MINIO_SECRET_KEY;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 @Execution(ExecutionMode.SAME_THREAD)
 public class TestPaimonMinioSmokeTest
@@ -49,6 +51,7 @@ public class TestPaimonMinioSmokeTest
     protected QueryRunner createQueryRunner()
             throws Exception
     {
+        assumeLocalMinioProxyBypassed();
         minio = closeAfterClass(Minio.builder().build());
         minio.start();
         minio.createBucket(bucketName);
@@ -76,6 +79,59 @@ public class TestPaimonMinioSmokeTest
                         .buildOrThrow());
 
         return queryRunner;
+    }
+
+    private static void assumeLocalMinioProxyBypassed()
+    {
+        boolean proxyConfigured = isNonBlank(System.getenv("HTTP_PROXY"))
+                || isNonBlank(System.getenv("HTTPS_PROXY"))
+                || isNonBlank(System.getenv("http_proxy"))
+                || isNonBlank(System.getenv("https_proxy"));
+        if (!proxyConfigured) {
+            return;
+        }
+
+        assumeTrue(noProxyCovers("localhost", System.getenv("NO_PROXY"), System.getenv("no_proxy"))
+                        && noProxyCovers("127.0.0.1", System.getenv("NO_PROXY"), System.getenv("no_proxy")),
+                "Local MinIO smoke requires NO_PROXY/no_proxy to include localhost,127.0.0.1 when HTTP proxy variables are set");
+    }
+
+    private static boolean noProxyCovers(String host, String... noProxyValues)
+    {
+        for (String noProxy : noProxyValues) {
+            if (noProxyValueCovers(noProxy, host)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean noProxyValueCovers(String noProxy, String host)
+    {
+        if (!isNonBlank(noProxy)) {
+            return false;
+        }
+
+        String normalizedHost = host.toLowerCase(Locale.ROOT);
+        for (String entry : noProxy.split(",")) {
+            String normalizedEntry = entry.trim().toLowerCase(Locale.ROOT);
+            if (normalizedEntry.equals("*") || normalizedEntry.equals(normalizedHost)) {
+                return true;
+            }
+            if (normalizedHost.equals("localhost") && normalizedEntry.equals(".localhost")) {
+                return true;
+            }
+            if (normalizedHost.equals("127.0.0.1")
+                    && (normalizedEntry.equals("127.0.0.0/8") || normalizedEntry.equals("127.*"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isNonBlank(String value)
+    {
+        return value != null && !value.isBlank();
     }
 
     @Test
