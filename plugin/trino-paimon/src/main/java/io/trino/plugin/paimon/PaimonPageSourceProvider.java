@@ -42,6 +42,7 @@ import io.trino.plugin.hive.FileFormatDataSourceStats;
 import io.trino.plugin.hive.orc.OrcPageSource;
 import io.trino.plugin.hive.parquet.ParquetPageSource;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
+import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -96,6 +97,7 @@ import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import static io.airlift.slice.SizeOf.SIZE_OF_LONG;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.orc.OrcReader.INITIAL_BATCH_SIZE;
 import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
@@ -108,6 +110,9 @@ import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_BAD_DATA;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CURSOR_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.block.PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
+import static java.lang.Math.min;
+import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.fileindex.FileIndexOptions.topLevelIndexOfNested;
 
@@ -115,6 +120,8 @@ public class PaimonPageSourceProvider
         implements
         ConnectorPageSourceProvider
 {
+    static final int EMPTY_PROJECTION_MAX_PAGE_SIZE = DEFAULT_MAX_PAGE_SIZE_IN_BYTES / SIZE_OF_LONG;
+
     private final TrinoFileSystemFactory fileSystemFactory;
     private final PaimonCatalog paimonCatalog;
     private final OrcReaderOptions orcReaderOptions;
@@ -273,6 +280,12 @@ public class PaimonPageSourceProvider
             Split paimonSplit = split.decodeSplit();
             Optional<List<RawFile>> optionalRawFiles = paimonSplit.convertToRawFiles();
             if (checkRawFile(tableHandle, optionalRawFiles, columns, filter) && directReaderSupportsFilter(projectedFields, filter)) {
+                List<RawFile> files = optionalRawFiles.orElseThrow();
+                if (projectedFields.isEmpty()) {
+                    return createEmptyProjectionRawFilePageSource(table, refreshToLatestSchema, paimonSplit, files,
+                            limit);
+                }
+
                 DirectReadTableContext directReadTableContext = directReadTableContext(table, filter,
                         refreshToLatestSchema);
                 FileStoreTable fileStoreTable = directReadTableContext.table();
@@ -294,7 +307,6 @@ public class PaimonPageSourceProvider
                 TrinoFileSystem fileSystem = fileSystemFactory.create(session);
 
                 try {
-                    List<RawFile> files = optionalRawFiles.orElseThrow();
                     validateAlignedMetadataFiles("indexFiles", indexFiles, files.size());
                     validateAlignedMetadataFiles("deletionFiles", deletionFiles, files.size());
                     List<Supplier<ConnectorPageSource>> sources = new ArrayList<>(files.size());
@@ -314,6 +326,7 @@ public class PaimonPageSourceProvider
                             }
                         }
 
+                        Optional<DeletionFile> deletionFile = deletionFileAt(deletionFiles, i);
                         long fileSchemaId = rawFile.schemaId();
                         DirectReadSchemaPlan schemaPlan = schemaPlans.get(fileSchemaId);
                         if (schemaPlan == null) {
@@ -331,26 +344,13 @@ public class PaimonPageSourceProvider
                         }
 
                         DirectReadSchemaPlan fileSchemaPlan = schemaPlan;
-                        Optional<DeletionFile> deletionFile = deletionFileAt(deletionFiles, i);
                         Supplier<ConnectorPageSource> sourceSupplier = () -> {
                             ConnectorPageSource source = createDataPageSource(rawFile.format(),
                                     rawFileInputFile(fileSystem, rawFile),
                                     fileSchemaPlan.dataFileColumns(), type, directReaderDomains(projectedFields, filter,
                                             deletionFile.isPresent()));
 
-                            if (deletionFile.isEmpty()) {
-                                return source;
-                            }
-                            return PaimonPageSourceWrapper.wrap(source, deletionFile.map(file -> {
-                                try {
-                                    return DeletionVector.read(fileStoreTable.fileIO(), file);
-                                }
-                                catch (IOException e) {
-                                    throw cannotOpenSplitException(
-                                            "Failed to read deletion vector file: " + file.path(),
-                                            e);
-                                }
-                            }));
+                            return wrapWithDeletionVector(source, fileStoreTable, deletionFile);
                         };
                         sources.add(sourceSupplier);
                     }
@@ -672,6 +672,70 @@ public class PaimonPageSourceProvider
         }
     }
 
+    private static final class EmptyProjectionPageSource
+            implements ConnectorPageSource
+    {
+        private final long rowCount;
+        private long completedPositions;
+        private boolean closed;
+
+        private EmptyProjectionPageSource(long rowCount)
+        {
+            if (rowCount < 0) {
+                throw new IllegalArgumentException("rowCount is negative: " + rowCount);
+            }
+            this.rowCount = rowCount;
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return 0;
+        }
+
+        @Override
+        public OptionalLong getCompletedPositions()
+        {
+            return OptionalLong.of(completedPositions);
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return 0;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return closed || completedPositions == rowCount;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            if (isFinished()) {
+                close();
+                return null;
+            }
+            int pageSize = toIntExact(min(EMPTY_PROJECTION_MAX_PAGE_SIZE, rowCount - completedPositions));
+            completedPositions += pageSize;
+            return new Page(pageSize);
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public void close()
+        {
+            closed = true;
+        }
+    }
+
     static DirectReadTableContext directReadTableContext(
             Table table,
             TupleDomain<PaimonColumnHandle> filter,
@@ -763,6 +827,52 @@ public class PaimonPageSourceProvider
     static ConnectorPageSource emptyPageSource()
     {
         return new FixedPageSource(List.of());
+    }
+
+    static ConnectorPageSource emptyProjectionPageSource(long rowCount)
+    {
+        return new EmptyProjectionPageSource(rowCount);
+    }
+
+    private static ConnectorPageSource createEmptyProjectionRawFilePageSource(Table table, boolean refreshToLatestSchema,
+            Split paimonSplit, List<RawFile> files, OptionalLong limit)
+    {
+        requireNonNull(paimonSplit, "paimonSplit is null");
+        requireNonNull(files, "files is null");
+        Optional<List<DeletionFile>> deletionFiles = paimonSplit.deletionFiles();
+        validateAlignedMetadataFiles("deletionFiles", deletionFiles, files.size());
+        FileStoreTable fileStoreTable = fileStoreTableForDirectRead(table, refreshToLatestSchema);
+        List<Supplier<ConnectorPageSource>> sources = new ArrayList<>(files.size());
+        for (int i = 0; i < files.size(); i++) {
+            RawFile rawFile = files.get(i);
+            Optional<DeletionFile> deletionFile = deletionFileAt(deletionFiles, i);
+            sources.add(() -> wrapWithDeletionVector(
+                    emptyProjectionPageSource(rawFile.rowCount()),
+                    fileStoreTable,
+                    deletionFile));
+        }
+        return DirectTrinoPageSource.lazyPageSources(sources, limit);
+    }
+
+    private static ConnectorPageSource wrapWithDeletionVector(ConnectorPageSource source, FileStoreTable fileStoreTable,
+            Optional<DeletionFile> deletionFile)
+    {
+        requireNonNull(source, "source is null");
+        requireNonNull(fileStoreTable, "fileStoreTable is null");
+        requireNonNull(deletionFile, "deletionFile is null");
+        if (deletionFile.isEmpty()) {
+            return source;
+        }
+        return PaimonPageSourceWrapper.wrap(source, deletionFile.map(file -> {
+            try {
+                return DeletionVector.read(fileStoreTable.fileIO(), file);
+            }
+            catch (IOException e) {
+                throw cannotOpenSplitException(
+                        "Failed to read deletion vector file: " + file.path(),
+                        e);
+            }
+        }));
     }
 
     static FileStoreTable fileStoreTableForDirectRead(Table table, boolean refreshToLatestSchema)

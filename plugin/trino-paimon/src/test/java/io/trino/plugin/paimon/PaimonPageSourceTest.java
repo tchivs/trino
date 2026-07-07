@@ -94,6 +94,7 @@ import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -590,6 +591,41 @@ public class PaimonPageSourceTest
         assertThat(fileSystem.unboundedInputFileCalls).isEqualTo(0);
         assertThat(fileSystem.sizedInputFileCalls).isEqualTo(1);
         assertThat(fileSystem.lastLength).isEqualTo(rawFile.fileSize());
+    }
+
+    @Test
+    void testEmptyProjectionRawFilePageSourceUsesKnownRowCount()
+    {
+        long rowCount = PaimonPageSourceProvider.EMPTY_PROJECTION_MAX_PAGE_SIZE + 3L;
+        ConnectorPageSource pageSource = PaimonPageSourceProvider.emptyProjectionPageSource(rowCount);
+
+        assertThat(pageSource.getCompletedBytes()).isZero();
+        assertThat(pageSource.getCompletedPositions()).hasValue(0);
+        assertThat(pageSource.getReadTimeNanos()).isZero();
+        assertThat(pageSource.getMemoryUsage()).isZero();
+
+        Page firstPage = pageSource.getNextPage();
+        assertThat(firstPage.getChannelCount()).isZero();
+        assertThat(firstPage.getPositionCount()).isEqualTo(PaimonPageSourceProvider.EMPTY_PROJECTION_MAX_PAGE_SIZE);
+        assertThat(pageSource.getCompletedPositions())
+                .hasValue(PaimonPageSourceProvider.EMPTY_PROJECTION_MAX_PAGE_SIZE);
+
+        Page secondPage = pageSource.getNextPage();
+        assertThat(secondPage.getChannelCount()).isZero();
+        assertThat(secondPage.getPositionCount()).isEqualTo(3);
+        assertThat(pageSource.getCompletedPositions()).hasValue(rowCount);
+
+        assertThat(pageSource.getNextPage()).isNull();
+        assertThat(pageSource.isFinished()).isTrue();
+        assertThat(pageSource.getCompletedPositions()).hasValue(rowCount);
+    }
+
+    @Test
+    void testEmptyProjectionRawFilePageSourceRejectsInvalidRowCount()
+    {
+        assertThatThrownBy(() -> PaimonPageSourceProvider.emptyProjectionPageSource(-1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("rowCount is negative: -1");
     }
 
     @Test
@@ -1103,6 +1139,50 @@ public class PaimonPageSourceTest
                 new PaimonSplit("serialized-split", 1.0), tableHandle, List.of(), dynamicFilter(TupleDomain.none()));
 
         assertThat(pageSource.isFinished()).isTrue();
+        assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
+    void testPageSourceProviderUsesRawFileRowCountForEmptyProjection()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        PaimonPageSourceProvider provider = new PaimonPageSourceProvider(
+                session -> {
+                    throw new AssertionError("filesystem should not be used by empty projection raw-file reads");
+                },
+                new PaimonMetadataFactory(new Options(),
+                        session -> {
+                            throw new AssertionError("filesystem should not be used by empty projection catalog");
+                        },
+                        TESTING_TYPE_MANAGER)
+                {
+                    @Override
+                    public PaimonMetadata create()
+                    {
+                        return new PaimonMetadata(new TestingCatalog(fileStoreTable(copiedWithLatestSchema)),
+                                TESTING_TYPE_MANAGER);
+                    }
+                },
+                new OrcReaderConfig(),
+                new ParquetReaderConfig());
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.of(6));
+        ConnectorSession session = io.trino.testing.TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        ConnectorPageSource pageSource = provider.createPageSource(null, session,
+                PaimonSplit.fromSplit(rawFileSplit(5, 7), 1.0), tableHandle, List.of(), DynamicFilter.EMPTY);
+
+        Page firstPage = pageSource.getNextPage();
+        Page secondPage = pageSource.getNextPage();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(firstPage.getChannelCount()).isZero();
+        assertThat(firstPage.getPositionCount()).isEqualTo(5);
+        assertThat(secondPage.getChannelCount()).isZero();
+        assertThat(secondPage.getPositionCount()).isEqualTo(1);
+        assertThat(pageSource.getCompletedPositions()).hasValue(6);
         assertThat(pageSource.getNextPage()).isNull();
     }
 
@@ -2822,6 +2902,22 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDeletionVectorWrapperFiltersEmptyProjectionPages()
+    {
+        PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(
+                PaimonPageSourceProvider.emptyProjectionPageSource(3),
+                Optional.of(deletionVectorDeleting(1)));
+
+        Page page = wrapper.getNextPage();
+
+        assertThat(page.getChannelCount()).isZero();
+        assertThat(page.getPositionCount()).isEqualTo(2);
+        assertThat(wrapper.getCompletedPositions()).hasValue(2);
+        assertThat(wrapper.getNextPage()).isNull();
+        assertThat(wrapper.getCompletedPositions()).hasValue(2);
+    }
+
+    @Test
     void testDeletionVectorWrapperSupports64BitStartPositions()
     {
         long largeStartPosition = (long) Integer.MAX_VALUE + 5;
@@ -3221,6 +3317,40 @@ public class PaimonPageSourceTest
             public OptionalLong mergedRowCount()
             {
                 return OptionalLong.empty();
+            }
+        };
+    }
+
+    private static org.apache.paimon.table.source.Split rawFileSplit(long... rowCounts)
+    {
+        long[] fileRowCounts = rowCounts.clone();
+        return new org.apache.paimon.table.source.Split()
+        {
+            @Override
+            public long rowCount()
+            {
+                long total = 0;
+                for (long rowCount : fileRowCounts) {
+                    total += rowCount;
+                }
+                return total;
+            }
+
+            @Override
+            public OptionalLong mergedRowCount()
+            {
+                return OptionalLong.empty();
+            }
+
+            @Override
+            public Optional<List<RawFile>> convertToRawFiles()
+            {
+                List<RawFile> rawFiles = new ArrayList<>(fileRowCounts.length);
+                for (int index = 0; index < fileRowCounts.length; index++) {
+                    rawFiles.add(new RawFile("memory://raw-file-" + index + ".orc", 1, 0, 1, "orc", 0,
+                            fileRowCounts[index]));
+                }
+                return Optional.of(rawFiles);
             }
         };
     }
