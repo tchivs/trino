@@ -48,29 +48,31 @@ public class TestPaimonExternalMinioSmokeTest
         ExternalMinioConfig config = ExternalMinioConfig.load();
         Session session = testSessionBuilder()
                 .setCatalog(CATALOG)
-                .setSchema(config.schema())
+                .setSchema(config.schema().orElse("default"))
                 .build();
 
         try (DistributedQueryRunner queryRunner = DistributedQueryRunner.builder(session).build()) {
             queryRunner.installPlugin(new PaimonPlugin());
             queryRunner.createCatalog(CATALOG, CATALOG, config.catalogProperties());
 
-            assertThat(queryRunner.execute("SHOW SCHEMAS FROM " + quote(CATALOG)).getOnlyColumnAsSet())
-                    .contains(config.schema());
-            assertThat(queryRunner.execute("SHOW TABLES FROM " + qualifiedName(CATALOG, config.schema())).getOnlyColumnAsSet())
-                    .contains(config.table());
+            ReadTarget readTarget = discoverReadTarget(queryRunner, config);
 
-            String tableName = qualifiedName(CATALOG, config.schema(), config.table());
+            assertThat(queryRunner.execute("SHOW SCHEMAS FROM " + quote(CATALOG)).getOnlyColumnAsSet())
+                    .contains(readTarget.schema());
+            assertThat(queryRunner.execute("SHOW TABLES FROM " + qualifiedName(CATALOG, readTarget.schema())).getOnlyColumnAsSet())
+                    .contains(readTarget.table());
+
+            String tableName = qualifiedName(CATALOG, readTarget.schema(), readTarget.table());
             assertThat(queryRunner.execute("SELECT table_name FROM " + qualifiedName(CATALOG, "information_schema", "tables")
-                    + " WHERE table_schema = " + stringLiteral(config.schema())
-                    + " AND table_name = " + stringLiteral(config.table())).getOnlyColumnAsSet())
-                    .contains(config.table());
+                    + " WHERE table_schema = " + stringLiteral(readTarget.schema())
+                    + " AND table_name = " + stringLiteral(readTarget.table())).getOnlyColumnAsSet())
+                    .contains(readTarget.table());
 
             String createTable = (String) queryRunner.execute("SHOW CREATE TABLE " + tableName)
                     .getOnlyValue();
             assertThat(createTable)
                     .contains("CREATE TABLE")
-                    .contains(config.table());
+                    .contains(readTarget.table());
 
             MaterializedResult columns = queryRunner.execute("SHOW COLUMNS FROM " + tableName);
             assertThat(columns.getRowCount()).isGreaterThan(0);
@@ -151,6 +153,41 @@ public class TestPaimonExternalMinioSmokeTest
         }
     }
 
+    private static ReadTarget discoverReadTarget(DistributedQueryRunner queryRunner, ExternalMinioConfig config)
+    {
+        if (config.table().isPresent()) {
+            checkArgument(config.schema().isPresent(),
+                    "paimon.external-minio.schema is required when paimon.external-minio.table is set");
+            return new ReadTarget(config.schema().orElseThrow(), config.table().orElseThrow());
+        }
+
+        if (config.schema().isPresent()) {
+            Optional<String> table = firstTable(queryRunner, config.schema().orElseThrow());
+            assumeTrue(table.isPresent(), "External MinIO schema has no visible Paimon tables: " + config.schema().orElseThrow());
+            return new ReadTarget(config.schema().orElseThrow(), table.orElseThrow());
+        }
+
+        for (Object schemaObject : queryRunner.execute("SHOW SCHEMAS FROM " + quote(CATALOG)).getOnlyColumnAsSet()) {
+            String schema = (String) schemaObject;
+            if (schema.equalsIgnoreCase("information_schema")) {
+                continue;
+            }
+            Optional<String> table = firstTable(queryRunner, schema);
+            if (table.isPresent()) {
+                return new ReadTarget(schema, table.orElseThrow());
+            }
+        }
+        assumeTrue(false, "External MinIO warehouse has no visible Paimon tables");
+        throw new AssertionError("unreachable");
+    }
+
+    private static Optional<String> firstTable(DistributedQueryRunner queryRunner, String schema)
+    {
+        return queryRunner.execute("SHOW TABLES FROM " + qualifiedName(CATALOG, schema)).getOnlyColumnAsSet().stream()
+                .map(String.class::cast)
+                .findFirst();
+    }
+
     private static Optional<String> configured(String name)
     {
         String property = System.getProperty(PROPERTY_PREFIX + name);
@@ -189,6 +226,8 @@ public class TestPaimonExternalMinioSmokeTest
         return "'" + value.replace("'", "''") + "'";
     }
 
+    private record ReadTarget(String schema, String table) {}
+
     private record ExternalMinioConfig(
             String warehouse,
             String endpoint,
@@ -196,8 +235,8 @@ public class TestPaimonExternalMinioSmokeTest
             String secretKey,
             String region,
             boolean pathStyleAccess,
-            String schema,
-            String table,
+            Optional<String> schema,
+            Optional<String> table,
             int limit)
     {
         static ExternalMinioConfig load()
@@ -223,8 +262,8 @@ public class TestPaimonExternalMinioSmokeTest
                     required("secret-key"),
                     configured("region").orElse("us-east-1"),
                     configured("path-style-access").map(Boolean::parseBoolean).orElse(true),
-                    requireReadTarget ? required("schema") : configured("schema").orElse(""),
-                    requireReadTarget ? required("table") : configured("table").orElse(""),
+                    configured("schema"),
+                    configured("table"),
                     limit);
         }
 
