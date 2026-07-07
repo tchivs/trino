@@ -333,7 +333,7 @@ public class PaimonPageSourceProvider
                         Optional<DeletionFile> deletionFile = deletionFileAt(deletionFiles, i);
                         Supplier<ConnectorPageSource> sourceSupplier = () -> {
                             ConnectorPageSource source = createDataPageSource(rawFile.format(),
-                                    fileSystem.newInputFile(Location.of(rawFile.path())),
+                                    rawFileInputFile(fileSystem, rawFile),
                                     fileSchemaPlan.dataFileColumns(), type, directReaderDomains(projectedFields, filter,
                                             deletionFile.isPresent()));
 
@@ -916,6 +916,9 @@ public class PaimonPageSourceProvider
             if (!"orc".equalsIgnoreCase(format) && !"parquet".equalsIgnoreCase(format)) {
                 return false;
             }
+            if (!isWholeRawFile(rawFile)) {
+                return false;
+            }
             hasOrcRawFiles = hasOrcRawFiles || "orc".equalsIgnoreCase(format);
         }
         for (PaimonColumnHandle paimonColumn : getColumnHandles(columns)) {
@@ -931,6 +934,20 @@ public class PaimonPageSourceProvider
             }
         }
         return true;
+    }
+
+    static TrinoInputFile rawFileInputFile(TrinoFileSystem fileSystem, RawFile rawFile)
+    {
+        requireNonNull(fileSystem, "fileSystem is null");
+        requireNonNull(rawFile, "rawFile is null");
+        return fileSystem.newInputFile(Location.of(rawFile.path()), rawFile.fileSize());
+    }
+
+    private static boolean isWholeRawFile(RawFile rawFile)
+    {
+        return rawFile.fileSize() >= 0
+                && rawFile.offset() == 0
+                && rawFile.length() == rawFile.fileSize();
     }
 
     private static boolean isUnsupportedDirectReadColumn(PaimonColumnHandle column)

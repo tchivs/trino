@@ -17,6 +17,8 @@ import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoInputFile;
+import io.trino.filesystem.memory.MemoryFileSystem;
 import io.trino.filesystem.memory.MemoryInputFile;
 import io.trino.orc.OrcColumn;
 import io.trino.orc.OrcDataSourceId;
@@ -550,6 +552,44 @@ public class PaimonPageSourceTest
                 Map.of(org.apache.paimon.CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), "2024-12-04"));
 
         assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(incrementalAutoTagHandle, rawFiles, columns)).isFalse();
+    }
+
+    @Test
+    void testPartialRawFilesFallBackFromDirectPageSource()
+    {
+        List<PaimonColumnHandle> columns = List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT()));
+
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(
+                List.of(rawFile("memory://file.orc", 100, 0, 100, "orc")),
+                columns)).isTrue();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(
+                List.of(rawFile("memory://file.orc", 100, 1, 99, "orc")),
+                columns)).isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(
+                List.of(rawFile("memory://file.orc", 100, 0, 99, "orc")),
+                columns)).isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(
+                List.of(rawFile("memory://file.orc", 100, 0, 101, "orc")),
+                columns)).isFalse();
+        assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(
+                List.of(rawFile("memory://file.orc", -1, 0, 0, "orc")),
+                columns)).isFalse();
+    }
+
+    @Test
+    void testRawFileInputFileUsesKnownFileSize()
+            throws IOException
+    {
+        RecordingMemoryFileSystem fileSystem = new RecordingMemoryFileSystem();
+        RawFile rawFile = rawFile("memory:///file.parquet", 123, 0, 123, "parquet");
+
+        TrinoInputFile inputFile = PaimonPageSourceProvider.rawFileInputFile(fileSystem, rawFile);
+
+        assertThat(inputFile.location()).isEqualTo(Location.of(rawFile.path()));
+        assertThat(inputFile.length()).isEqualTo(rawFile.fileSize());
+        assertThat(fileSystem.unboundedInputFileCalls).isEqualTo(0);
+        assertThat(fileSystem.sizedInputFileCalls).isEqualTo(1);
+        assertThat(fileSystem.lastLength).isEqualTo(rawFile.fileSize());
     }
 
     @Test
@@ -2979,6 +3019,34 @@ public class PaimonPageSourceTest
     private static RawFile rawFile(String path, String format)
     {
         return new RawFile(path, 1, 0, 1, format, 0, 1);
+    }
+
+    private static RawFile rawFile(String path, long fileSize, long offset, long length, String format)
+    {
+        return new RawFile(path, fileSize, offset, length, format, 0, 1);
+    }
+
+    private static class RecordingMemoryFileSystem
+            extends MemoryFileSystem
+    {
+        private int unboundedInputFileCalls;
+        private int sizedInputFileCalls;
+        private long lastLength = -1;
+
+        @Override
+        public TrinoInputFile newInputFile(Location location)
+        {
+            unboundedInputFileCalls++;
+            return super.newInputFile(location);
+        }
+
+        @Override
+        public TrinoInputFile newInputFile(Location location, long length)
+        {
+            sizedInputFileCalls++;
+            lastLength = length;
+            return super.newInputFile(location, length);
+        }
     }
 
     private static OrcColumn orcColumn(String name, int id)
