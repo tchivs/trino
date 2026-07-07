@@ -30,7 +30,9 @@ import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
@@ -144,10 +146,14 @@ public class FixedBucketTableShuffleFunction
 
     private static int[] projection(List<String> inputFields, List<String> projectedFields, String fieldDescription)
     {
+        Map<String, Integer> inputFieldIndexes = new HashMap<>();
+        for (int index = 0; index < inputFields.size(); index++) {
+            inputFieldIndexes.putIfAbsent(inputFields.get(index), index);
+        }
         return projectedFields.stream()
                 .mapToInt(projectedField -> {
-                    int index = inputFields.indexOf(projectedField);
-                    verify(index >= 0, "Paimon %s '%s' is not present in shuffle input fields %s",
+                    Integer index = inputFieldIndexes.get(projectedField);
+                    verify(index != null, "Paimon %s '%s' is not present in shuffle input fields %s",
                             fieldDescription, projectedField, inputFields);
                     return index;
                 })
