@@ -309,6 +309,33 @@ public class PaimonSplitManagerTest
     }
 
     @Test
+    public void testSplitSourceLimitCountsRowCountWhenMergedCountIsMissing()
+    {
+        PaimonSplitSource source = new PaimonSplitSource(List.of(
+                PaimonSplit.fromSplit(split(10), 1.0),
+                PaimonSplit.fromSplit(split(10), 1.0)),
+                OptionalLong.of(5));
+
+        assertThat(source.getNextBatch(10)).isCompletedWithValueMatching(batch -> batch.getSplits().size() == 1);
+        assertThat(source.isFinished()).isTrue();
+        assertThat(source.getNextBatch(10)).isCompletedWithValueMatching(batch -> batch.getSplits().isEmpty());
+    }
+
+    @Test
+    public void testSplitSourceLimitPrefersMergedRowCount()
+    {
+        PaimonSplitSource source = new PaimonSplitSource(List.of(
+                PaimonSplit.fromSplit(split(100, OptionalLong.of(3)), 1.0),
+                PaimonSplit.fromSplit(split(100, OptionalLong.of(4)), 1.0),
+                PaimonSplit.fromSplit(split(100, OptionalLong.of(4)), 1.0)),
+                OptionalLong.of(5));
+
+        assertThat(source.getNextBatch(10)).isCompletedWithValueMatching(batch -> batch.getSplits().size() == 2);
+        assertThat(source.isFinished()).isTrue();
+        assertThat(source.getNextBatch(10)).isCompletedWithValueMatching(batch -> batch.getSplits().isEmpty());
+    }
+
+    @Test
     public void testEmptySplitSource()
     {
         PaimonTableHandle handle = new PaimonTableHandle(
@@ -502,25 +529,41 @@ public class PaimonSplitManagerTest
 
     private static Split split(long rowCount)
     {
-        return split(rowCount, OptionalLong.empty());
+        return new TestingSplit(rowCount, false, 0);
     }
 
     private static Split split(long rowCount, OptionalLong mergedRowCount)
     {
-        return new Split()
-        {
-            @Override
-            public long rowCount()
-            {
-                return rowCount;
-            }
+        return mergedRowCount.isPresent()
+                ? new TestingSplit(rowCount, true, mergedRowCount.getAsLong())
+                : split(rowCount);
+    }
 
-            @Override
-            public OptionalLong mergedRowCount()
-            {
-                return mergedRowCount;
-            }
-        };
+    private static class TestingSplit
+            implements Split
+    {
+        private final long rowCount;
+        private final boolean hasMergedRowCount;
+        private final long mergedRowCount;
+
+        private TestingSplit(long rowCount, boolean hasMergedRowCount, long mergedRowCount)
+        {
+            this.rowCount = rowCount;
+            this.hasMergedRowCount = hasMergedRowCount;
+            this.mergedRowCount = mergedRowCount;
+        }
+
+        @Override
+        public long rowCount()
+        {
+            return rowCount;
+        }
+
+        @Override
+        public OptionalLong mergedRowCount()
+        {
+            return hasMergedRowCount ? OptionalLong.of(mergedRowCount) : OptionalLong.empty();
+        }
     }
 
     private static class RecordingReadBuilder

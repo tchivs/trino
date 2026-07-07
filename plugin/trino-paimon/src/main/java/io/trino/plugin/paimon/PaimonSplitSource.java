@@ -62,20 +62,19 @@ public class PaimonSplitSource
             if (split == null) {
                 break;
             }
-            countMergedRowsForLimit(split);
+            countRowsForLimit(split);
             batch.add(split);
         }
         return CompletableFuture.completedFuture(new ConnectorSplitBatch(batch, isFinished()));
     }
 
-    private void countMergedRowsForLimit(PaimonSplit split)
+    private void countRowsForLimit(PaimonSplit split)
     {
         if (limit.isEmpty()) {
             return;
         }
         try {
-            split.decodeSplit().mergedRowCount()
-                    .ifPresent(rowCount -> count = saturatedAdd(count, rowCount, "merged row count"));
+            count = saturatedAdd(count, PaimonSplitManager.splitWeightRowCount(split.decodeSplit()), "split row count");
         }
         catch (TrinoException e) {
             throw e;
