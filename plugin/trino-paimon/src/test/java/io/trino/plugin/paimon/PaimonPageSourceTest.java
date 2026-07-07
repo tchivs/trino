@@ -1708,6 +1708,10 @@ public class PaimonPageSourceTest
         RuntimeException wrappedParquetCorruption = new RuntimeException(parquetCorruption);
         RuntimeException wrappedUnsupported = new RuntimeException(unsupported);
         RuntimeException wrappedUnsupportedRead = new RuntimeException(unsupportedRead);
+        RuntimeException nestedWrappedIoException = new RuntimeException(new RuntimeException(ioException));
+        RuntimeException nestedWrappedParquetCorruption = new RuntimeException(new RuntimeException(parquetCorruption));
+        RuntimeException nestedWrappedUnsupported = new RuntimeException(new RuntimeException(unsupported));
+        RuntimeException nestedWrappedUnsupportedRead = new RuntimeException(new RuntimeException(unsupportedRead));
 
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(unsupported)).isSameAs(unsupported);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(contractViolation))
@@ -1746,6 +1750,24 @@ public class PaimonPageSourceTest
                 });
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(wrappedUnsupported)).isSameAs(unsupported);
         assertThat(PaimonPageSourceProvider.wrapPaimonReadException(wrappedUnsupportedRead))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon page read uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(unsupportedRead);
+                });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(nestedWrappedParquetCorruption))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_BAD_DATA.toErrorCode());
+                    assertThat(exception.getCause()).isSameAs(parquetCorruption);
+                });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(nestedWrappedIoException))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).isSameAs(ioException);
+                });
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(nestedWrappedUnsupported)).isSameAs(unsupported);
+        assertThat(PaimonPageSourceProvider.wrapPaimonReadException(nestedWrappedUnsupportedRead))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessage("Paimon page read uses features which are not supported by the Trino connector");

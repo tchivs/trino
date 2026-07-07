@@ -86,6 +86,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -710,35 +711,41 @@ public class PaimonPageSourceProvider
             Exception exception)
     {
         requireNonNull(exception, "exception is null");
-        if (exception instanceof TrinoException trinoException) {
+        Throwable readFailure = firstRecognizedReadFailure(exception);
+        if (readFailure instanceof TrinoException trinoException) {
             return trinoException;
         }
-        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+        if (readFailure instanceof UnsupportedOperationException unsupportedOperationException) {
             return unsupportedReadException(unsupportedReadMessage, unsupportedOperationException);
         }
-        if (exception instanceof OrcCorruptionException || exception instanceof ParquetCorruptionException) {
-            return new TrinoException(PAIMON_BAD_DATA, exception);
+        if (readFailure instanceof OrcCorruptionException || readFailure instanceof ParquetCorruptionException) {
+            return new TrinoException(PAIMON_BAD_DATA, readFailure);
         }
-        if (exception instanceof UncheckedIOException uncheckedIOException) {
+        if (readFailure instanceof UncheckedIOException uncheckedIOException) {
             return cannotOpenSplitException(cannotOpenSplitMessage, uncheckedIOException.getCause());
         }
-        if (exception instanceof IOException ioException) {
-            return cannotOpenSplitException(cannotOpenSplitMessage, ioException);
-        }
-        Throwable cause = exception.getCause();
-        if (cause instanceof TrinoException trinoException) {
-            return trinoException;
-        }
-        if (cause instanceof UnsupportedOperationException unsupportedOperationException) {
-            return unsupportedReadException(unsupportedReadMessage, unsupportedOperationException);
-        }
-        if (cause instanceof OrcCorruptionException || cause instanceof ParquetCorruptionException) {
-            return new TrinoException(PAIMON_BAD_DATA, cause);
-        }
-        if (cause instanceof IOException ioException) {
+        if (readFailure instanceof IOException ioException) {
             return cannotOpenSplitException(cannotOpenSplitMessage, ioException);
         }
         return cannotOpenSplitException(cannotOpenSplitMessage, exception);
+    }
+
+    private static Throwable firstRecognizedReadFailure(Throwable exception)
+    {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = exception;
+        while (current != null && visited.add(current)) {
+            if (current instanceof TrinoException ||
+                    current instanceof UnsupportedOperationException ||
+                    current instanceof OrcCorruptionException ||
+                    current instanceof ParquetCorruptionException ||
+                    current instanceof UncheckedIOException ||
+                    current instanceof IOException) {
+                return current;
+            }
+            current = current.getCause();
+        }
+        return exception;
     }
 
     static TrinoException unsupportedReadException(String message, UnsupportedOperationException exception)
