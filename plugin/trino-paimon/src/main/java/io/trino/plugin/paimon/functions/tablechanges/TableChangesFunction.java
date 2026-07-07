@@ -199,11 +199,13 @@ public class TableChangesFunction
         return start + "," + end;
     }
 
-    private static void validateNonBlankValue(String argumentName, Slice value)
+    private static String normalizeNonBlankValue(String argumentName, Slice value)
     {
-        if (value.toStringUtf8().isBlank()) {
+        String normalizedValue = value.toStringUtf8().strip();
+        if (normalizedValue.isBlank()) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT, argumentName + " may not be blank");
         }
+        return normalizedValue;
     }
 
     private static void validateIncrementalBetweenScanMode(String value)
@@ -251,7 +253,8 @@ public class TableChangesFunction
                 .map(value -> normalizeIncrementalWindow(INCREMENTAL_BETWEEN, value));
         Optional<String> normalizedIncrementalBetweenTimestamp = incrementalBetweenTimestamp
                 .map(value -> normalizeIncrementalWindow(INCREMENTAL_BETWEEN_TIMESTAMP, value));
-        incrementalToAutoTag.ifPresent(value -> validateNonBlankValue(INCREMENTAL_TO_AUTO_TAG, value));
+        Optional<String> normalizedIncrementalToAutoTag = incrementalToAutoTag
+                .map(value -> normalizeNonBlankValue(INCREMENTAL_TO_AUTO_TAG, value));
 
         Optional<String> incrementalBetweenScanMode = Optional.empty();
         if (incrementalBetweenValue.isPresent() || incrementalBetweenTimestamp.isPresent()) {
@@ -281,8 +284,8 @@ public class TableChangesFunction
             if (incrementalBetweenTagToSnapshot) {
                 options.put(CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(), "true");
             }
-            if (incrementalToAutoTag.isPresent()) {
-                options.put(CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), incrementalToAutoTag.orElseThrow().toStringUtf8());
+            if (normalizedIncrementalToAutoTag.isPresent()) {
+                options.put(CoreOptions.INCREMENTAL_TO_AUTO_TAG.key(), normalizedIncrementalToAutoTag.orElseThrow());
             }
 
             ImmutableList.Builder<Descriptor.Field> columns = ImmutableList.builder();

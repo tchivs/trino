@@ -156,7 +156,7 @@ public class TableChangesFunctionTest
                         DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
 
         TableFunctionAnalysis analysis = function.analyze(SESSION, null, arguments(Map.of(
-                INCREMENTAL_TO_AUTO_TAG, "2024-12-04")), new RecordingAccessControl());
+                INCREMENTAL_TO_AUTO_TAG, " 2024-12-04\t")), new RecordingAccessControl());
 
         assertThat(((PaimonTableHandle) analysis.getHandle()).getDynamicOptions())
                 .containsExactlyInAnyOrderEntriesOf(Map.of(
