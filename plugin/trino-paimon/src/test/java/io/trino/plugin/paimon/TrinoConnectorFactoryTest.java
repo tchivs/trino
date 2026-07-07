@@ -35,6 +35,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,7 +51,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class TrinoConnectorFactoryTest
 {
     @TempDir
-    java.nio.file.Path tempFile;
+    Path tempFile;
 
     @Test
     public void testCreateConnector()
@@ -132,6 +134,88 @@ public class TrinoConnectorFactoryTest
         }, null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("typeManager is null");
+    }
+
+    @Test
+    public void testHadoopXmlConfigurationIsLoadedWithPaimonSemantics()
+            throws Exception
+    {
+        Path firstXml = tempFile.resolve("core-site.xml");
+        Files.writeString(firstXml, """
+                <configuration>
+                    <property>
+                        <name>fs.defaultFS</name>
+                        <value>s3://first</value>
+                    </property>
+                    <property>
+                        <name>blank.value</name>
+                        <value>   </value>
+                    </property>
+                    <property>
+                        <name>missing.value</name>
+                    </property>
+                    <property>
+                        <value>missing.name</value>
+                    </property>
+                    <property>
+                        <name>explicit.key</name>
+                        <value>xml-value</value>
+                    </property>
+                </configuration>
+                """);
+
+        Path secondXml = tempFile.resolve("hdfs-site.xml");
+        Files.writeString(secondXml, """
+                <configuration>
+                    <property>
+                        <name>fs.defaultFS</name>
+                        <value>s3://second</value>
+                    </property>
+                    <property>
+                        <name>new.key</name>
+                        <value>new-value</value>
+                    </property>
+                </configuration>
+                """);
+
+        Map<String, String> config = new HashMap<>();
+        config.put("hadoop.explicit.key", "catalog-value");
+        Set<String> protectedConfigKeys = Set.copyOf(config.keySet());
+
+        PaimonConnectorFactory.readHadoopXml(firstXml.toString(), config, protectedConfigKeys);
+        PaimonConnectorFactory.readHadoopXml(secondXml.toString(), config, protectedConfigKeys);
+
+        assertThat(config)
+                .containsEntry("hadoop.fs.defaultFS", "s3://second")
+                .containsEntry("hadoop.new.key", "new-value")
+                .containsEntry("hadoop.explicit.key", "catalog-value")
+                .doesNotContainKeys("hadoop.blank.value", "hadoop.missing.value", "hadoop.missing.name");
+    }
+
+    @Test
+    public void testHadoopXmlConfigurationRejectsDoctypeAndExternalEntities()
+            throws Exception
+    {
+        Path secret = tempFile.resolve("secret.txt");
+        Files.writeString(secret, "secret-value");
+        Path maliciousXml = tempFile.resolve("malicious-site.xml");
+        Files.writeString(maliciousXml, """
+                <!DOCTYPE configuration [
+                    <!ENTITY xxe SYSTEM "%s">
+                ]>
+                <configuration>
+                    <property>
+                        <name>fs.defaultFS</name>
+                        <value>&xxe;</value>
+                    </property>
+                </configuration>
+                """.formatted(secret.toUri()));
+
+        Map<String, String> config = new HashMap<>();
+
+        assertThatThrownBy(() -> PaimonConnectorFactory.readHadoopXml(maliciousXml.toString(), config, Set.of()))
+                .hasMessageContaining("DOCTYPE");
+        assertThat(config).doesNotContainKey("hadoop.fs.defaultFS");
     }
 
     @Test

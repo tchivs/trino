@@ -50,6 +50,7 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.weakref.jmx.guice.MBeanModule;
 
+import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 
 import java.io.File;
@@ -73,7 +74,12 @@ public class PaimonConnectorFactory
     private static final String TRINO_S3_ACCESS_KEY = "s3.aws-access-key";
     private static final String TRINO_S3_SECRET_KEY = "s3.aws-secret-key";
 
-    private static void readHadoopXml(String path, Map<String, String> config)
+    private static final String DISALLOW_DOCTYPE_DECL = "http://apache.org/xml/features/disallow-doctype-decl";
+    private static final String EXTERNAL_GENERAL_ENTITIES = "http://xml.org/sax/features/external-general-entities";
+    private static final String EXTERNAL_PARAMETER_ENTITIES = "http://xml.org/sax/features/external-parameter-entities";
+    private static final String LOAD_EXTERNAL_DTD = "http://apache.org/xml/features/nonvalidating/load-external-dtd";
+
+    static void readHadoopXml(String path, Map<String, String> config, Set<String> protectedConfigKeys)
             throws Exception
     {
         path = path.trim();
@@ -82,19 +88,43 @@ public class PaimonConnectorFactory
         }
 
         File xmlFile = new File(path);
-        NodeList propertyNodes = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(xmlFile)
+        NodeList propertyNodes = newSecureDocumentBuilderFactory().newDocumentBuilder().parse(xmlFile)
                 .getElementsByTagName("property");
         for (int i = 0; i < propertyNodes.getLength(); i++) {
             Node propertyNode = propertyNodes.item(i);
             if (propertyNode.getNodeType() == 1) {
                 Element propertyElement = (Element) propertyNode;
-                String key = propertyElement.getElementsByTagName("name").item(0).getTextContent();
-                String value = propertyElement.getElementsByTagName("value").item(0).getTextContent();
+                Node nameNode = propertyElement.getElementsByTagName("name").item(0);
+                Node valueNode = propertyElement.getElementsByTagName("value").item(0);
+                if (nameNode == null || valueNode == null) {
+                    continue;
+                }
+                String key = nameNode.getTextContent();
+                String value = valueNode.getTextContent();
                 if (!StringUtils.isNullOrWhitespaceOnly(value)) {
-                    config.putIfAbsent(HADOOP_CONF_PREFIX + key, value);
+                    String hadoopKey = HADOOP_CONF_PREFIX + key;
+                    if (!protectedConfigKeys.contains(hadoopKey)) {
+                        config.put(hadoopKey, value);
+                    }
                 }
             }
         }
+    }
+
+    private static DocumentBuilderFactory newSecureDocumentBuilderFactory()
+            throws Exception
+    {
+        DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
+        documentBuilderFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        documentBuilderFactory.setFeature(DISALLOW_DOCTYPE_DECL, true);
+        documentBuilderFactory.setFeature(EXTERNAL_GENERAL_ENTITIES, false);
+        documentBuilderFactory.setFeature(EXTERNAL_PARAMETER_ENTITIES, false);
+        documentBuilderFactory.setFeature(LOAD_EXTERNAL_DTD, false);
+        documentBuilderFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        documentBuilderFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+        documentBuilderFactory.setXIncludeAware(false);
+        documentBuilderFactory.setExpandEntityReferences(false);
+        return documentBuilderFactory;
     }
 
     @Override
@@ -114,9 +144,10 @@ public class PaimonConnectorFactory
         config = new HashMap<>(config);
         addS3CredentialProperties(config);
         if (config.containsKey(HADOOP_CONF_FILES_KEY)) {
+            Set<String> protectedConfigKeys = Set.copyOf(config.keySet());
             for (String hadoopXml : config.get(HADOOP_CONF_FILES_KEY).split(",")) {
                 try {
-                    readHadoopXml(hadoopXml, config);
+                    readHadoopXml(hadoopXml, config, protectedConfigKeys);
                 }
                 catch (Exception e) {
                     LOG.warn("Failed to read hadoop xml file " + hadoopXml + ", skipping this file.", e);
