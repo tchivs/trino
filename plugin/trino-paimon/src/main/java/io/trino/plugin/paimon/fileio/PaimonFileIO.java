@@ -28,13 +28,16 @@ import org.apache.paimon.fs.SeekableInputStream;
 import org.apache.paimon.fs.TwoPhaseOutputStream;
 import org.apache.paimon.utils.FileIOUtils;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
@@ -131,6 +134,8 @@ public class PaimonFileIO
 
         return new DirectObjectStoreTwoPhaseOutputStream(
                 path,
+                location,
+                trinoFileSystem,
                 new PositionOutputStreamWrapper(trinoFileSystem.newOutputFile(location).create()));
     }
 
@@ -148,8 +153,9 @@ public class PaimonFileIO
         if (objectStore) {
             IOException fileProbeFailure = null;
             try {
-                if (existFile(location)) {
-                    return fileStatus(location, path);
+                Optional<FileStatus> fileStatus = fileStatusIfExists(location, path);
+                if (fileStatus.isPresent()) {
+                    return fileStatus.get();
                 }
             }
             catch (IOException e) {
@@ -176,20 +182,20 @@ public class PaimonFileIO
         List<FileStatus> fileStatusList = new ArrayList<>();
         Location location = Location.of(path.toString());
         if (objectStore) {
-            boolean fileProbeFailed = false;
+            IOException fileProbeFailure = null;
             try {
-                if (existFile(location)) {
-                    fileStatusList.add(fileStatus(location, path));
-                }
+                fileStatusIfExists(location, path).ifPresent(fileStatusList::add);
             }
             catch (IOException e) {
-                fileProbeFailed = true;
+                if (!isObjectNotFound(e)) {
+                    fileProbeFailure = e;
+                }
             }
             if (fileStatusList.isEmpty() && isDirectory(location, false)) {
                 addDirectoryEntries(fileStatusList, location);
             }
-            if (fileProbeFailed && fileStatusList.isEmpty()) {
-                return new FileStatus[0];
+            if (fileProbeFailure != null && fileStatusList.isEmpty()) {
+                throw fileProbeFailure;
             }
         }
         else if (isDirectory(location)) {
@@ -240,7 +246,11 @@ public class PaimonFileIO
                 }
             }
             catch (IOException e) {
-                return isDirectory(location, false);
+                boolean directory = isDirectory(location, false);
+                if (directory || isObjectNotFound(e)) {
+                    return directory;
+                }
+                throw e;
             }
             return isDirectory(location, false);
         }
@@ -266,9 +276,12 @@ public class PaimonFileIO
                 throw new IllegalArgumentException("The path '%s' should be a directory.".formatted(path));
             }
         }
-        catch (IOException ignored) {
-            // Some S3-compatible stores fail HEAD on absent directory-prefix objects instead of
-            // returning a normal not-found response. Let mkdirs perform the real write/access check.
+        catch (IOException e) {
+            if (!isObjectNotFound(e)) {
+                throw e;
+            }
+            // Some S3-compatible stores fail HEAD on absent directory-prefix objects with a
+            // not-found error. Let mkdirs perform the real write/access check.
         }
         mkdirs(path);
     }
@@ -278,6 +291,21 @@ public class PaimonFileIO
     {
         TrinoInputFile trinoInputFile = trinoFileSystem.newInputFile(location);
         return new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().getEpochSecond());
+    }
+
+    private Optional<FileStatus> fileStatusIfExists(Location location, Path path)
+            throws IOException
+    {
+        try {
+            TrinoInputFile trinoInputFile = trinoFileSystem.newInputFile(location);
+            if (!trinoInputFile.exists()) {
+                return Optional.empty();
+            }
+            return Optional.of(new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().getEpochSecond()));
+        }
+        catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
     }
 
     private boolean existFile(Location location)
@@ -383,11 +411,31 @@ public class PaimonFileIO
                 return false;
             }
         }
-        catch (IOException ignored) {
-            // Some S3-compatible stores fail HEAD for absent directory-prefix objects. Continue
-            // with directory marker/list probes, which are the authoritative object-store checks.
+        catch (IOException e) {
+            if (!isObjectNotFound(e)) {
+                throw e;
+            }
+            // Some S3-compatible stores fail HEAD for absent directory-prefix objects with a
+            // not-found error. Continue with directory marker/list probes, which are the
+            // authoritative object-store checks.
         }
         return isDirectory(location, false);
+    }
+
+    private static boolean isObjectNotFound(IOException exception)
+    {
+        Throwable throwable = exception;
+        while (throwable != null) {
+            if (throwable instanceof FileNotFoundException || throwable instanceof NoSuchFileException) {
+                return true;
+            }
+            String simpleName = throwable.getClass().getSimpleName();
+            if (simpleName.equals("NoSuchKeyException") || simpleName.equals("NoSuchObjectException")) {
+                return true;
+            }
+            throwable = throwable.getCause();
+        }
+        return false;
     }
 
     private boolean isDirectory(Location location, boolean checkExactFile)
@@ -414,6 +462,9 @@ public class PaimonFileIO
             return trinoFileSystem.newInputFile(directoryMarker(location)).exists();
         }
         catch (IOException e) {
+            if (!isObjectNotFound(e)) {
+                throw e;
+            }
             return false;
         }
     }
@@ -553,13 +604,17 @@ public class PaimonFileIO
             extends TwoPhaseOutputStream
     {
         private final Path targetPath;
+        private final Location targetLocation;
+        private final TrinoFileSystem trinoFileSystem;
         private final PositionOutputStream outputStream;
 
         private boolean closed;
 
-        private DirectObjectStoreTwoPhaseOutputStream(Path targetPath, PositionOutputStream outputStream)
+        private DirectObjectStoreTwoPhaseOutputStream(Path targetPath, Location targetLocation, TrinoFileSystem trinoFileSystem, PositionOutputStream outputStream)
         {
             this.targetPath = requireNonNull(targetPath, "targetPath is null");
+            this.targetLocation = requireNonNull(targetLocation, "targetLocation is null");
+            this.trinoFileSystem = requireNonNull(trinoFileSystem, "trinoFileSystem is null");
             this.outputStream = requireNonNull(outputStream, "outputStream is null");
         }
 
@@ -602,9 +657,30 @@ public class PaimonFileIO
         public void close()
                 throws IOException
         {
-            if (!closed) {
-                outputStream.close();
-                closed = true;
+            if (closed) {
+                return;
+            }
+
+            IOException failure = null;
+            try {
+                closeOutput();
+            }
+            catch (IOException e) {
+                failure = e;
+            }
+            try {
+                trinoFileSystem.deleteFile(targetLocation);
+            }
+            catch (IOException e) {
+                if (failure != null) {
+                    failure.addSuppressed(e);
+                }
+                else {
+                    failure = e;
+                }
+            }
+            if (failure != null) {
+                throw failure;
             }
         }
 
@@ -612,8 +688,20 @@ public class PaimonFileIO
         public Committer closeForCommit()
                 throws IOException
         {
-            close();
+            if (closed) {
+                throw new IOException("Stream is already closed");
+            }
+            closeOutput();
             return new DirectObjectStoreCommitter(targetPath);
+        }
+
+        private void closeOutput()
+                throws IOException
+        {
+            if (!closed) {
+                outputStream.close();
+                closed = true;
+            }
         }
     }
 

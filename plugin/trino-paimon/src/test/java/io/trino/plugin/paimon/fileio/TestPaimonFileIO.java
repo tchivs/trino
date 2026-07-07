@@ -29,6 +29,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -143,6 +144,29 @@ public class TestPaimonFileIO
                 .hasMessageContaining("is not empty");
         assertThat(fileIO.delete(databasePath, true)).isTrue();
         assertThat(fileIO.exists(databasePath)).isFalse();
+    }
+
+    @Test
+    public void testObjectStoreFileProbeFailurePropagatesWhenPathHasNoDirectoryEvidence()
+    {
+        Path path = new Path("memory:///warehouse/minio_smoke.db/orders/schema-0");
+        PaimonFileIO fileIO = objectStoreFileIO(new UnavailableHeadFileSystem(path));
+
+        assertThatThrownBy(() -> fileIO.exists(path))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("simulated S3 HEAD outage");
+        assertThatThrownBy(() -> fileIO.getFileStatus(path))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("simulated S3 HEAD outage");
+        assertThatThrownBy(() -> fileIO.listStatus(path))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("simulated S3 HEAD outage");
+        assertThatThrownBy(() -> fileIO.listDirectories(path))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("simulated S3 HEAD outage");
+        assertThatThrownBy(() -> fileIO.checkOrMkdirs(path))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("simulated S3 HEAD outage");
     }
 
     @Test
@@ -369,6 +393,44 @@ public class TestPaimonFileIO
         committer.discard(fileIO);
 
         assertThat(fileIO.exists(target)).isFalse();
+    }
+
+    @Test
+    public void testObjectStoreTwoPhaseOutputStreamCloseWithoutCommitDeletesTarget()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/data/data-0.parquet");
+
+        TwoPhaseOutputStream out = fileIO.newTwoPhaseOutputStream(target, false);
+        out.write("data".getBytes(StandardCharsets.UTF_8));
+
+        out.close();
+
+        assertThat(fileIO.exists(target)).isFalse();
+        assertThatThrownBy(out::closeForCommit)
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("already closed");
+    }
+
+    @Test
+    public void testObjectStoreTwoPhaseOutputStreamCloseAfterCloseForCommitKeepsTarget()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new NoRenameFileSystem());
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/data/data-0.parquet");
+
+        TwoPhaseOutputStream out = fileIO.newTwoPhaseOutputStream(target, false);
+        out.write("data".getBytes(StandardCharsets.UTF_8));
+
+        TwoPhaseOutputStream.Committer committer = out.closeForCommit();
+        out.close();
+        committer.commit(fileIO);
+
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("data");
+        assertThatThrownBy(out::closeForCommit)
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("already closed");
     }
 
     @Test
@@ -766,7 +828,28 @@ public class TestPaimonFileIO
         {
             TrinoInputFile delegate = super.newInputFile(location);
             if (location.path().equals("warehouse") || location.path().endsWith(".db")) {
-                return new FailedHeadInputFile(delegate);
+                return new FailedHeadInputFile(delegate, true);
+            }
+            return delegate;
+        }
+    }
+
+    private static class UnavailableHeadFileSystem
+            extends NoRenameFileSystem
+    {
+        private final Path failedPath;
+
+        private UnavailableHeadFileSystem(Path failedPath)
+        {
+            this.failedPath = failedPath;
+        }
+
+        @Override
+        public TrinoInputFile newInputFile(Location location)
+        {
+            TrinoInputFile delegate = super.newInputFile(location);
+            if (location.toString().equals(failedPath.toString())) {
+                return new FailedHeadInputFile(delegate, false);
             }
             return delegate;
         }
@@ -776,10 +859,12 @@ public class TestPaimonFileIO
             implements TrinoInputFile
     {
         private final TrinoInputFile delegate;
+        private final boolean notFound;
 
-        private FailedHeadInputFile(TrinoInputFile delegate)
+        private FailedHeadInputFile(TrinoInputFile delegate, boolean notFound)
         {
             this.delegate = delegate;
+            this.notFound = notFound;
         }
 
         @Override
@@ -814,7 +899,10 @@ public class TestPaimonFileIO
         public boolean exists()
                 throws IOException
         {
-            throw new IOException("simulated S3 HEAD failure for " + delegate.location());
+            if (notFound) {
+                throw new FileNotFoundException("simulated S3 HEAD not found for " + delegate.location());
+            }
+            throw new IOException("simulated S3 HEAD outage for " + delegate.location());
         }
 
         @Override
