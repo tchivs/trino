@@ -168,17 +168,18 @@ public class PaimonConnectorFactory
 
     static void addS3CredentialProperties(Map<String, String> config)
     {
-        copyIfAbsent(config, PAIMON_S3_ACCESS_KEY, TRINO_S3_ACCESS_KEY);
-        copyIfAbsent(config, PAIMON_S3_SECRET_KEY, TRINO_S3_SECRET_KEY);
-        copyIfAbsent(config, TRINO_S3_ACCESS_KEY, PAIMON_S3_ACCESS_KEY);
-        copyIfAbsent(config, TRINO_S3_SECRET_KEY, PAIMON_S3_SECRET_KEY);
+        copyIfMissingOrBlank(config, PAIMON_S3_ACCESS_KEY, TRINO_S3_ACCESS_KEY);
+        copyIfMissingOrBlank(config, PAIMON_S3_SECRET_KEY, TRINO_S3_SECRET_KEY);
+        copyIfMissingOrBlank(config, TRINO_S3_ACCESS_KEY, PAIMON_S3_ACCESS_KEY);
+        copyIfMissingOrBlank(config, TRINO_S3_SECRET_KEY, PAIMON_S3_SECRET_KEY);
     }
 
-    private static void copyIfAbsent(Map<String, String> config, String sourceKey, String targetKey)
+    private static void copyIfMissingOrBlank(Map<String, String> config, String sourceKey, String targetKey)
     {
         String value = config.get(sourceKey);
-        if (!StringUtils.isNullOrWhitespaceOnly(value)) {
-            config.putIfAbsent(targetKey, value);
+        if (!StringUtils.isNullOrWhitespaceOnly(value)
+                && StringUtils.isNullOrWhitespaceOnly(config.get(targetKey))) {
+            config.put(targetKey, value);
         }
     }
 
