@@ -23,7 +23,6 @@ import java.io.OutputStream;
 import java.nio.file.FileAlreadyExistsException;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static java.util.Objects.requireNonNull;
 
 class AzureOutputFile
@@ -69,9 +68,16 @@ class AzureOutputFile
     public void createOrOverwrite(byte[] data)
             throws IOException
     {
-        try (OutputStream out = createOutputStream(newSimpleAggregatedMemoryContext(), true)) {
+        try (OutputStream out = createOrOverwrite()) {
             out.write(data);
         }
+    }
+
+    @Override
+    public OutputStream createOrOverwrite(AggregatedMemoryContext memoryContext)
+            throws IOException
+    {
+        return createOutputStream(memoryContext, true);
     }
 
     @Override

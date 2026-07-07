@@ -30,6 +30,7 @@ import org.apache.paimon.utils.FileIOUtils;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
@@ -603,7 +604,10 @@ public class PaimonFileIO
 
             try {
                 outputStream.close();
-                outputFile.createOrOverwrite(Files.readAllBytes(tempFile));
+                try (InputStream inputStream = Files.newInputStream(tempFile);
+                        OutputStream overwriteStream = outputFile.createOrOverwrite()) {
+                    inputStream.transferTo(overwriteStream);
+                }
             }
             finally {
                 closed = true;

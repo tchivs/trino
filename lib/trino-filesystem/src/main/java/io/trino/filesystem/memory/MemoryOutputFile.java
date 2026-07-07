@@ -65,6 +65,13 @@ class MemoryOutputFile
     }
 
     @Override
+    public OutputStream createOrOverwrite(AggregatedMemoryContext memoryContext)
+            throws IOException
+    {
+        return new MemoryOutputStream(location, outputBlob::overwriteBlob);
+    }
+
+    @Override
     public void createExclusive(byte[] data)
             throws IOException
     {

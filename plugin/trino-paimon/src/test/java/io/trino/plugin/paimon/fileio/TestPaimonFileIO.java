@@ -386,6 +386,23 @@ public class TestPaimonFileIO
     }
 
     @Test
+    public void testObjectStoreOutputStreamOverwriteFallbackStreamsTempFile()
+            throws IOException
+    {
+        StreamingOverwriteFileSystem fileSystem = new StreamingOverwriteFileSystem();
+        PaimonFileIO fileIO = objectStoreFileIO(fileSystem);
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/schema/schema-0");
+
+        fileIO.writeFile(target, "old-schema", false);
+
+        fileIO.writeFile(target, "new-schema", true);
+
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("new-schema");
+        assertThat(fileSystem.isStreamOverwriteCreated()).isTrue();
+        assertThat(fileSystem.isByteArrayOverwriteCalled()).isFalse();
+    }
+
+    @Test
     public void testObjectStoreTwoPhaseOutputStreamCommitsWithoutRename()
             throws IOException
     {
@@ -810,6 +827,67 @@ public class TestPaimonFileIO
                             delegate.createOrOverwrite(toByteArray());
                         }
                     };
+                }
+
+                @Override
+                public Location location()
+                {
+                    return delegate.location();
+                }
+            };
+        }
+    }
+
+    private static class StreamingOverwriteFileSystem
+            extends NoRenameFileSystem
+    {
+        private boolean byteArrayOverwriteCalled;
+        private boolean streamOverwriteCreated;
+
+        boolean isByteArrayOverwriteCalled()
+        {
+            return byteArrayOverwriteCalled;
+        }
+
+        boolean isStreamOverwriteCreated()
+        {
+            return streamOverwriteCreated;
+        }
+
+        @Override
+        public TrinoOutputFile newOutputFile(Location location)
+        {
+            TrinoOutputFile delegate = super.newOutputFile(location);
+            return new TrinoOutputFile()
+            {
+                @Override
+                public void createOrOverwrite(byte[] data)
+                        throws IOException
+                {
+                    byteArrayOverwriteCalled = true;
+                    throw new AssertionError("byte-array overwrite should not be used for Paimon object-store fallback");
+                }
+
+                @Override
+                public OutputStream createOrOverwrite(AggregatedMemoryContext memoryContext)
+                {
+                    streamOverwriteCreated = true;
+                    return new ByteArrayOutputStream()
+                    {
+                        @Override
+                        public void close()
+                                throws IOException
+                        {
+                            delegate.createOrOverwrite(toByteArray());
+                        }
+                    };
+                }
+
+                @Override
+                public OutputStream create(AggregatedMemoryContext memoryContext)
+                        throws IOException
+                {
+                    return delegate.create(memoryContext);
                 }
 
                 @Override

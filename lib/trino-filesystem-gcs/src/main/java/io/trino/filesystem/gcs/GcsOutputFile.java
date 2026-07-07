@@ -94,6 +94,19 @@ public class GcsOutputFile
     }
 
     @Override
+    public OutputStream createOrOverwrite(AggregatedMemoryContext memoryContext)
+            throws IOException
+    {
+        try {
+            WriteChannel writeChannel = storage.writer(blobInfo(), new BlobWriteOption[0]);
+            return new GcsOutputStream(location, writeChannel, memoryContext, writeBlockSizeBytes);
+        }
+        catch (RuntimeException e) {
+            throw handleGcsException(e, "writing file", location);
+        }
+    }
+
+    @Override
     public Location location()
     {
         return location.location();

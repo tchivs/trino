@@ -35,7 +35,6 @@ import java.nio.file.FileAlreadyExistsException;
 import static io.trino.filesystem.hdfs.HadoopPaths.hadoopPath;
 import static io.trino.filesystem.hdfs.HdfsFileSystem.withCause;
 import static io.trino.hdfs.FileSystemUtils.getRawFileSystem;
-import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static java.util.Objects.requireNonNull;
 
 class HdfsOutputFile
@@ -66,9 +65,16 @@ class HdfsOutputFile
     public void createOrOverwrite(byte[] data)
             throws IOException
     {
-        try (OutputStream out = create(true, newSimpleAggregatedMemoryContext())) {
+        try (OutputStream out = createOrOverwrite()) {
             out.write(data);
         }
+    }
+
+    @Override
+    public OutputStream createOrOverwrite(AggregatedMemoryContext memoryContext)
+            throws IOException
+    {
+        return create(true, memoryContext);
     }
 
     @Override

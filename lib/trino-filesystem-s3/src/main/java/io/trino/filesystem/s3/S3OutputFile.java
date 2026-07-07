@@ -42,9 +42,15 @@ final class S3OutputFile
     public void createOrOverwrite(byte[] data)
             throws IOException
     {
-        try (OutputStream out = create()) {
+        try (OutputStream out = createOrOverwrite()) {
             out.write(data);
         }
+    }
+
+    @Override
+    public OutputStream createOrOverwrite(AggregatedMemoryContext memoryContext)
+    {
+        return create(memoryContext);
     }
 
     @Override

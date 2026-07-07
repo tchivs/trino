@@ -58,6 +58,16 @@ final class TracingOutputFile
     }
 
     @Override
+    public OutputStream createOrOverwrite(AggregatedMemoryContext memoryContext)
+            throws IOException
+    {
+        Span span = tracer.spanBuilder("OutputFile.createOrOverwrite")
+                .setAttribute(FileSystemAttributes.FILE_LOCATION, toString())
+                .startSpan();
+        return withTracing(span, () -> delegate.createOrOverwrite(memoryContext));
+    }
+
+    @Override
     public void createExclusive(byte[] data)
             throws IOException
     {

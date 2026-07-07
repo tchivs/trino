@@ -16,6 +16,7 @@ package io.trino.filesystem;
 
 import io.trino.memory.context.AggregatedMemoryContext;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.FileAlreadyExistsException;
@@ -42,6 +43,64 @@ public interface TrinoOutputFile
      */
     void createOrOverwrite(byte[] data)
             throws IOException;
+
+    /**
+     * This method delegates to {@link #createOrOverwrite(AggregatedMemoryContext)}.
+     */
+    default OutputStream createOrOverwrite()
+            throws IOException
+    {
+        return createOrOverwrite(newSimpleAggregatedMemoryContext());
+    }
+
+    /**
+     * Open an output stream for creating or replacing a file.
+     * Implementations should stream data directly to the backing store when possible.
+     */
+    default OutputStream createOrOverwrite(AggregatedMemoryContext memoryContext)
+            throws IOException
+    {
+        return new OutputStream()
+        {
+            private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            private boolean closed;
+
+            @Override
+            public void write(int b)
+                    throws IOException
+            {
+                ensureOpen();
+                buffer.write(b);
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len)
+                    throws IOException
+            {
+                ensureOpen();
+                buffer.write(b, off, len);
+            }
+
+            @Override
+            public void close()
+                    throws IOException
+            {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                createOrOverwrite(buffer.toByteArray());
+            }
+
+            private void ensureOpen()
+                    throws IOException
+            {
+                if (closed) {
+                    throw new IOException("Output stream is closed");
+                }
+            }
+        };
+    }
 
     /**
      * Create file exclusively and atomically with the specified content.
