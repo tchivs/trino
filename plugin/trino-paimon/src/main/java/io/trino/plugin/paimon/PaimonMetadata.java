@@ -104,6 +104,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -487,10 +488,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
         }
         catch (Exception e) {
-            if (e instanceof TrinoException trinoException) {
+            Throwable commitFailure = firstRecognizedCommitFailure(e);
+            if (commitFailure instanceof TrinoException trinoException) {
                 throw trinoException;
             }
-            if (e instanceof UnsupportedOperationException unsupportedOperationException) {
+            if (commitFailure instanceof UnsupportedOperationException unsupportedOperationException) {
                 String detail = unsupportedOperationException.getMessage();
                 throw new TrinoException(NOT_SUPPORTED,
                         detail == null || detail.isBlank()
@@ -504,6 +506,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
             throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to commit Paimon write fragments", e);
         }
         return Optional.empty();
+    }
+
+    private static Throwable firstRecognizedCommitFailure(Exception exception)
+    {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = exception;
+        while (current != null && visited.add(current)) {
+            if (current instanceof TrinoException || current instanceof UnsupportedOperationException) {
+                return current;
+            }
+            current = current.getCause();
+        }
+        return exception;
     }
 
     private static Optional<Snapshot.Operation> commitOperation(

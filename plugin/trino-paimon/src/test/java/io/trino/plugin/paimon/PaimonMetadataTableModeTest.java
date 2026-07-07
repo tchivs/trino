@@ -3371,6 +3371,52 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testFinishInsertNestedUnsupportedCommitFailuresUseNotSupported()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        UnsupportedOperationException unsupported = new UnsupportedOperationException("nested commit feature is unsupported");
+        RuntimeException commitFailure = new RuntimeException(new RuntimeException(unsupported));
+        FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(),
+                commitFailure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        Slice fragment = commitFragment();
+
+        assertThatThrownBy(() -> metadata.finishInsert(SESSION, tableHandle, List.of(fragment), List.of()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon commit uses features which are not supported by the Trino connector: nested commit feature is unsupported");
+                    assertThat(exception.getCause()).isSameAs(unsupported);
+                });
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(committed).isFalse();
+    }
+
+    @Test
+    public void testFinishInsertNestedTrinoCommitFailuresArePreserved()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        TrinoException mapped = new TrinoException(PAIMON_COMMIT_ERROR, "already mapped");
+        RuntimeException commitFailure = new RuntimeException(new RuntimeException(mapped));
+        FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(),
+                commitFailure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        Slice fragment = commitFragment();
+
+        assertThatThrownBy(() -> metadata.finishInsert(SESSION, tableHandle, List.of(fragment), List.of()))
+                .isSameAs(mapped);
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(committed).isFalse();
+    }
+
+    @Test
     public void testApplyLimitInitializesCatalogBeforeFilteredTableLookup()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED));
