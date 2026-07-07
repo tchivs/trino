@@ -6088,6 +6088,23 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testListTableColumnsReusesTableHandleLookup()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(BucketMode.HASH_FIXED));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        Map<SchemaTableName, List<ColumnMetadata>> columns = metadata.listTableColumns(
+                SESSION,
+                new SchemaTablePrefix("schema", "table"));
+
+        assertThat(columns).containsOnlyKeys(new SchemaTableName("schema", "table"));
+        assertThat(columns.get(new SchemaTableName("schema", "table")))
+                .extracting(ColumnMetadata::getName)
+                .containsExactly("id");
+        assertThat(catalog.getTableCalls()).isEqualTo(1);
+    }
+
+    @Test
     public void testRelationTypesMarkPaimonViews()
     {
         PaimonMetadata metadata = new PaimonMetadata(new SchemaQueryCatalog(), TESTING_TYPE_MANAGER);
@@ -7981,6 +7998,7 @@ public class PaimonMetadataTableModeTest
         private final List<Partition> partitionsByNames;
         private final List<Identifier> listedPartitionIdentifiers = new ArrayList<>();
         private final List<List<Map<String, String>>> listedPartitionsByNames = new ArrayList<>();
+        private final AtomicInteger getTableCalls = new AtomicInteger();
         private boolean initialized;
 
         private TestingPaimonCatalog(Table table)
@@ -8016,7 +8034,13 @@ public class PaimonMetadataTableModeTest
             assertThat(initialized).isTrue();
             assertThat(identifier.getDatabaseName()).isEqualTo("schema");
             assertThat(identifier.getObjectName()).isEqualTo("table");
+            getTableCalls.incrementAndGet();
             return table;
+        }
+
+        private int getTableCalls()
+        {
+            return getTableCalls.get();
         }
 
         @Override

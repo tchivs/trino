@@ -517,7 +517,7 @@ public class PaimonTableHandle
         }
     }
 
-    private void cacheTable(Catalog catalog, Table table)
+    void cacheTable(Catalog catalog, Table table)
     {
         requireNonNull(catalog, "catalog is null");
         requireNonNull(table, "table is null");
