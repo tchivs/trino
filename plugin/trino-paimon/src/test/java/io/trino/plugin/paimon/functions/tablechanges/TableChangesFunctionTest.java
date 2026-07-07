@@ -53,6 +53,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
@@ -503,6 +504,20 @@ public class TableChangesFunctionTest
     }
 
     @Test
+    public void testAnalyzeMapsNestedCatalogFailures()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new RuntimeFailingPaimonCatalog(
+                        new RuntimeException(new Catalog.DatabaseNotExistException("schema")))));
+
+        assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(INCREMENTAL_BETWEEN, "1,2")), new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(SCHEMA_NOT_FOUND.toErrorCode());
+                    assertThat(exception).hasMessage("Schema 'schema' does not exist");
+                });
+    }
+
+    @Test
     public void testAnalyzeRejectsNonFileStoreTable()
     {
         TableChangesFunction function = new TableChangesFunction(
@@ -722,6 +737,35 @@ public class TableChangesFunctionTest
                 throws Catalog.TableNotExistException
         {
             throw new Catalog.TableNotExistException(identifier);
+        }
+    }
+
+    private static class RuntimeFailingPaimonCatalog
+            extends PaimonCatalog
+    {
+        private final RuntimeException failure;
+
+        private RuntimeFailingPaimonCatalog(RuntimeException failure)
+        {
+            super(new Options(), identity -> {
+                throw new UnsupportedOperationException("filesystem is not used by this test");
+            });
+            this.failure = failure;
+        }
+
+        @Override
+        public void initSession(io.trino.spi.connector.ConnectorSession connectorSession) {}
+
+        @Override
+        public Catalog forSession(io.trino.spi.connector.ConnectorSession connectorSession)
+        {
+            return this;
+        }
+
+        @Override
+        public Table getTable(Identifier identifier)
+        {
+            throw failure;
         }
     }
 

@@ -304,5 +304,9 @@ public class TableChangesFunction
         catch (Catalog.TableNotExistException e) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "Table not found: " + schemaTableName);
         }
+        catch (Exception e) {
+            throw PaimonMetadata.paimonMetadataException(
+                    "Failed to analyze Paimon table_changes for " + schemaTableName, e);
+        }
     }
 }

@@ -3487,7 +3487,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return paimonMetadataException(message, exception);
     }
 
-    private static RuntimeException paimonMetadataException(String message, Exception exception)
+    public static RuntimeException paimonMetadataException(String message, Exception exception)
     {
         Throwable recognizedFailure = firstRecognizedMetadataFailure(exception);
         if (recognizedFailure instanceof TrinoException trinoException) {
