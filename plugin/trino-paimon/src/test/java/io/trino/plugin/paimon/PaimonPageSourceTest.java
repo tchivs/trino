@@ -880,6 +880,12 @@ public class PaimonPageSourceTest
                 .isTrue();
         assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), propertiesRegionFilter))
                 .isFalse();
+        assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), List.of("category"), categoryFilter))
+                .isTrue();
+        assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of(), List.of("category"), categoryFilter))
+                .isTrue();
+        assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), List.of("ds"), categoryFilter))
+                .isFalse();
         assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), TupleDomain.all()))
                 .isTrue();
         assertThat(PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), TupleDomain.none()))
@@ -893,6 +899,12 @@ public class PaimonPageSourceTest
         assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderSupportsFilter(Arrays.asList("id", null), categoryFilter))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("projectedFields contains null field");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), null, categoryFilter))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("partitionKeys is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderSupportsFilter(List.of("id"), Arrays.asList("category", null), categoryFilter))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("partitionKeys contains null key");
     }
 
     @Test
@@ -1167,6 +1179,56 @@ public class PaimonPageSourceTest
                 new ParquetReaderConfig());
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of(),
                 TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.of(6));
+        ConnectorSession session = io.trino.testing.TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        ConnectorPageSource pageSource = provider.createPageSource(null, session,
+                PaimonSplit.fromSplit(rawFileSplit(5, 7), 1.0), tableHandle, List.of(), DynamicFilter.EMPTY);
+
+        Page firstPage = pageSource.getNextPage();
+        Page secondPage = pageSource.getNextPage();
+
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(firstPage.getChannelCount()).isZero();
+        assertThat(firstPage.getPositionCount()).isEqualTo(5);
+        assertThat(secondPage.getChannelCount()).isZero();
+        assertThat(secondPage.getPositionCount()).isEqualTo(1);
+        assertThat(pageSource.getCompletedPositions()).hasValue(6);
+        assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
+    void testPageSourceProviderUsesRawFileRowCountForEmptyProjectionWithPartitionFilter()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        PaimonColumnHandle partitionColumn = PaimonColumnHandle.of("category", DataTypes.STRING());
+        TupleDomain<PaimonColumnHandle> partitionFilter = TupleDomain.withColumnDomains(Map.of(
+                partitionColumn, Domain.singleValue(VARCHAR, Slices.utf8Slice("keep"))));
+        PaimonPageSourceProvider provider = new PaimonPageSourceProvider(
+                session -> {
+                    throw new AssertionError("filesystem should not be used by empty projection raw-file reads");
+                },
+                new PaimonMetadataFactory(new Options(),
+                        session -> {
+                            throw new AssertionError("filesystem should not be used by empty projection catalog");
+                        },
+                        TESTING_TYPE_MANAGER)
+                {
+                    @Override
+                    public PaimonMetadata create()
+                    {
+                        return new PaimonMetadata(new TestingCatalog(fileStoreTable(copiedWithLatestSchema,
+                                DataTypes.ROW(
+                                        DataTypes.FIELD(0, "id", DataTypes.BIGINT()),
+                                        DataTypes.FIELD(1, "category", DataTypes.STRING())),
+                                List.of("category"))), TESTING_TYPE_MANAGER);
+                    }
+                },
+                new OrcReaderConfig(),
+                new ParquetReaderConfig());
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of(),
+                partitionFilter, Optional.empty(), Optional.empty(), OptionalLong.of(6));
         ConnectorSession session = io.trino.testing.TestingConnectorSession.builder()
                 .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
                 .build();
@@ -3229,6 +3291,14 @@ public class PaimonPageSourceTest
     private static FileStoreTable fileStoreTable(AtomicBoolean copiedWithLatestSchema,
             org.apache.paimon.types.RowType rowType)
     {
+        return fileStoreTable(copiedWithLatestSchema, rowType, List.of());
+    }
+
+    private static FileStoreTable fileStoreTable(
+            AtomicBoolean copiedWithLatestSchema,
+            org.apache.paimon.types.RowType rowType,
+            List<String> partitionKeys)
+    {
         return (FileStoreTable) Proxy.newProxyInstance(
                 PaimonPageSourceTest.class.getClassLoader(),
                 new Class<?>[] {FileStoreTable.class},
@@ -3238,6 +3308,7 @@ public class PaimonPageSourceTest
                         yield proxy;
                     }
                     case "rowType" -> rowType;
+                    case "partitionKeys" -> partitionKeys;
                     case "coreOptions" -> new org.apache.paimon.CoreOptions(new Options());
                     case "toString" -> "testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());

@@ -279,7 +279,8 @@ public class PaimonPageSourceProvider
         try {
             Split paimonSplit = split.decodeSplit();
             Optional<List<RawFile>> optionalRawFiles = paimonSplit.convertToRawFiles();
-            if (checkRawFile(tableHandle, optionalRawFiles, columns, filter) && directReaderSupportsFilter(projectedFields, filter)) {
+            if (checkRawFile(tableHandle, optionalRawFiles, columns, filter)
+                    && directReaderSupportsFilter(projectedFields, table.partitionKeys(), filter)) {
                 List<RawFile> files = optionalRawFiles.orElseThrow();
                 if (projectedFields.isEmpty()) {
                     return createEmptyProjectionRawFilePageSource(table, refreshToLatestSchema, paimonSplit, files,
@@ -435,7 +436,16 @@ public class PaimonPageSourceProvider
 
     static boolean directReaderSupportsFilter(List<String> projectedFields, TupleDomain<PaimonColumnHandle> filter)
     {
+        return directReaderSupportsFilter(projectedFields, List.of(), filter);
+    }
+
+    static boolean directReaderSupportsFilter(
+            List<String> projectedFields,
+            List<String> partitionKeys,
+            TupleDomain<PaimonColumnHandle> filter)
+    {
         requireNonNull(projectedFields, "projectedFields is null");
+        requireNonNull(partitionKeys, "partitionKeys is null");
         requireNonNull(filter, "filter is null");
         if (filter.isAll()) {
             return true;
@@ -448,13 +458,17 @@ public class PaimonPageSourceProvider
                 .map(field -> requireNonNull(field, "projectedFields contains null field"))
                 .map(FieldNameUtils::toLowerCase)
                 .collect(Collectors.toSet());
+        Set<String> partitionKeyNames = partitionKeys.stream()
+                .map(key -> requireNonNull(key, "partitionKeys contains null key"))
+                .map(FieldNameUtils::toLowerCase)
+                .collect(Collectors.toSet());
 
         return filter.getDomains()
                 .orElseThrow(() -> new IllegalStateException("Expected filter domains for non-trivial TupleDomain"))
                 .keySet().stream()
                 .map(PaimonColumnHandle::getColumnName)
                 .map(PaimonPageSourceProvider::requiredProjectedFieldName)
-                .allMatch(projectedFieldNames::contains);
+                .allMatch(field -> projectedFieldNames.contains(field) || partitionKeyNames.contains(field));
     }
 
     private static String requiredProjectedFieldName(String fieldName)
