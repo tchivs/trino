@@ -43,10 +43,14 @@ import org.apache.paimon.types.RowKind;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.IllegalFormatException;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -373,10 +377,11 @@ public class PaimonPageSink
 
     static RuntimeException wrapWriteException(Exception exception)
     {
-        if (exception instanceof TrinoException trinoException) {
+        Throwable writeFailure = firstMatchingCause(exception, PaimonPageSink::isRecognizedWriteFailure);
+        if (writeFailure instanceof TrinoException trinoException) {
             return trinoException;
         }
-        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+        if (writeFailure instanceof UnsupportedOperationException unsupportedOperationException) {
             String detail = unsupportedOperationException.getMessage();
             return new TrinoException(NOT_SUPPORTED,
                     detail == null || detail.isBlank()
@@ -384,11 +389,8 @@ public class PaimonPageSink
                             : "Paimon write uses features which are not supported by the Trino connector: " + detail,
                     unsupportedOperationException);
         }
-        if (exception instanceof IllegalArgumentException
-                || exception instanceof IllegalStateException
-                || exception instanceof NullPointerException
-                || exception instanceof IllegalFormatException) {
-            return new TrinoException(PAIMON_WRITER_DATA_ERROR, writerDataErrorMessage(exception), exception);
+        if (writeFailure instanceof Exception writeException && isWriterDataException(writeException)) {
+            return new TrinoException(PAIMON_WRITER_DATA_ERROR, writerDataErrorMessage(writeException), writeException);
         }
         if (exception instanceof RuntimeException runtimeException) {
             return new TrinoException(PAIMON_WRITER_DATA_ERROR, "Failed to write data to Paimon", runtimeException);
@@ -407,10 +409,11 @@ public class PaimonPageSink
 
     static RuntimeException wrapWriterCloseException(Exception exception)
     {
-        if (exception instanceof TrinoException trinoException) {
+        Throwable closeFailure = firstMatchingCause(exception, PaimonPageSink::isRecognizedWriterCloseFailure);
+        if (closeFailure instanceof TrinoException trinoException) {
             return trinoException;
         }
-        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+        if (closeFailure instanceof UnsupportedOperationException unsupportedOperationException) {
             String detail = unsupportedOperationException.getMessage();
             return new TrinoException(NOT_SUPPORTED,
                     detail == null || detail.isBlank()
@@ -426,13 +429,53 @@ public class PaimonPageSink
 
     static RuntimeException wrapIoManagerCloseException(Exception exception)
     {
-        if (exception instanceof TrinoException trinoException) {
+        Throwable closeFailure = firstMatchingCause(exception, PaimonPageSink::isRecognizedIoManagerCloseFailure);
+        if (closeFailure instanceof TrinoException trinoException) {
             return trinoException;
         }
         if (exception instanceof RuntimeException runtimeException) {
             return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer IO manager", runtimeException);
         }
         return new TrinoException(PAIMON_WRITER_CLOSE_ERROR, "Failed to close Paimon writer IO manager", exception);
+    }
+
+    private static Throwable firstMatchingCause(Throwable exception, Predicate<Throwable> predicate)
+    {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = exception;
+        while (current != null && visited.add(current)) {
+            if (predicate.test(current)) {
+                return current;
+            }
+            current = current.getCause();
+        }
+        return exception;
+    }
+
+    private static boolean isRecognizedWriteFailure(Throwable exception)
+    {
+        return exception instanceof TrinoException ||
+                exception instanceof UnsupportedOperationException ||
+                isWriterDataException(exception);
+    }
+
+    private static boolean isRecognizedWriterCloseFailure(Throwable exception)
+    {
+        return exception instanceof TrinoException ||
+                exception instanceof UnsupportedOperationException;
+    }
+
+    private static boolean isRecognizedIoManagerCloseFailure(Throwable exception)
+    {
+        return exception instanceof TrinoException;
+    }
+
+    private static boolean isWriterDataException(Throwable exception)
+    {
+        return exception instanceof IllegalArgumentException ||
+                exception instanceof IllegalStateException ||
+                exception instanceof NullPointerException ||
+                exception instanceof IllegalFormatException;
     }
 
     static class DynamicBucketWriter
