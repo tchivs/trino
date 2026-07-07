@@ -394,6 +394,51 @@ public class PaimonSplitManagerTest
     }
 
     @Test
+    public void testSplitPlanningExceptionUnwrapsNestedIoFailure()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("schema", "table", Collections.emptyMap());
+        IOException ioException = new IOException("manifest read failed");
+        RuntimeException cause = new RuntimeException(new RuntimeException(ioException));
+
+        RuntimeException exception = PaimonSplitManager.splitPlanningException(handle, cause);
+
+        assertThat(exception).isInstanceOfSatisfying(TrinoException.class, trinoException -> {
+            assertThat(trinoException.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+            assertThat(trinoException).hasMessage("Failed to plan Paimon splits");
+            assertThat(trinoException.getCause()).isSameAs(ioException);
+        });
+    }
+
+    @Test
+    public void testSplitPlanningExceptionUnwrapsNestedUnsupportedFailure()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("schema", "table", Collections.emptyMap());
+        UnsupportedOperationException unsupported = new UnsupportedOperationException("unsupported scan");
+        RuntimeException cause = new RuntimeException(new RuntimeException(unsupported));
+
+        RuntimeException exception = PaimonSplitManager.splitPlanningException(handle, cause);
+
+        assertThat(exception).isInstanceOfSatisfying(TrinoException.class, trinoException -> {
+            assertThat(trinoException.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+            assertThat(trinoException).hasMessage("Paimon table read uses features which are not supported by the Trino connector");
+            assertThat(trinoException.getCause()).isSameAs(unsupported);
+        });
+    }
+
+    @Test
+    public void testSplitPlanningExceptionUnwrapsNestedTrinoException()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("schema", "table", Collections.emptyMap());
+        TrinoException mapped = new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, "already mapped");
+        RuntimeException cause = new RuntimeException(new RuntimeException(mapped));
+
+        RuntimeException exception = PaimonSplitManager.splitPlanningException(handle, cause);
+
+        assertThat(exception).isSameAs(mapped);
+    }
+
+    @Test
     public void testSplitPlanningExceptionReturnsTrinoExceptionAsIs()
     {
         PaimonTableHandle handle = new PaimonTableHandle("schema", "table", Collections.emptyMap());

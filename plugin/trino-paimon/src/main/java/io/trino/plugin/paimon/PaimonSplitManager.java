@@ -36,9 +36,12 @@ import org.apache.paimon.table.source.Split;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -200,23 +203,40 @@ public class PaimonSplitManager
         requireNonNull(tableHandle, "tableHandle is null");
         requireNonNull(cause, "cause is null");
 
-        if (cause instanceof TrinoException trinoException) {
+        Throwable planningFailure = firstRecognizedSplitPlanningFailure(cause);
+        if (planningFailure instanceof TrinoException trinoException) {
             return trinoException;
         }
 
         String message = tableHandle.hasIncrementalReadMode()
                 ? "Failed to plan Paimon table_changes splits"
                 : "Failed to plan Paimon splits";
-        if (cause instanceof UncheckedIOException uncheckedIOException) {
+        if (planningFailure instanceof UnsupportedOperationException unsupportedOperationException) {
+            return unsupportedReadOperation(tableHandle, unsupportedOperationException);
+        }
+        if (planningFailure instanceof UncheckedIOException uncheckedIOException) {
             return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, uncheckedIOException.getCause());
         }
-        if (cause instanceof IOException ioException) {
-            return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, ioException);
-        }
-        if (cause.getCause() instanceof IOException ioException) {
+        if (planningFailure instanceof IOException ioException) {
             return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, ioException);
         }
         return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, cause);
+    }
+
+    private static Throwable firstRecognizedSplitPlanningFailure(Throwable cause)
+    {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = cause;
+        while (current != null && visited.add(current)) {
+            if (current instanceof TrinoException ||
+                    current instanceof UnsupportedOperationException ||
+                    current instanceof UncheckedIOException ||
+                    current instanceof IOException) {
+                return current;
+            }
+            current = current.getCause();
+        }
+        return cause;
     }
 
     static void pushLimit(ReadBuilder readBuilder, PaimonTableHandle tableHandle)
