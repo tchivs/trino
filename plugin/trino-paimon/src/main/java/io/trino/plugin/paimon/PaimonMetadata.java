@@ -3158,9 +3158,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         catch (Exception restoreFailure) {
             failure.addSuppressed(restoreFailure);
-            if (failure.getCause() instanceof Exception nestedFailure) {
-                nestedFailure.addSuppressed(restoreFailure);
-            }
+            addSuppressedToCauses(failure, restoreFailure);
+        }
+    }
+
+    private static void addSuppressedToCauses(Exception exception, Exception suppressed)
+    {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = exception.getCause();
+        while (current != null && visited.add(current)) {
+            current.addSuppressed(suppressed);
+            current = current.getCause();
         }
     }
 

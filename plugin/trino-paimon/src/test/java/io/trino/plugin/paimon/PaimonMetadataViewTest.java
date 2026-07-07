@@ -552,6 +552,30 @@ public class PaimonMetadataViewTest
     }
 
     @Test
+    public void testCreateOrReplaceViewRestoreFailureIsSuppressedOnDeepMappedCause()
+    {
+        View oldView = view(Map.of("trino", "SELECT old_value"));
+        Identifier identifier = new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName());
+        Catalog.ViewAlreadyExistException mappedFailure = new Catalog.ViewAlreadyExistException(identifier);
+        RuntimeException failure = new RuntimeException(new RuntimeException(mappedFailure));
+        RuntimeException restoreFailure = new RuntimeException("restore failed");
+        RestoreFailingCreateViewFailureCatalog catalog = new RestoreFailingCreateViewFailureCatalog(oldView, failure, restoreFailure);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.createView(SESSION, VIEW_NAME, viewDefinition("SELECT new_value"), true))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ALREADY_EXISTS.toErrorCode());
+                    assertThat(exception).hasMessage("View 'test_schema.test_view' already exists");
+                    assertThat(exception.getCause()).isSameAs(mappedFailure);
+                    assertThat(mappedFailure.getSuppressed()).containsExactly(restoreFailure);
+                });
+
+        assertThat(catalog.dropViewCalls).isEqualTo(1);
+        assertThat(catalog.createAttempts).isEqualTo(2);
+        assertThat(catalog.currentView).isNull();
+    }
+
+    @Test
     public void testDropViewSuccess()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(view(Map.of("trino", "SELECT id FROM table")));
@@ -1111,6 +1135,31 @@ public class PaimonMetadataViewTest
                 throw new RuntimeException(failure);
             }
             super.createView(identifier, view, ignoreIfExists);
+        }
+    }
+
+    private static class RestoreFailingCreateViewFailureCatalog
+            extends TestingPaimonCatalog
+    {
+        private final RuntimeException failure;
+        private final RuntimeException restoreFailure;
+        private int createAttempts;
+
+        private RestoreFailingCreateViewFailureCatalog(View view, RuntimeException failure, RuntimeException restoreFailure)
+        {
+            super(view);
+            this.failure = failure;
+            this.restoreFailure = restoreFailure;
+        }
+
+        @Override
+        public void createView(Identifier identifier, View view, boolean ignoreIfExists)
+        {
+            createAttempts++;
+            if (createAttempts == 1) {
+                throw failure;
+            }
+            throw restoreFailure;
         }
     }
 
