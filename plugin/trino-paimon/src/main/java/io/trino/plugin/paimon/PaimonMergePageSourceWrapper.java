@@ -43,19 +43,34 @@ public class PaimonMergePageSourceWrapper
     private final ConnectorPageSource pageSource;
     private final List<String> rowIdFields;
     private final Map<String, Integer> fieldToIndex;
+    private final Optional<int[]> outputChannels;
 
     public PaimonMergePageSourceWrapper(ConnectorPageSource pageSource, List<String> rowIdFields,
             Map<String, Integer> fieldToIndex)
     {
+        this(pageSource, rowIdFields, fieldToIndex, Optional.empty());
+    }
+
+    private PaimonMergePageSourceWrapper(ConnectorPageSource pageSource, List<String> rowIdFields,
+            Map<String, Integer> fieldToIndex, Optional<int[]> outputChannels)
+    {
         this.pageSource = requireNonNull(pageSource, "pageSource is null");
         this.rowIdFields = copyRowIdFields(rowIdFields);
         this.fieldToIndex = copyFieldToIndex(fieldToIndex, this.rowIdFields);
+        this.outputChannels = copyOutputChannels(outputChannels);
     }
 
     public static PaimonMergePageSourceWrapper wrap(ConnectorPageSource pageSource,
             List<String> rowIdFields, Map<String, Integer> fieldToIndex)
     {
         return new PaimonMergePageSourceWrapper(pageSource, rowIdFields, fieldToIndex);
+    }
+
+    public static PaimonMergePageSourceWrapper wrap(ConnectorPageSource pageSource,
+            List<String> rowIdFields, Map<String, Integer> fieldToIndex, int[] outputChannels)
+    {
+        return new PaimonMergePageSourceWrapper(pageSource, rowIdFields, fieldToIndex,
+                Optional.of(requireNonNull(outputChannels, "outputChannels is null")));
     }
 
     private static List<String> copyRowIdFields(List<String> rowIdFields)
@@ -103,6 +118,20 @@ public class PaimonMergePageSourceWrapper
         return new HashMap<>(fieldToIndex);
     }
 
+    private static Optional<int[]> copyOutputChannels(Optional<int[]> outputChannels)
+    {
+        requireNonNull(outputChannels, "outputChannels is null");
+        return outputChannels.map(channels -> {
+            int[] copy = requireNonNull(channels, "outputChannels contains null channels").clone();
+            for (int channel : copy) {
+                if (channel < 0) {
+                    throw new IllegalArgumentException("outputChannels contains negative channel: " + channel);
+                }
+            }
+            return copy;
+        });
+    }
+
     @Override
     public long getCompletedBytes()
     {
@@ -137,9 +166,25 @@ public class PaimonMergePageSourceWrapper
             }
             int rowCount = nextPage.getPositionCount();
 
-            Block[] newBlocks = new Block[nextPage.getChannelCount() + 1];
-            for (int i = 0; i < nextPage.getChannelCount(); i++) {
-                newBlocks[i] = nextPage.getBlock(i);
+            int outputChannelCount = outputChannels.map(channels -> channels.length)
+                    .orElse(nextPage.getChannelCount());
+            Block[] newBlocks = new Block[outputChannelCount + 1];
+            if (outputChannels.isPresent()) {
+                int[] channels = outputChannels.get();
+                for (int output = 0; output < channels.length; output++) {
+                    int channel = channels[output];
+                    if (channel >= nextPage.getChannelCount()) {
+                        throw new IllegalStateException(
+                                "Output channel %s is not present in page with %s channels"
+                                        .formatted(channel, nextPage.getChannelCount()));
+                    }
+                    newBlocks[output] = nextPage.getBlock(channel);
+                }
+            }
+            else {
+                for (int i = 0; i < nextPage.getChannelCount(); i++) {
+                    newBlocks[i] = nextPage.getBlock(i);
+                }
             }
 
             Block[] rowIdBlocks = new Block[rowIdFields.size()];
@@ -158,7 +203,7 @@ public class PaimonMergePageSourceWrapper
                 rowIdBlocks[i] = nextPage.getBlock(channelIndex);
             }
 
-            newBlocks[nextPage.getChannelCount()] = RowBlock.fromNotNullSuppressedFieldBlocks(rowCount,
+            newBlocks[outputChannelCount] = RowBlock.fromNotNullSuppressedFieldBlocks(rowCount,
                     Optional.empty(), rowIdBlocks);
 
             return new Page(rowCount, newBlocks);

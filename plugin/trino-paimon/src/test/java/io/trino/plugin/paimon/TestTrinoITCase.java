@@ -1122,11 +1122,11 @@ public class TestTrinoITCase
         sql("INSERT INTO paimon.default.hash_fixed_mutations VALUES "
                 + "(1, 'one', 10), (2, 'two', 20), (3, 'three', 30)");
 
-        sql("DELETE FROM paimon.default.hash_fixed_mutations WHERE id = 2");
+        sql("DELETE FROM paimon.default.hash_fixed_mutations WHERE score = 20");
         assertThat(sql("SELECT * FROM paimon.default.hash_fixed_mutations ORDER BY id"))
                 .isEqualTo("[[1, one, 10], [3, three, 30]]");
 
-        sql("UPDATE paimon.default.hash_fixed_mutations SET score = score + 1 WHERE id = 1");
+        sql("UPDATE paimon.default.hash_fixed_mutations SET score = score + 1 WHERE name = 'one'");
         assertThat(sql("SELECT * FROM paimon.default.hash_fixed_mutations ORDER BY id"))
                 .isEqualTo("[[1, one, 11], [3, three, 30]]");
 

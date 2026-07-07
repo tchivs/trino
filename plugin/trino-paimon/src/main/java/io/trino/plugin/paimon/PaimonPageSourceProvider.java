@@ -165,18 +165,11 @@ public class PaimonPageSourceProvider
                 List<PaimonColumnHandle> dataColumns = paimonColumns.stream()
                         .filter(column -> !column.isRowId()).collect(Collectors.toList());
                 List<String> rowIdFields = rowIdFieldNames(rowId.get().getTrinoType());
-                Set<String> rowIdFieldSet = Set.copyOf(rowIdFields);
-
-                HashMap<String, Integer> fieldToIndex = new HashMap<>();
-                for (int i = 0; i < dataColumns.size(); i++) {
-                    PaimonColumnHandle paimonColumnHandle = dataColumns.get(i);
-                    if (rowIdFieldSet.contains(paimonColumnHandle.getColumnName())) {
-                        fieldToIndex.put(paimonColumnHandle.getColumnName(), i);
-                    }
-                }
+                RowIdReadColumns rowIdReadColumns = rowIdReadColumns(rowId.get(), dataColumns, rowIdFields);
                 return PaimonMergePageSourceWrapper.wrap(createPageSource(session, paimonTableHandle, table,
-                        effectiveFilter, paimonSplit, dataColumns, paimonTableHandle.getLimit(),
-                        refreshToLatestSchema), rowIdFields, fieldToIndex);
+                        effectiveFilter, paimonSplit, rowIdReadColumns.readColumns(), paimonTableHandle.getLimit(),
+                        refreshToLatestSchema), rowIdFields, rowIdReadColumns.fieldToIndex(),
+                        rowIdReadColumns.outputChannels());
             }
             else {
                 return createPageSource(session, paimonTableHandle, table, effectiveFilter, paimonSplit,
@@ -262,6 +255,81 @@ public class PaimonPageSourceProvider
             rowIdFields.add(fieldName);
         }
         return List.copyOf(rowIdFields);
+    }
+
+    static RowIdReadColumns rowIdReadColumns(
+            PaimonColumnHandle rowIdColumn,
+            List<PaimonColumnHandle> dataColumns,
+            List<String> rowIdFields)
+    {
+        requireNonNull(rowIdColumn, "rowIdColumn is null");
+        requireNonNull(dataColumns, "dataColumns is null");
+        requireNonNull(rowIdFields, "rowIdFields is null");
+        List<PaimonColumnHandle> readColumns = new ArrayList<>(dataColumns);
+        Set<String> rowIdFieldSet = Set.copyOf(rowIdFields);
+        HashMap<String, Integer> fieldToIndex = new HashMap<>();
+        for (int i = 0; i < dataColumns.size(); i++) {
+            PaimonColumnHandle paimonColumnHandle = requireNonNull(dataColumns.get(i),
+                    "dataColumns contains null column");
+            if (rowIdFieldSet.contains(paimonColumnHandle.getColumnName())) {
+                fieldToIndex.putIfAbsent(paimonColumnHandle.getColumnName(), i);
+            }
+        }
+        for (String rowIdField : rowIdFields) {
+            requireNonNull(rowIdField, "rowIdFields contains null field");
+            if (PaimonMergePageSourceWrapper.METADATA_DELETE_ROW_ID_FIELD.equals(rowIdField)
+                    || fieldToIndex.containsKey(rowIdField)) {
+                continue;
+            }
+            fieldToIndex.put(rowIdField, readColumns.size());
+            readColumns.add(rowIdFieldColumn(rowIdColumn, rowIdField));
+        }
+        int[] outputChannels = new int[dataColumns.size()];
+        for (int i = 0; i < outputChannels.length; i++) {
+            outputChannels[i] = i;
+        }
+        return new RowIdReadColumns(readColumns, fieldToIndex, outputChannels);
+    }
+
+    private static PaimonColumnHandle rowIdFieldColumn(PaimonColumnHandle rowIdColumn, String rowIdField)
+    {
+        if (!(rowIdColumn.logicalType() instanceof RowType rowIdLogicalType)) {
+            throw new IllegalArgumentException("Paimon row id logical type must be ROW, got: "
+                    + rowIdColumn.logicalType().asSQLString());
+        }
+        if (!(rowIdColumn.getTrinoType() instanceof io.trino.spi.type.RowType trinoRowIdType)) {
+            throw new IllegalArgumentException("Paimon row id Trino type must be ROW, got: "
+                    + rowIdColumn.getTrinoType().getDisplayName());
+        }
+        List<String> logicalFieldNames = rowIdLogicalType.getFieldNames();
+        int fieldIndex = logicalFieldNames.indexOf(rowIdField);
+        if (fieldIndex < 0) {
+            throw new IllegalArgumentException("Paimon row id field '%s' is not present in row id logical type"
+                    .formatted(rowIdField));
+        }
+        return PaimonColumnHandle.of(
+                rowIdField,
+                rowIdLogicalType.getTypeAt(fieldIndex),
+                trinoRowIdType.getFields().get(fieldIndex).getType());
+    }
+
+    record RowIdReadColumns(
+            List<PaimonColumnHandle> readColumns,
+            Map<String, Integer> fieldToIndex,
+            int[] outputChannels)
+    {
+        RowIdReadColumns
+        {
+            readColumns = List.copyOf(requireNonNull(readColumns, "readColumns is null"));
+            fieldToIndex = Map.copyOf(requireNonNull(fieldToIndex, "fieldToIndex is null"));
+            outputChannels = requireNonNull(outputChannels, "outputChannels is null").clone();
+        }
+
+        @Override
+        public int[] outputChannels()
+        {
+            return outputChannels.clone();
+        }
     }
 
     private ConnectorPageSource createPageSource(ConnectorSession session, PaimonTableHandle tableHandle, Table table,

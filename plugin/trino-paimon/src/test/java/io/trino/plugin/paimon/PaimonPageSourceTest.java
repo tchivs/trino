@@ -764,6 +764,51 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testRowIdReadColumnsAddMissingRowIdFields()
+    {
+        PaimonColumnHandle name = PaimonColumnHandle.of("name", DataTypes.STRING());
+        PaimonColumnHandle rowId = PaimonColumnHandle.of(PaimonColumnHandle.TRINO_ROW_ID_NAME,
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "id", DataTypes.BIGINT()),
+                        DataTypes.FIELD(1, "bucket_key", DataTypes.INT())),
+                RowType.from(List.of(
+                        RowType.field("id", BIGINT),
+                        RowType.field("bucket_key", INTEGER))));
+
+        PaimonPageSourceProvider.RowIdReadColumns readColumns = PaimonPageSourceProvider.rowIdReadColumns(
+                rowId,
+                List.of(name),
+                List.of("id", "bucket_key"));
+
+        assertThat(readColumns.readColumns().stream()
+                .map(PaimonColumnHandle::getColumnName))
+                .containsExactly("name", "id", "bucket_key");
+        assertThat(readColumns.fieldToIndex()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "id", 1,
+                "bucket_key", 2));
+        assertThat(readColumns.outputChannels()).containsExactly(0);
+    }
+
+    @Test
+    void testRowIdReadColumnsReuseAlreadyProjectedRowIdFields()
+    {
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.BIGINT());
+        PaimonColumnHandle name = PaimonColumnHandle.of("name", DataTypes.STRING());
+        PaimonColumnHandle rowId = PaimonColumnHandle.of(PaimonColumnHandle.TRINO_ROW_ID_NAME,
+                DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT())),
+                RowType.from(List.of(RowType.field("id", BIGINT))));
+
+        PaimonPageSourceProvider.RowIdReadColumns readColumns = PaimonPageSourceProvider.rowIdReadColumns(
+                rowId,
+                List.of(id, name),
+                List.of("id"));
+
+        assertThat(readColumns.readColumns()).containsExactly(id, name);
+        assertThat(readColumns.fieldToIndex()).containsExactlyEntriesOf(Map.of("id", 0));
+        assertThat(readColumns.outputChannels()).containsExactly(0, 1);
+    }
+
+    @Test
     void testDirectRawFileFormatsAreCaseInsensitiveForHardenedFormatsOnly()
     {
         assertThat(PaimonPageSourceProvider.canUseTrinoPageSource(List.of(rawFile("ORC")), List.of(
@@ -2845,6 +2890,50 @@ public class PaimonPageSourceTest
         assertThat(rowIdBlock.mayHaveNull()).isFalse();
         assertThat(BIGINT.getLong(rowId.getRawFieldBlock(0), rowId.getRawIndex())).isEqualTo(20);
         assertThat(BIGINT.getLong(rowId.getRawFieldBlock(1), rowId.getRawIndex())).isEqualTo(10);
+    }
+
+    @Test
+    void testMergePageSourceWrapperHidesInternalRowIdReadColumns()
+    {
+        TestingPageSource source = new TestingPageSource(new Page(1,
+                bigintBlock(100),
+                bigintBlock(10),
+                bigintBlock(20)));
+        HashMap<String, Integer> fieldToIndex = new HashMap<>();
+        fieldToIndex.put("a", 1);
+        fieldToIndex.put("b", 2);
+        PaimonMergePageSourceWrapper wrapper = PaimonMergePageSourceWrapper.wrap(
+                source,
+                List.of("a", "b"),
+                fieldToIndex,
+                new int[] {0});
+        RowType rowIdType = RowType.from(List.of(RowType.field("a", BIGINT), RowType.field("b", BIGINT)));
+
+        Page page = wrapper.getNextPage();
+
+        assertThat(page.getChannelCount()).isEqualTo(2);
+        assertThat(BIGINT.getLong(page.getBlock(0), 0)).isEqualTo(100);
+        SqlRow rowId = rowIdType.getObject(page.getBlock(1), 0);
+        assertThat(BIGINT.getLong(rowId.getRawFieldBlock(0), rowId.getRawIndex())).isEqualTo(10);
+        assertThat(BIGINT.getLong(rowId.getRawFieldBlock(1), rowId.getRawIndex())).isEqualTo(20);
+    }
+
+    @Test
+    void testMergePageSourceWrapperCanReturnOnlyRowId()
+    {
+        TestingPageSource source = new TestingPageSource(new Page(1, bigintBlock(10)));
+        PaimonMergePageSourceWrapper wrapper = PaimonMergePageSourceWrapper.wrap(
+                source,
+                List.of("a"),
+                Map.of("a", 0),
+                new int[] {});
+        RowType rowIdType = RowType.from(List.of(RowType.field("a", BIGINT)));
+
+        Page page = wrapper.getNextPage();
+
+        assertThat(page.getChannelCount()).isEqualTo(1);
+        SqlRow rowId = rowIdType.getObject(page.getBlock(0), 0);
+        assertThat(BIGINT.getLong(rowId.getRawFieldBlock(0), rowId.getRawIndex())).isEqualTo(10);
     }
 
     @Test
