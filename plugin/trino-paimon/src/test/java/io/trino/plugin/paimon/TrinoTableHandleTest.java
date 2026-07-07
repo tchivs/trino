@@ -28,7 +28,6 @@ import io.trino.spi.type.Type;
 import io.trino.testing.TestingConnectorSession;
 import io.trino.type.TypeDeserializer;
 import org.apache.paimon.CoreOptions;
-import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
@@ -45,7 +44,9 @@ import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -98,9 +99,22 @@ public class TrinoTableHandleTest
     {
         PaimonTableHandle expected = new PaimonTableHandle("test", "user", Collections.emptyMap(), TupleDomain.all(),
                 Optional.empty(), Optional.empty(), OptionalLong.empty())
-                .withCreateTableOperation(Snapshot.Operation.CREATE_TABLE_AS_SELECT);
+                .withCreateTableOperation(PaimonTableHandle.CREATE_TABLE_AS_SELECT_OPERATION);
 
         testRoundTrip(expected);
+    }
+
+    @Test
+    public void testTableHandleDoesNotExposeSnapshotOperationType()
+    {
+        assertThat(Arrays.stream(PaimonTableHandle.class.getDeclaredConstructors())
+                .flatMap(constructor -> Arrays.stream(constructor.getGenericParameterTypes()))
+                .map(java.lang.reflect.Type::getTypeName))
+                .noneMatch(typeName -> typeName.contains("org.apache.paimon.Snapshot$Operation"));
+        assertThat(Arrays.stream(PaimonTableHandle.class.getDeclaredMethods())
+                .flatMap(TrinoTableHandleTest::methodTypes)
+                .map(java.lang.reflect.Type::getTypeName))
+                .noneMatch(typeName -> typeName.contains("org.apache.paimon.Snapshot$Operation"));
     }
 
     @Test
@@ -111,6 +125,13 @@ public class TrinoTableHandleTest
         String json = removeJsonField(codec.toJson(expected), "createTableOperation");
 
         assertThat(codec.fromJson(json).getCreateTableOperation()).isEmpty();
+    }
+
+    private static java.util.stream.Stream<java.lang.reflect.Type> methodTypes(Method method)
+    {
+        return java.util.stream.Stream.concat(
+                java.util.stream.Stream.of(method.getGenericReturnType()),
+                Arrays.stream(method.getGenericParameterTypes()));
     }
 
     @Test

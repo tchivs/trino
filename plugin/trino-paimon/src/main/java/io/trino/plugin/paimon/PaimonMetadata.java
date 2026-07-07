@@ -60,7 +60,6 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
 import org.apache.paimon.CoreOptions;
-import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
@@ -98,6 +97,7 @@ import org.apache.paimon.utils.StringUtils;
 import org.apache.paimon.view.ViewChange;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -143,7 +143,6 @@ import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
-import static org.apache.paimon.Snapshot.Operation.MERGE;
 import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
@@ -152,6 +151,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
 {
     private static final int MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE = 1000;
     private static final int MAX_PARTITION_DELETE_SPECS = 1024;
+    private static final String MERGE_OPERATION = "MERGE";
+    private static final String OVERWRITE_OPERATION = "OVERWRITE";
+    private static final String PAIMON_SNAPSHOT_OPERATION_CLASS_NAME = "org.apache.paimon.Snapshot$Operation";
     private static final String TRINO_SCHEMA_OWNER_TYPE_PROPERTY = "trino.owner-type";
     private static final Set<String> PAIMON_OPTION_UPDATES_REQUIRING_EXISTING_OPTIONS = Set.of(
             CoreOptions.BUCKET.key(),
@@ -291,9 +293,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
         Map<String, DataField> createdFieldsByLowerName = createdTableFieldsByLowerName(table.rowType().getFields(),
                 tableMetadata.getTable());
-        Snapshot.Operation createTableOperation = replace
-                ? Snapshot.Operation.CREATE_OR_REPLACE_TABLE_AS_SELECT
-                : Snapshot.Operation.CREATE_TABLE_AS_SELECT;
+        String createTableOperation = replace
+                ? PaimonTableHandle.CREATE_OR_REPLACE_TABLE_AS_SELECT_OPERATION
+                : PaimonTableHandle.CREATE_TABLE_AS_SELECT_OPERATION;
         return tableHandle.withWriteColumns(tableMetadata.getColumns().stream()
                 .map(column -> {
                     DataField field = createdTableField(createdFieldsByLowerName, column.getName(),
@@ -455,7 +457,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             PaimonTableHandle tableHandle,
             Collection<Slice> fragments,
             PaimonSessionProperties.InsertExistingPartitionsBehavior insertBehavior,
-            Optional<org.apache.paimon.Snapshot.Operation> operation)
+            Optional<String> operation)
     {
         requireNonNull(session, "session is null");
         requireNonNull(insertBehavior, "insertBehavior is null");
@@ -465,7 +467,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 && insertBehavior != PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE) {
             return Optional.empty();
         }
-        Optional<Snapshot.Operation> commitOperation = commitOperation(insertBehavior, operation);
+        Optional<String> commitOperation = commitOperation(insertBehavior, operation);
 
         List<CommitMessage> commitMessages = deserializeCommitMessages(fragmentsList);
         Catalog sessionCatalog = catalog.forSession(session);
@@ -483,7 +485,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
 
             try (BatchTableCommit commit = batchWriteBuilder.newCommit()) {
-                commitOperation.ifPresent(commit::withOperation);
+                if (commitOperation.isPresent()) {
+                    applyCommitOperationIfSupported(commit, commitOperation.get());
+                }
                 commit.commit(commitMessages);
             }
         }
@@ -521,17 +525,58 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return exception;
     }
 
-    private static Optional<Snapshot.Operation> commitOperation(
+    private static Optional<String> commitOperation(
             PaimonSessionProperties.InsertExistingPartitionsBehavior insertBehavior,
-            Optional<Snapshot.Operation> explicitOperation)
+            Optional<String> explicitOperation)
     {
         if (explicitOperation.isPresent()) {
             return explicitOperation;
         }
         if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE) {
-            return Optional.of(Snapshot.Operation.OVERWRITE);
+            return Optional.of(OVERWRITE_OPERATION);
         }
         return Optional.empty();
+    }
+
+    private static void applyCommitOperationIfSupported(BatchTableCommit commit, String operationName)
+            throws ReflectiveOperationException
+    {
+        requireNonNull(commit, "commit is null");
+        requireNonNull(operationName, "operationName is null");
+
+        Class<?> operationClass;
+        try {
+            operationClass = Class.forName(
+                    PAIMON_SNAPSHOT_OPERATION_CLASS_NAME,
+                    false,
+                    BatchTableCommit.class.getClassLoader());
+        }
+        catch (ClassNotFoundException e) {
+            return;
+        }
+
+        Object operation;
+        try {
+            operation = operationValue(operationClass, operationName);
+        }
+        catch (IllegalArgumentException e) {
+            return;
+        }
+
+        Method withOperation;
+        try {
+            withOperation = BatchTableCommit.class.getMethod("withOperation", operationClass);
+        }
+        catch (NoSuchMethodException e) {
+            return;
+        }
+        withOperation.invoke(commit, operation);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static Object operationValue(Class<?> operationClass, String operationName)
+    {
+        return Enum.valueOf(operationClass.asSubclass(Enum.class), operationName);
     }
 
     private static List<CommitMessage> deserializeCommitMessages(List<Slice> fragments)
@@ -807,7 +852,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         commit(session, paimonTableHandle, fragments,
                 PaimonSessionProperties.InsertExistingPartitionsBehavior.APPEND,
-                Optional.of(MERGE));
+                Optional.of(MERGE_OPERATION));
     }
 
     private void finishMetadataDeleteFallbackMerge(

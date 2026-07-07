@@ -59,7 +59,6 @@ import io.trino.spi.type.VarbinaryType;
 import io.trino.testing.TestingConnectorSession;
 import io.trino.type.TypeDeserializer;
 import org.apache.paimon.CoreOptions;
-import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
@@ -1655,7 +1654,7 @@ public class PaimonMetadataTableModeTest
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
         AtomicBoolean committed = new AtomicBoolean();
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
-        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
+        AtomicReference<String> operation = new AtomicReference<>();
         FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
                 overwriteEnabled, operation);
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
@@ -1672,7 +1671,7 @@ public class PaimonMetadataTableModeTest
                 .isEmpty();
 
         assertThat(overwriteEnabled).isTrue();
-        assertThat(operation).hasValue(Snapshot.Operation.OVERWRITE);
+        assertThat(operation).hasValue("OVERWRITE");
         assertThat(committed).isTrue();
     }
 
@@ -1682,7 +1681,7 @@ public class PaimonMetadataTableModeTest
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
         AtomicBoolean committed = new AtomicBoolean();
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
-        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
+        AtomicReference<String> operation = new AtomicReference<>();
         FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
                 overwriteEnabled, operation);
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
@@ -1700,7 +1699,7 @@ public class PaimonMetadataTableModeTest
 
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(overwriteEnabled).isTrue();
-        assertThat(operation).hasValue(Snapshot.Operation.OVERWRITE);
+        assertThat(operation).hasValue("OVERWRITE");
         assertThat(committed).isTrue();
         assertThat(catalog.initialized).isTrue();
     }
@@ -1712,7 +1711,7 @@ public class PaimonMetadataTableModeTest
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
         AtomicBoolean committed = new AtomicBoolean();
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
-        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
+        AtomicReference<String> operation = new AtomicReference<>();
         FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
                 overwriteEnabled, operation);
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
@@ -1728,7 +1727,7 @@ public class PaimonMetadataTableModeTest
         metadata.finishMerge(overwriteSession, new PaimonMergeTableHandle(tableHandle), List.of(commitFragment()), List.of());
 
         assertThat(overwriteEnabled).isFalse();
-        assertThat(operation).hasValue(Snapshot.Operation.MERGE);
+        assertThat(operation).hasValue("MERGE");
         assertThat(committed).isTrue();
     }
 
@@ -2061,17 +2060,17 @@ public class PaimonMetadataTableModeTest
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
         AtomicBoolean committed = new AtomicBoolean();
-        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
+        AtomicReference<String> operation = new AtomicReference<>();
         FileStoreTable table = commitFileStoreTable(copiedWithLatestSchema, committed, new AtomicReference<>(), null,
                 new AtomicBoolean(), operation);
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
-                .withCreateTableOperation(Snapshot.Operation.CREATE_TABLE_AS_SELECT);
+                .withCreateTableOperation(PaimonTableHandle.CREATE_TABLE_AS_SELECT_OPERATION);
 
         metadata.finishCreateTable(SESSION, tableHandle, List.of(commitFragment()), List.of());
 
         assertThat(copiedWithLatestSchema).isTrue();
-        assertThat(operation).hasValue(Snapshot.Operation.CREATE_TABLE_AS_SELECT);
+        assertThat(operation).hasValue(PaimonTableHandle.CREATE_TABLE_AS_SELECT_OPERATION);
         assertThat(committed).isTrue();
     }
 
@@ -2080,16 +2079,16 @@ public class PaimonMetadataTableModeTest
             throws Exception
     {
         AtomicBoolean committed = new AtomicBoolean();
-        AtomicReference<Snapshot.Operation> operation = new AtomicReference<>();
+        AtomicReference<String> operation = new AtomicReference<>();
         FileStoreTable table = commitFileStoreTable(new AtomicBoolean(), committed, new AtomicReference<>(), null,
                 new AtomicBoolean(), operation);
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
-                .withCreateTableOperation(Snapshot.Operation.CREATE_OR_REPLACE_TABLE_AS_SELECT);
+                .withCreateTableOperation(PaimonTableHandle.CREATE_OR_REPLACE_TABLE_AS_SELECT_OPERATION);
 
         metadata.finishCreateTable(SESSION, tableHandle, List.of(commitFragment()), List.of());
 
-        assertThat(operation).hasValue(Snapshot.Operation.CREATE_OR_REPLACE_TABLE_AS_SELECT);
+        assertThat(operation).hasValue(PaimonTableHandle.CREATE_OR_REPLACE_TABLE_AS_SELECT_OPERATION);
         assertThat(committed).isTrue();
     }
 
@@ -6527,7 +6526,7 @@ public class PaimonMetadataTableModeTest
         PaimonTableHandle handle = (PaimonTableHandle) metadata.beginCreateTable(SESSION, tableMetadata,
                 Optional.empty(), RetryMode.NO_RETRIES);
 
-        assertThat(handle.getCreateTableOperation()).hasValue(Snapshot.Operation.CREATE_TABLE_AS_SELECT);
+        assertThat(handle.getCreateTableOperation()).hasValue(PaimonTableHandle.CREATE_TABLE_AS_SELECT_OPERATION);
     }
 
     @Test
@@ -6544,7 +6543,7 @@ public class PaimonMetadataTableModeTest
         PaimonTableHandle handle = (PaimonTableHandle) metadata.beginCreateTable(SESSION, tableMetadata,
                 Optional.empty(), RetryMode.NO_RETRIES, true);
 
-        assertThat(handle.getCreateTableOperation()).hasValue(Snapshot.Operation.CREATE_OR_REPLACE_TABLE_AS_SELECT);
+        assertThat(handle.getCreateTableOperation()).hasValue(PaimonTableHandle.CREATE_OR_REPLACE_TABLE_AS_SELECT_OPERATION);
     }
 
     @Test
@@ -7317,7 +7316,7 @@ public class PaimonMetadataTableModeTest
             AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
             RuntimeException commitFailure,
             AtomicBoolean overwriteEnabled,
-            AtomicReference<Snapshot.Operation> operation)
+            AtomicReference<String> operation)
     {
         return commitFileStoreTable(
                 copiedWithLatestSchema,
@@ -7359,7 +7358,7 @@ public class PaimonMetadataTableModeTest
             AtomicReference<Map<String, String>> copyWithoutTimeTravelOptions,
             RuntimeException commitFailure,
             AtomicBoolean overwriteEnabled,
-            AtomicReference<Snapshot.Operation> operation,
+            AtomicReference<String> operation,
             List<PartitionEntry> existingPartitions,
             List<String> partitionKeys,
             Map<String, String> options)
@@ -7391,7 +7390,7 @@ public class PaimonMetadataTableModeTest
                     }
                     case "withOperation" -> {
                         assertThat(args).hasSize(1);
-                        operation.set((Snapshot.Operation) args[0]);
+                        operation.set(String.valueOf(args[0]));
                         yield proxy;
                     }
                     case "close", "abort", "withMetricRegistry" -> proxy;

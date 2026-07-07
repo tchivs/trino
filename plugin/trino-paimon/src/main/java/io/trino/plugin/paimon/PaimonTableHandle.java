@@ -30,7 +30,6 @@ import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
-import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.ConfigOption;
@@ -70,6 +69,8 @@ public class PaimonTableHandle
         ConnectorTableFunctionHandle
 {
     static final String UNSUPPORTED_HISTORICAL_READ_MESSAGE = "Paimon system tables do not support historical reads";
+    static final String CREATE_TABLE_AS_SELECT_OPERATION = "CREATE_TABLE_AS_SELECT";
+    static final String CREATE_OR_REPLACE_TABLE_AS_SELECT_OPERATION = "CREATE_OR_REPLACE_TABLE_AS_SELECT";
     private static final Set<String> INCREMENTAL_READ_OPTION_KEYS = Set.of(
             CoreOptions.INCREMENTAL_BETWEEN.key(),
             CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(),
@@ -103,7 +104,7 @@ public class PaimonTableHandle
     private final Optional<List<PaimonColumnHandle>> writeColumns;
     private final OptionalLong limit;
     private final Optional<List<Map<String, String>>> deletePartitionSpecs;
-    private final Optional<Snapshot.Operation> createTableOperation;
+    private final Optional<String> createTableOperation;
     private final Map<String, String> dynamicOptions;
 
     private transient Map<Catalog, Table> tablesByCatalog;
@@ -140,7 +141,7 @@ public class PaimonTableHandle
             @JsonProperty(value = "writeColumns", required = true) Optional<List<PaimonColumnHandle>> writeColumns,
             @JsonProperty(value = "limit", required = true) OptionalLong limit,
             @JsonProperty("deletePartitionSpecs") Optional<List<Map<String, String>>> deletePartitionSpecs,
-            @JsonProperty("createTableOperation") Optional<Snapshot.Operation> createTableOperation)
+            @JsonProperty("createTableOperation") Optional<String> createTableOperation)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         checkArgument(!this.schemaName.isBlank(), "schemaName is blank");
@@ -153,7 +154,7 @@ public class PaimonTableHandle
         this.writeColumns = copyColumnHandles(writeColumns, "writeColumns");
         this.limit = requireNonNull(limit, "limit is null");
         this.deletePartitionSpecs = copyDeletePartitionSpecs(deletePartitionSpecs);
-        this.createTableOperation = createTableOperation == null ? Optional.empty() : createTableOperation;
+        this.createTableOperation = copyCreateTableOperation(createTableOperation);
         checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
     }
 
@@ -166,6 +167,19 @@ public class PaimonTableHandle
             checkArgument(!value.isBlank(), "dynamicOptions contains blank value for key '%s'".formatted(key));
         });
         return Map.copyOf(dynamicOptions);
+    }
+
+    private static Optional<String> copyCreateTableOperation(Optional<String> createTableOperation)
+    {
+        Optional<String> operation = createTableOperation == null ? Optional.empty() : createTableOperation;
+        operation.ifPresent(value -> {
+            checkArgument(!value.isBlank(), "createTableOperation is blank");
+            checkArgument(value.equals(CREATE_TABLE_AS_SELECT_OPERATION)
+                            || value.equals(CREATE_OR_REPLACE_TABLE_AS_SELECT_OPERATION),
+                    "Unsupported createTableOperation: %s",
+                    value);
+        });
+        return operation;
     }
 
     private static void validateDynamicOptionsSemantics(Map<String, String> dynamicOptions)
@@ -332,7 +346,7 @@ public class PaimonTableHandle
 
     @JsonProperty
     @JsonInclude(JsonInclude.Include.ALWAYS)
-    public Optional<Snapshot.Operation> getCreateTableOperation()
+    public Optional<String> getCreateTableOperation()
     {
         return createTableOperation;
     }
@@ -659,7 +673,7 @@ public class PaimonTableHandle
                 Optional.of(toPaimonColumnHandles(writeColumns)), limit, Optional.empty(), createTableOperation);
     }
 
-    public PaimonTableHandle withCreateTableOperation(Snapshot.Operation createTableOperation)
+    public PaimonTableHandle withCreateTableOperation(String createTableOperation)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
                 limit, deletePartitionSpecs, Optional.of(requireNonNull(createTableOperation,
