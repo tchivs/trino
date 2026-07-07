@@ -1283,9 +1283,26 @@ public record PaimonMetadata(PaimonCatalog catalog,
             throw e;
         }
         catch (RuntimeException e) {
+            Optional<TrinoException> mappedFailure = nestedTrinoException(e);
+            if (mappedFailure.isPresent()) {
+                throw mappedFailure.get();
+            }
             return TableStatistics.empty();
         }
         return statistics.map(value -> toTableStatistics(table, value)).orElse(TableStatistics.empty());
+    }
+
+    private static Optional<TrinoException> nestedTrinoException(RuntimeException exception)
+    {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = exception.getCause();
+        while (current != null && visited.add(current)) {
+            if (current instanceof TrinoException trinoException) {
+                return Optional.of(trinoException);
+            }
+            current = current.getCause();
+        }
+        return Optional.empty();
     }
 
     private TableStatistics toTableStatistics(Table table, Statistics statistics)

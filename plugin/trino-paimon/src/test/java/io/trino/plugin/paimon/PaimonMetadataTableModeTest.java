@@ -522,6 +522,12 @@ public class PaimonMetadataTableModeTest
 
         assertThatThrownBy(() -> metadata.getTableStatistics(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
                 .isSameAs(failure);
+
+        PaimonMetadata nestedFailureMetadata = new PaimonMetadata(
+                new TestingPaimonCatalog(failingStatisticsTable(rowType, new RuntimeException(new RuntimeException(failure)))),
+                TESTING_TYPE_MANAGER);
+        assertThatThrownBy(() -> nestedFailureMetadata.getTableStatistics(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
+                .isSameAs(failure);
     }
 
     @Test
