@@ -3464,14 +3464,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     private static RuntimeException paimonMetadataException(String message, Exception exception)
     {
-        if (exception instanceof TrinoException trinoException) {
+        Throwable recognizedFailure = firstRecognizedMetadataFailure(exception);
+        if (recognizedFailure instanceof TrinoException trinoException) {
             return trinoException;
         }
-        Optional<RuntimeException> catalogException = paimonCatalogException(exception);
-        if (catalogException.isPresent()) {
-            return catalogException.get();
+        if (recognizedFailure instanceof Exception recognizedException) {
+            Optional<RuntimeException> catalogException = paimonCatalogException(recognizedException);
+            if (catalogException.isPresent()) {
+                return catalogException.get();
+            }
         }
-        if (exception instanceof UnsupportedOperationException unsupportedOperationException) {
+        if (recognizedFailure instanceof UnsupportedOperationException unsupportedOperationException) {
             return new TrinoException(NOT_SUPPORTED,
                     unsupportedOperationException.getMessage() == null || unsupportedOperationException.getMessage().isBlank()
                             ? message
@@ -3490,6 +3493,22 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return new TrinoException(PAIMON_METADATA_ERROR, message, runtimeException);
         }
         return new TrinoException(PAIMON_METADATA_ERROR, message, exception);
+    }
+
+    private static Throwable firstRecognizedMetadataFailure(Exception exception)
+    {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = exception;
+        while (current != null && visited.add(current)) {
+            if (current instanceof TrinoException || current instanceof UnsupportedOperationException) {
+                return current;
+            }
+            if (current instanceof Exception currentException && paimonCatalogException(currentException).isPresent()) {
+                return current;
+            }
+            current = current.getCause();
+        }
+        return exception;
     }
 
     private static Optional<RuntimeException> paimonCatalogException(Exception exception)

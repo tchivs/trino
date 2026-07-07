@@ -5313,6 +5313,34 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testNestedUnsupportedAlterFailureUsesNotSupported()
+    {
+        UnsupportedOperationException unsupported = new UnsupportedOperationException("nested alter feature is unsupported");
+        RuntimeException failure = new RuntimeException(new RuntimeException(unsupported));
+        PaimonMetadata metadata = new PaimonMetadata(new RuntimeFailingAlterCatalog(failure), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("nested alter feature is unsupported");
+                    assertThat(exception.getCause()).isSameAs(unsupported);
+                });
+    }
+
+    @Test
+    public void testNestedTrinoAlterFailuresArePreserved()
+    {
+        TrinoException mapped = new TrinoException(PAIMON_METADATA_ERROR, "already mapped alter failure");
+        RuntimeException failure = new RuntimeException(new RuntimeException(mapped));
+        PaimonMetadata metadata = new PaimonMetadata(new RuntimeFailingAlterCatalog(failure), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of("bucket", Optional.of("4"))))
+                .isSameAs(mapped);
+    }
+
+    @Test
     public void testCheckedAlterFailureUsesPaimonMetadataError()
     {
         IOException failure = new IOException("metastore I/O failed");
@@ -5496,6 +5524,14 @@ public class PaimonMetadataTableModeTest
                 new RuntimeWrappedRenameFailureCatalog(new Catalog.TableAlreadyExistException(target)),
                 TESTING_TYPE_MANAGER);
         assertTrinoError(() -> existingTargetMetadata.renameTable(SESSION, tableHandle,
+                        new SchemaTableName(target.getDatabaseName(), target.getObjectName())),
+                TABLE_ALREADY_EXISTS.toErrorCode(),
+                "Table 'target_schema.target' already exists");
+
+        PaimonMetadata deeplyWrappedExistingTargetMetadata = new PaimonMetadata(
+                new RuntimeWrappedRenameFailureCatalog(new RuntimeException(new Catalog.TableAlreadyExistException(target))),
+                TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> deeplyWrappedExistingTargetMetadata.renameTable(SESSION, tableHandle,
                         new SchemaTableName(target.getDatabaseName(), target.getObjectName())),
                 TABLE_ALREADY_EXISTS.toErrorCode(),
                 "Table 'target_schema.target' already exists");
