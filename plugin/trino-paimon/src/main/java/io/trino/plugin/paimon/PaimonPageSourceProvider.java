@@ -86,7 +86,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -297,7 +296,7 @@ public class PaimonPageSourceProvider
                     List<RawFile> files = optionalRawFiles.orElseThrow();
                     validateAlignedMetadataFiles("indexFiles", indexFiles, files.size());
                     validateAlignedMetadataFiles("deletionFiles", deletionFiles, files.size());
-                    LinkedList<Supplier<ConnectorPageSource>> sources = new LinkedList<>();
+                    List<Supplier<ConnectorPageSource>> sources = new ArrayList<>(files.size());
 
                     // if file index exists, do the filter.
                     for (int i = 0; i < files.size(); i++) {

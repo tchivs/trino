@@ -17,8 +17,8 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.OptionalLong;
 import java.util.Queue;
@@ -42,7 +42,7 @@ public class PaimonSplitSource
     public PaimonSplitSource(List<PaimonSplit> splits, OptionalLong limit)
     {
         requireNonNull(splits, "splits is null").forEach(split -> requireNonNull(split, "splits contains null split"));
-        this.splits = new LinkedList<>(splits);
+        this.splits = new ArrayDeque<>(splits);
         this.limit = requireNonNull(limit, "limit is null");
         checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
     }

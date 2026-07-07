@@ -19,7 +19,9 @@ import io.trino.spi.metrics.Metrics;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.util.LinkedList;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
@@ -34,7 +36,7 @@ public class DirectTrinoPageSource
         implements
         ConnectorPageSource
 {
-    private final LinkedList<PageSourceHandle> pageSourceQueue;
+    private final Deque<PageSourceHandle> pageSourceQueue;
     private final OptionalLong limit;
     private PageSourceHandle current;
     private long completedBytes;
@@ -43,25 +45,25 @@ public class DirectTrinoPageSource
     private Metrics completedMetrics = Metrics.EMPTY;
     private boolean closed;
 
-    public DirectTrinoPageSource(LinkedList<ConnectorPageSource> pageSourceQueue)
+    public DirectTrinoPageSource(List<ConnectorPageSource> pageSourceQueue)
     {
         this(OptionalLong.empty(), wrapPageSources(pageSourceQueue));
     }
 
-    public DirectTrinoPageSource(LinkedList<ConnectorPageSource> pageSourceQueue, OptionalLong limit)
+    public DirectTrinoPageSource(List<ConnectorPageSource> pageSourceQueue, OptionalLong limit)
     {
         this(limit, wrapPageSources(pageSourceQueue));
     }
 
-    static DirectTrinoPageSource lazyPageSources(LinkedList<Supplier<ConnectorPageSource>> pageSourceSuppliers, OptionalLong limit)
+    static DirectTrinoPageSource lazyPageSources(List<Supplier<ConnectorPageSource>> pageSourceSuppliers, OptionalLong limit)
     {
         requireNonNull(pageSourceSuppliers, "pageSourceSuppliers is null");
-        LinkedList<PageSourceHandle> pageSourceQueue = new LinkedList<>();
+        Deque<PageSourceHandle> pageSourceQueue = new ArrayDeque<>(pageSourceSuppliers.size());
         pageSourceSuppliers.forEach(supplier -> pageSourceQueue.add(PageSourceHandle.lazy(supplier)));
         return new DirectTrinoPageSource(limit, pageSourceQueue);
     }
 
-    private DirectTrinoPageSource(OptionalLong limit, LinkedList<PageSourceHandle> pageSourceQueue)
+    private DirectTrinoPageSource(OptionalLong limit, Deque<PageSourceHandle> pageSourceQueue)
     {
         this.pageSourceQueue = requireNonNull(pageSourceQueue, "pageSourceQueue is null");
         this.pageSourceQueue.forEach(source -> requireNonNull(source, "pageSourceQueue contains null source"));
@@ -310,10 +312,10 @@ public class DirectTrinoPageSource
         }
     }
 
-    private static LinkedList<PageSourceHandle> wrapPageSources(LinkedList<ConnectorPageSource> pageSourceQueue)
+    private static Deque<PageSourceHandle> wrapPageSources(List<ConnectorPageSource> pageSourceQueue)
     {
         requireNonNull(pageSourceQueue, "pageSourceQueue is null");
-        LinkedList<PageSourceHandle> sources = new LinkedList<>();
+        Deque<PageSourceHandle> sources = new ArrayDeque<>(pageSourceQueue.size());
         pageSourceQueue.forEach(source -> {
             requireNonNull(source, "pageSourceQueue contains null source");
             sources.add(PageSourceHandle.eager(source));
