@@ -63,7 +63,9 @@ public class PaimonTableOptionUtils
             CoreOptions.INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT.key(),
             CoreOptions.STREAMING_READ_SNAPSHOT_DELAY.key(),
             CoreOptions.STREAMING_READ_OVERWRITE.key(),
-            CoreOptions.STREAMING_READ_APPEND_OVERWRITE.key());
+            CoreOptions.STREAMING_READ_APPEND_OVERWRITE.key(),
+            CoreOptions.CONSUMER_ID.key(),
+            CoreOptions.CONSUMER_IGNORE_PROGRESS.key());
     private static final Set<String> WRITE_DYNAMIC_OPTION_ONLY_KEYS = Set.of(
             CoreOptions.SCAN_FALLBACK_SNAPSHOT_BRANCH.key(),
             CoreOptions.SCAN_FALLBACK_DELTA_BRANCH.key(),

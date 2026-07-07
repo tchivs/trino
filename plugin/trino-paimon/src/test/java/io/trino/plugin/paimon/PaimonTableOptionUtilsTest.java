@@ -147,6 +147,8 @@ public class PaimonTableOptionUtilsTest
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("incremental_between")).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("incremental_to_auto_tag")).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("scan_version")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("consumer_id")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("consumer_ignore_progress")).isTrue();
 
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("scan_fallback_branch")).isFalse();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("blob_view_resolve_enabled")).isFalse();
@@ -161,6 +163,8 @@ public class PaimonTableOptionUtilsTest
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.INCREMENTAL_BETWEEN.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_IGNORE_LOST_FILE.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_MANIFEST_PARALLELISM.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.CONSUMER_ID.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.CONSUMER_IGNORE_PROGRESS.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_FALLBACK_BRANCH.key())).isFalse();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key())).isFalse();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.VECTOR_FILE_FORMAT.key())).isFalse();
@@ -207,6 +211,10 @@ public class PaimonTableOptionUtilsTest
                 .noneMatch(property -> property.getName().equals("stream_scan_mode"));
         assertThat(tableOptions.getTableProperties())
                 .noneMatch(property -> property.getName().equals("batch_scan_mode"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("consumer_id"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("consumer_ignore_progress"));
         assertThat(tableOptions.getTableProperties())
                 .noneMatch(property -> property.getName().startsWith("materialized_table_"));
         assertThat(tableOptions.getTableProperties())
@@ -337,6 +345,8 @@ public class PaimonTableOptionUtilsTest
                         entry(CoreOptions.SCAN_PRIMARY_BRANCH.key(), "main_branch"),
                         entry(CoreOptions.SCAN_SNAPSHOT_ID.key(), "7"),
                         entry(CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"),
+                        entry(CoreOptions.CONSUMER_ID.key(), "streaming-job"),
+                        entry(CoreOptions.CONSUMER_IGNORE_PROGRESS.key(), "true"),
                         entry(CoreOptions.MATERIALIZED_TABLE_REFRESH_HANDLER_BYTES.key(), "serialized"),
                         entry(CoreOptions.SCAN_FALLBACK_BRANCH.key(), "branch_a")),
                 List.of("id"),
@@ -356,6 +366,8 @@ public class PaimonTableOptionUtilsTest
                 .doesNotContainKeys(
                         "scan_snapshot_id",
                         "incremental_between",
+                        "consumer_id",
+                        "consumer_ignore_progress",
                         "branch",
                         "stream_scan_mode",
                         "batch_scan_mode",

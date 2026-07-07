@@ -67,6 +67,7 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -488,17 +489,19 @@ public class TrinoTableHandleTest
     public void testTableWithWriteDynamicOptionsDropsRuntimeScanOptions()
             throws Exception
     {
-        Map<String, String> handleOptions = Map.of(
-                "custom.option", "value",
-                CoreOptions.SCAN_FALLBACK_SNAPSHOT_BRANCH.key(), "snapshot_branch",
-                CoreOptions.SCAN_FALLBACK_DELTA_BRANCH.key(), "delta_branch",
-                CoreOptions.SCAN_FALLBACK_BRANCH.key(), "fallback_branch",
-                CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key(), "true",
-                CoreOptions.SCAN_IGNORE_LOST_FILE.key(), "true",
-                CoreOptions.SCAN_MANIFEST_PARALLELISM.key(), "4",
-                CoreOptions.SCAN_MAX_SPLITS_PER_TASK.key(), "32",
-                CoreOptions.SCAN_PRIMARY_BRANCH.key(), "primary_branch",
-                CoreOptions.STREAMING_READ_OVERWRITE.key(), "true");
+        Map<String, String> handleOptions = Map.ofEntries(
+                entry("custom.option", "value"),
+                entry(CoreOptions.SCAN_FALLBACK_SNAPSHOT_BRANCH.key(), "snapshot_branch"),
+                entry(CoreOptions.SCAN_FALLBACK_DELTA_BRANCH.key(), "delta_branch"),
+                entry(CoreOptions.SCAN_FALLBACK_BRANCH.key(), "fallback_branch"),
+                entry(CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key(), "true"),
+                entry(CoreOptions.SCAN_IGNORE_LOST_FILE.key(), "true"),
+                entry(CoreOptions.SCAN_MANIFEST_PARALLELISM.key(), "4"),
+                entry(CoreOptions.SCAN_MAX_SPLITS_PER_TASK.key(), "32"),
+                entry(CoreOptions.SCAN_PRIMARY_BRANCH.key(), "primary_branch"),
+                entry(CoreOptions.STREAMING_READ_OVERWRITE.key(), "true"),
+                entry(CoreOptions.CONSUMER_ID.key(), "streaming-job"),
+                entry(CoreOptions.CONSUMER_IGNORE_PROGRESS.key(), "true"));
         PaimonTableHandle handle = new PaimonTableHandle("test", "user", handleOptions, TupleDomain.all(),
                 Optional.empty(), Optional.empty(), OptionalLong.empty());
 
