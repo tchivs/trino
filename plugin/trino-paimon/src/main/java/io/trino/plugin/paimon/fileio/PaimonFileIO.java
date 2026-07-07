@@ -306,6 +306,12 @@ public class PaimonFileIO
         catch (IllegalArgumentException e) {
             return Optional.empty();
         }
+        catch (IOException e) {
+            if (isObjectNotFound(e)) {
+                return Optional.empty();
+            }
+            throw e;
+        }
     }
 
     private boolean existFile(Location location)
@@ -316,6 +322,12 @@ public class PaimonFileIO
         }
         catch (IllegalArgumentException e) {
             return false;
+        }
+        catch (IOException e) {
+            if (isObjectNotFound(e)) {
+                return false;
+            }
+            throw e;
         }
     }
 

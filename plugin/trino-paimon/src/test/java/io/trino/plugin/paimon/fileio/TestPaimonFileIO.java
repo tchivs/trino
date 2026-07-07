@@ -170,6 +170,32 @@ public class TestPaimonFileIO
     }
 
     @Test
+    public void testObjectStoreNotFoundHeadDoesNotBreakFileOperations()
+            throws IOException
+    {
+        PaimonFileIO fileIO = objectStoreFileIO(new MissingObjectHeadFileSystem());
+        Path missing = new Path("memory:///warehouse/minio_smoke.db/orders/missing");
+        Path source = new Path("memory:///warehouse/minio_smoke.db/orders/schema/.schema-0.tmp");
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/schema/schema-0");
+        Path dataFile = new Path("memory:///warehouse/minio_smoke.db/orders/data/data-0.parquet");
+
+        assertThat(fileIO.exists(missing)).isFalse();
+        assertThat(fileIO.listStatus(missing)).isEmpty();
+        assertThat(fileIO.delete(missing, false)).isFalse();
+        assertThat(fileIO.rename(missing, target)).isFalse();
+
+        fileIO.writeFile(source, "schema", false);
+        assertThat(fileIO.rename(source, target)).isTrue();
+        assertThat(fileIO.readFileUtf8(target)).isEqualTo("schema");
+
+        TwoPhaseOutputStream out = fileIO.newTwoPhaseOutputStream(dataFile, false);
+        out.write("data".getBytes(StandardCharsets.UTF_8));
+        out.closeForCommit().commit(fileIO);
+
+        assertThat(fileIO.readFileUtf8(dataFile)).isEqualTo("data");
+    }
+
+    @Test
     public void testListStatusReturnsOnlyDirectChildren()
             throws IOException
     {
@@ -852,6 +878,71 @@ public class TestPaimonFileIO
                 return new FailedHeadInputFile(delegate, false);
             }
             return delegate;
+        }
+    }
+
+    private static class MissingObjectHeadFileSystem
+            extends NoRenameFileSystem
+    {
+        @Override
+        public TrinoInputFile newInputFile(Location location)
+        {
+            return new MissingObjectHeadInputFile(super.newInputFile(location));
+        }
+    }
+
+    private static class MissingObjectHeadInputFile
+            implements TrinoInputFile
+    {
+        private final TrinoInputFile delegate;
+
+        private MissingObjectHeadInputFile(TrinoInputFile delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public TrinoInput newInput()
+                throws IOException
+        {
+            return delegate.newInput();
+        }
+
+        @Override
+        public TrinoInputStream newStream()
+                throws IOException
+        {
+            return delegate.newStream();
+        }
+
+        @Override
+        public long length()
+                throws IOException
+        {
+            return delegate.length();
+        }
+
+        @Override
+        public Instant lastModified()
+                throws IOException
+        {
+            return delegate.lastModified();
+        }
+
+        @Override
+        public boolean exists()
+                throws IOException
+        {
+            if (!delegate.exists()) {
+                throw new FileNotFoundException("simulated S3 HEAD not found for " + delegate.location());
+            }
+            return true;
+        }
+
+        @Override
+        public Location location()
+        {
+            return delegate.location();
         }
     }
 
