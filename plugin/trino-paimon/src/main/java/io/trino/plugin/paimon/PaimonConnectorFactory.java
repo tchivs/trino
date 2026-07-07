@@ -99,9 +99,9 @@ public class PaimonConnectorFactory
                 if (nameNode == null || valueNode == null) {
                     continue;
                 }
-                String key = nameNode.getTextContent();
+                String key = nameNode.getTextContent().trim();
                 String value = valueNode.getTextContent();
-                if (!StringUtils.isNullOrWhitespaceOnly(value)) {
+                if (!key.isEmpty() && !StringUtils.isNullOrWhitespaceOnly(value)) {
                     String hadoopKey = HADOOP_CONF_PREFIX + key;
                     if (!protectedConfigKeys.contains(hadoopKey)) {
                         config.put(hadoopKey, value);

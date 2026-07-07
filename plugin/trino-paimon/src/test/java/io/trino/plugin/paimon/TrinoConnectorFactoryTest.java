@@ -158,7 +158,13 @@ public class TrinoConnectorFactoryTest
                         <value>missing.name</value>
                     </property>
                     <property>
-                        <name>explicit.key</name>
+                        <name>   </name>
+                        <value>blank.name</value>
+                    </property>
+                    <property>
+                        <name>
+                            explicit.key
+                        </name>
                         <value>xml-value</value>
                     </property>
                 </configuration>
@@ -189,7 +195,7 @@ public class TrinoConnectorFactoryTest
                 .containsEntry("hadoop.fs.defaultFS", "s3://second")
                 .containsEntry("hadoop.new.key", "new-value")
                 .containsEntry("hadoop.explicit.key", "catalog-value")
-                .doesNotContainKeys("hadoop.blank.value", "hadoop.missing.value", "hadoop.missing.name");
+                .doesNotContainKeys("hadoop.blank.value", "hadoop.missing.value", "hadoop.missing.name", "hadoop.");
     }
 
     @Test
