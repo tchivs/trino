@@ -87,6 +87,31 @@ public class PaimonRow
 
     public PaimonRow(Page page, int position, RowKind rowKind, List<Type> types, List<DataType> logicalTypes)
     {
+        this(page, position, rowKind, types, logicalTypes, true);
+    }
+
+    /**
+     * Creates a row without defensively copying type metadata.
+     * Callers must pass immutable, null-free lists whose sizes match the page channel count.
+     */
+    public static PaimonRow fromTrustedTypeLists(
+            Page page,
+            int position,
+            RowKind rowKind,
+            List<Type> types,
+            List<DataType> logicalTypes)
+    {
+        return new PaimonRow(page, position, rowKind, types, logicalTypes, false);
+    }
+
+    private PaimonRow(
+            Page page,
+            int position,
+            RowKind rowKind,
+            List<Type> types,
+            List<DataType> logicalTypes,
+            boolean copyTypeMetadata)
+    {
         requireNonNull(page, "page is null");
         requireNonNull(rowKind, "rowKind is null");
         verify(position >= 0 && position < page.getPositionCount(),
@@ -98,8 +123,8 @@ public class PaimonRow
         this.page = page;
         this.position = position;
         this.rowKind = rowKind;
-        this.types = copyTypes(types);
-        this.logicalTypes = copyLogicalTypes(logicalTypes);
+        this.types = copyTypeMetadata ? copyTypes(types) : types;
+        this.logicalTypes = copyTypeMetadata ? copyLogicalTypes(logicalTypes) : logicalTypes;
     }
 
     private static List<Type> copyTypes(List<Type> types)

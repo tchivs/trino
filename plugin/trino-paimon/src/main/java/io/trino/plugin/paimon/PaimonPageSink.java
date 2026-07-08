@@ -282,7 +282,7 @@ public class PaimonPageSink
     private InternalRow row(Page page, int position, RowKind rowKind)
     {
         if (allColumnsPresent) {
-            return new PaimonRow(page, position, rowKind, columnTypes, logicalTypes);
+            return PaimonRow.fromTrustedTypeLists(page, position, rowKind, columnTypes, logicalTypes);
         }
         return new MappedPaimonRow(page, position, rowKind, inputColumnTypes, inputLogicalTypes, inputChannels,
                 defaultValues);
@@ -557,7 +557,7 @@ public class PaimonPageSink
                 int[] inputChannels,
                 Object[] defaultValues)
         {
-            this.inputRow = new PaimonRow(page, position, rowKind, inputColumnTypes, inputLogicalTypes);
+            this.inputRow = PaimonRow.fromTrustedTypeLists(page, position, rowKind, inputColumnTypes, inputLogicalTypes);
             this.inputChannels = inputChannels;
             this.defaultValues = defaultValues;
             this.rowKind = rowKind;

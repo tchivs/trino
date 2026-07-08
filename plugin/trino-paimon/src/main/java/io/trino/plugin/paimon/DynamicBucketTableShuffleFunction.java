@@ -88,7 +88,8 @@ public class DynamicBucketTableShuffleFunction
             page = rowIdFieldPage(page);
         }
 
-        PaimonRow paimonRow = new PaimonRow(page, position, RowKind.INSERT, paimonRowTypes, paimonLogicalTypes);
+        PaimonRow paimonRow = PaimonRow.fromTrustedTypeLists(page, position, RowKind.INSERT, paimonRowTypes,
+                paimonLogicalTypes);
         BinaryRow partition = partitionProjectionContext.get().apply(paimonRow);
         BinaryRow trimmedPrimaryKey = trimmedPrimaryKeyProjectionContext.get().apply(paimonRow);
         return BucketAssigner.computeAssigner(

@@ -84,7 +84,7 @@ public class FixedBucketTableShuffleFunction
             page = rowIdFieldPage(page);
         }
 
-        PaimonRow paimonRow = new PaimonRow(page, position, RowKind.INSERT, paimonRowTypes,
+        PaimonRow paimonRow = PaimonRow.fromTrustedTypeLists(page, position, RowKind.INSERT, paimonRowTypes,
                 paimonLogicalTypes);
         BinaryRow partition = partitionProjectionContext.get().apply(paimonRow);
         BinaryRow bucketKey = bucketKeyProjectionContext.get().apply(paimonRow);
