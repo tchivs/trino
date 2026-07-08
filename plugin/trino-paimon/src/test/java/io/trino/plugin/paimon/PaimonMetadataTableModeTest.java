@@ -5871,6 +5871,23 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetTablePropertiesRejectsHiddenPaimonOptions()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle, Map.of(
+                CoreOptions.PATH.key(), Optional.of("s3://warehouse/schema.db/table"),
+                CoreOptions.KEY_VALUE_SEQUENCE_NUMBER_ENABLED.key(), Optional.of("true"),
+                "materialized_table_refresh_status", Optional.of("SUCCESS"))),
+                NOT_SUPPORTED.toErrorCode(),
+                "The following properties cannot be updated: key-value.sequence_number.enabled, "
+                        + "materialized_table_refresh_status, path");
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testSetTablePropertiesValidatesPaimonOptionUpdatesBeforeCatalogAlter()
     {
         CapturingDdlCatalog immutableCatalog = new CapturingDdlCatalog(fileStoreTable(

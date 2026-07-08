@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
@@ -40,7 +41,7 @@ public class PaimonTableOptionUtils
 {
     private static final Pattern CAMEL_CASE_BOUNDARY = Pattern.compile("([a-z0-9])([A-Z])");
     private static final Pattern OPTION_KEY_SEPARATOR = Pattern.compile("[.\\-]");
-    private static final Set<String> EXCLUDED_TABLE_PROPERTY_OPTION_KEYS = Set.of(
+    private static final Set<String> RUNTIME_ONLY_TABLE_PROPERTY_OPTION_KEYS = Set.of(
             CoreOptions.SCAN_MODE.key(),
             CoreOptions.STREAM_SCAN_MODE.key(),
             CoreOptions.BATCH_SCAN_MODE.key(),
@@ -68,6 +69,12 @@ public class PaimonTableOptionUtils
             CoreOptions.STREAMING_READ_APPEND_OVERWRITE.key(),
             CoreOptions.CONSUMER_ID.key(),
             CoreOptions.CONSUMER_IGNORE_PROGRESS.key());
+    private static final Set<String> EXCLUDED_FROM_DOCUMENTATION_OPTION_KEYS =
+            excludedFromDocumentationOptionKeys(CoreOptions.class);
+    private static final Set<String> EXCLUDED_TABLE_PROPERTY_OPTION_KEYS = Stream.concat(
+                    RUNTIME_ONLY_TABLE_PROPERTY_OPTION_KEYS.stream(),
+                    EXCLUDED_FROM_DOCUMENTATION_OPTION_KEYS.stream())
+            .collect(toUnmodifiableSet());
     private static final Set<String> WRITE_DYNAMIC_OPTION_ONLY_KEYS = Set.of(
             CoreOptions.SCAN_FALLBACK_SNAPSHOT_BRANCH.key(),
             CoreOptions.SCAN_FALLBACK_DELTA_BRANCH.key(),
@@ -277,7 +284,7 @@ public class PaimonTableOptionUtils
     {
         requireNonNull(option, "option is null");
         requireNonNull(field, "field is null");
-        if (field.getAnnotation(ExcludeFromDocumentation.class) != null) {
+        if (isExcludedFromDocumentation(field)) {
             return true;
         }
         switch (field.getName()) {
@@ -290,6 +297,20 @@ public class PaimonTableOptionUtils
             default :
                 return EXCLUDED_TABLE_PROPERTY_OPTION_KEYS.contains(option.key());
         }
+    }
+
+    private static Set<String> excludedFromDocumentationOptionKeys(Class<?> clazz)
+    {
+        return extractConfigOptions(clazz).stream()
+                .filter(optionWithMetaInfo -> isExcludedFromDocumentation(optionWithMetaInfo.field))
+                .map(optionWithMetaInfo -> optionWithMetaInfo.option.key())
+                .collect(toUnmodifiableSet());
+    }
+
+    private static boolean isExcludedFromDocumentation(Field field)
+    {
+        requireNonNull(field, "field is null");
+        return field.getAnnotation(ExcludeFromDocumentation.class) != null;
     }
 
     public static String convertOptionKey(String key)

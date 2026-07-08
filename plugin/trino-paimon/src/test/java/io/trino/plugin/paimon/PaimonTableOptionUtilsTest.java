@@ -151,6 +151,13 @@ public class PaimonTableOptionUtilsTest
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("scan_version")).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("consumer_id")).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("consumer_ignore_progress")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("path")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("key_value_sequence_number_enabled")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("materialized_table_refresh_status")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty(
+                CoreOptions.KEY_VALUE_SEQUENCE_NUMBER_ENABLED.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty(
+                CoreOptions.MATERIALIZED_TABLE_REFRESH_STATUS.key())).isTrue();
 
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("scan_fallback_branch")).isFalse();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("blob_view_resolve_enabled")).isFalse();
@@ -169,6 +176,11 @@ public class PaimonTableOptionUtilsTest
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_MANIFEST_PARALLELISM.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.CONSUMER_ID.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.CONSUMER_IGNORE_PROGRESS.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.PATH.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(
+                CoreOptions.KEY_VALUE_SEQUENCE_NUMBER_ENABLED.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(
+                CoreOptions.MATERIALIZED_TABLE_REFRESH_STATUS.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_FALLBACK_BRANCH.key())).isFalse();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key())).isFalse();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.VECTOR_FILE_FORMAT.key())).isFalse();
@@ -186,6 +198,11 @@ public class PaimonTableOptionUtilsTest
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_FALLBACK_BRANCH.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_FALLBACK_BRANCH_READ_FAIL_FAST.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_PRIMARY_BRANCH.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.PATH.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(
+                CoreOptions.KEY_VALUE_SEQUENCE_NUMBER_ENABLED.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(
+                CoreOptions.MATERIALIZED_TABLE_REFRESH_STATUS.key())).isTrue();
 
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.BLOB_VIEW_RESOLVE_ENABLED.key())).isFalse();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.VECTOR_FILE_FORMAT.key())).isFalse();
@@ -221,6 +238,10 @@ public class PaimonTableOptionUtilsTest
                 .noneMatch(property -> property.getName().equals("consumer_id"));
         assertThat(tableOptions.getTableProperties())
                 .noneMatch(property -> property.getName().equals("consumer_ignore_progress"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("path"));
+        assertThat(tableOptions.getTableProperties())
+                .noneMatch(property -> property.getName().equals("key_value_sequence_number_enabled"));
         assertThat(tableOptions.getTableProperties())
                 .noneMatch(property -> property.getName().startsWith("materialized_table_"));
         assertThat(tableOptions.getTableProperties())
