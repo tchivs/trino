@@ -38,6 +38,8 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.GenericArray;
+import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.predicate.CompoundPredicate;
 import org.apache.paimon.predicate.LeafPredicate;
@@ -51,6 +53,7 @@ import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.types.VarBinaryType;
 import org.apache.paimon.types.VarCharType;
 import org.junit.jupiter.api.Test;
 
@@ -64,6 +67,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.IntStream;
 
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
@@ -499,6 +503,50 @@ public class TrinoFilterConverterTest
         assertThat(converter.convert(blobValue, acceptedDomains, unsupportedDomains)).isEmpty();
         assertThat(acceptedDomains).isEmpty();
         assertThat(unsupportedDomains).containsEntry(payload, blobValue.getDomains().orElseThrow().get(payload));
+    }
+
+    @Test
+    public void testVarbinaryPredicatePushdownUsesByteArrayLiterals()
+    {
+        RowType rowType = new RowType(Collections.singletonList(
+                new DataField(0, "payload", DataTypes.VARBINARY(VarBinaryType.MAX_LENGTH))));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PaimonColumnHandle payload = PaimonColumnHandle.of("payload",
+                DataTypes.VARBINARY(VarBinaryType.MAX_LENGTH));
+
+        TupleDomain<PaimonColumnHandle> equal = TupleDomain.withColumnDomains(Map.of(
+                payload, Domain.singleValue(VARBINARY, Slices.wrappedBuffer(new byte[] {0x01, (byte) 0xFF}))));
+        Predicate equalPredicate = converter.convert(equal).orElseThrow();
+
+        assertThat(equalPredicate).isInstanceOf(LeafPredicate.class);
+        LeafPredicate equalLeaf = (LeafPredicate) equalPredicate;
+        assertThat(equalLeaf.literals()).hasSize(1);
+        assertThat((byte[]) equalLeaf.literals().get(0)).containsExactly(0x01, (byte) 0xFF);
+        assertThat(equalLeaf.test(GenericRow.of((Object) new byte[] {0x01, (byte) 0xFF}))).isTrue();
+        assertThat(equalLeaf.test(GenericRow.of((Object) new byte[] {0x01, (byte) 0xFE}))).isFalse();
+        assertThat(equalLeaf.test(
+                10,
+                GenericRow.of((Object) new byte[] {0x01}),
+                GenericRow.of((Object) new byte[] {(byte) 0xFF}),
+                new GenericArray(new long[] {0}))).isTrue();
+        assertThat(equalLeaf.test(
+                10,
+                GenericRow.of((Object) new byte[] {0x02}),
+                GenericRow.of((Object) new byte[] {(byte) 0xFF}),
+                new GenericArray(new long[] {0}))).isFalse();
+
+        TupleDomain<PaimonColumnHandle> largeIn = TupleDomain.withColumnDomains(Map.of(
+                payload,
+                Domain.multipleValues(VARBINARY, IntStream.range(0, 21)
+                        .mapToObj(value -> Slices.wrappedBuffer(new byte[] {(byte) value}))
+                        .toList())));
+        Predicate inPredicate = converter.convert(largeIn).orElseThrow();
+
+        assertThat(inPredicate).isInstanceOf(LeafPredicate.class);
+        LeafPredicate inLeaf = (LeafPredicate) inPredicate;
+        assertThat(inLeaf.literals()).hasSize(21);
+        assertThat(inLeaf.test(GenericRow.of((Object) new byte[] {20}))).isTrue();
+        assertThat(inLeaf.test(GenericRow.of((Object) new byte[] {21}))).isFalse();
     }
 
     @Test
