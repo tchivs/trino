@@ -347,8 +347,12 @@ public class PaimonPageSourceProvider
         try {
             Split paimonSplit = split.decodeSplit();
             Optional<List<RawFile>> optionalRawFiles = paimonSplit.convertToRawFiles();
-            if (checkRawFile(tableHandle, optionalRawFiles, columns, filter)
-                    && directReaderSupportsFilter(projectedFields, table.partitionKeys(), filter)) {
+            if (checkRawFile(tableHandle, optionalRawFiles, columns, filter)) {
+                List<String> partitionKeys = table.partitionKeys();
+                if (!directReaderSupportsFilter(projectedFields, partitionKeys, filter)) {
+                    return createPaimonReaderPageSource(table, refreshToLatestSchema, readerFilter, paimonSplit,
+                            columns, limit, projectedFields);
+                }
                 List<RawFile> files = optionalRawFiles.orElseThrow();
                 if (projectedFields.isEmpty()) {
                     return createEmptyProjectionRawFilePageSource(table, refreshToLatestSchema, paimonSplit, files,
@@ -365,19 +369,25 @@ public class PaimonPageSourceProvider
                 Optional<List<DeletionFile>> deletionFiles = paimonSplit.deletionFiles();
                 Optional<List<IndexFile>> indexFiles = readIndex ? paimonSplit.indexFiles() : Optional.empty();
                 Optional<Predicate> fileIndexFilter = directReadTableContext.fileIndexFilter();
-                SchemaManager schemaManager = new SchemaManager(fileStoreTable.fileIO(), fileStoreTable.location());
-                long tableSchemaId = fileStoreTable.schema().id();
-                List<DataField> tableFields = rowType.getFields();
-                Map<Long, DirectReadSchemaPlan> schemaPlans = new HashMap<>();
-                schemaPlans.put(tableSchemaId, directReadSchemaPlan(projectedFields, filterDomains, tableFields,
-                        tableFields));
-                List<Type> type = columns.stream().map(PaimonColumnHandle::getTrinoType)
-                        .collect(Collectors.toList());
-                TrinoFileSystem fileSystem = fileSystemFactory.create(session);
 
                 try {
                     validateAlignedMetadataFiles("indexFiles", indexFiles, files.size());
                     validateAlignedMetadataFiles("deletionFiles", deletionFiles, files.size());
+                    // Raw-file predicate pushdown can change row positions before the deletion vector is applied.
+                    if (requiresPaimonReaderForDeletionVectorFilter(filter, deletionFiles, partitionKeys)) {
+                        return createPaimonReaderPageSource(table, refreshToLatestSchema, readerFilter, paimonSplit,
+                                columns, limit, projectedFields);
+                    }
+
+                    SchemaManager schemaManager = new SchemaManager(fileStoreTable.fileIO(), fileStoreTable.location());
+                    long tableSchemaId = fileStoreTable.schema().id();
+                    List<DataField> tableFields = rowType.getFields();
+                    Map<Long, DirectReadSchemaPlan> schemaPlans = new HashMap<>();
+                    schemaPlans.put(tableSchemaId, directReadSchemaPlan(projectedFields, filterDomains, tableFields,
+                            tableFields));
+                    List<Type> type = columns.stream().map(PaimonColumnHandle::getTrinoType)
+                            .collect(Collectors.toList());
+                    TrinoFileSystem fileSystem = fileSystemFactory.create(session);
                     List<Supplier<ConnectorPageSource>> sources = new ArrayList<>(files.size());
 
                     // if file index exists, do the filter.
@@ -430,10 +440,8 @@ public class PaimonPageSourceProvider
                     throw wrapPaimonReadException(e);
                 }
             }
-            else {
-                return createPaimonReaderPageSource(table, refreshToLatestSchema, readerFilter, paimonSplit, columns,
-                        limit, projectedFields);
-            }
+            return createPaimonReaderPageSource(table, refreshToLatestSchema, readerFilter, paimonSplit, columns, limit,
+                    projectedFields);
         }
         catch (Exception e) {
             throw wrapPaimonReadException(e);
@@ -601,6 +609,39 @@ public class PaimonPageSourceProvider
             }
         }
         return false;
+    }
+
+    static boolean requiresPaimonReaderForDeletionVectorFilter(
+            TupleDomain<PaimonColumnHandle> filter,
+            Optional<List<DeletionFile>> deletionFiles)
+    {
+        return requiresPaimonReaderForDeletionVectorFilter(filter, deletionFiles, List.of());
+    }
+
+    static boolean requiresPaimonReaderForDeletionVectorFilter(
+            TupleDomain<PaimonColumnHandle> filter,
+            Optional<List<DeletionFile>> deletionFiles,
+            List<String> partitionKeys)
+    {
+        requireNonNull(filter, "filter is null");
+        requireNonNull(deletionFiles, "deletionFiles is null");
+        requireNonNull(partitionKeys, "partitionKeys is null");
+        if (filter.isAll() || filter.isNone() || deletionFiles.isEmpty()) {
+            return false;
+        }
+        if (deletionFiles.orElseThrow().stream().noneMatch(deletionFile -> deletionFile != null)) {
+            return false;
+        }
+        Set<String> partitionKeyNames = partitionKeys.stream()
+                .map(key -> requireNonNull(key, "partitionKeys contains null key"))
+                .map(FieldNameUtils::toLowerCase)
+                .collect(Collectors.toSet());
+        return filter.getDomains()
+                .orElseThrow(() -> new IllegalStateException("Expected filter domains for non-trivial TupleDomain"))
+                .keySet().stream()
+                .map(PaimonColumnHandle::getColumnName)
+                .map(PaimonPageSourceProvider::requiredProjectedFieldName)
+                .anyMatch(field -> !partitionKeyNames.contains(field));
     }
 
     static DirectReadSchemaPlan directReadSchemaPlan(List<String> projectedFields, List<Domain> filterDomains,

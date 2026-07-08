@@ -896,6 +896,87 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDeletionVectorFiltersRequirePaimonReaderFallback()
+    {
+        PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
+        TupleDomain<PaimonColumnHandle> filter = TupleDomain.withColumnDomains(Map.of(
+                idColumn, Domain.singleValue(BIGINT, 2L)));
+        DeletionFile deletionFile = new DeletionFile("dv", 0, 10, 1L);
+
+        assertThat(PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                filter, Optional.of(List.of(deletionFile)))).isTrue();
+        assertThat(PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                filter, Optional.of(List.of(deletionFile)), List.of("id"))).isFalse();
+        assertThat(PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                TupleDomain.all(), Optional.of(List.of(deletionFile)))).isFalse();
+        assertThat(PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                TupleDomain.none(), Optional.of(List.of(deletionFile)))).isFalse();
+        assertThat(PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                filter, Optional.empty())).isFalse();
+        assertThat(PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                filter, Optional.of(Collections.singletonList(null)))).isFalse();
+        assertThat(PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                filter, Optional.of(Arrays.asList(null, deletionFile)))).isTrue();
+        assertThatThrownBy(() -> PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                null, Optional.of(List.of(deletionFile))))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("filter is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                filter, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("deletionFiles is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.requiresPaimonReaderForDeletionVectorFilter(
+                filter, Optional.of(List.of(deletionFile)), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("partitionKeys is null");
+    }
+
+    @Test
+    void testDeletionVectorFilterFallsBackFromDirectRawFileReader()
+    {
+        PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
+        TupleDomain<PaimonColumnHandle> filter = TupleDomain.withColumnDomains(Map.of(
+                idColumn, Domain.singleValue(BIGINT, 2L)));
+        UnsupportedOperationException readFailure = new UnsupportedOperationException("Paimon reader fallback marker");
+        FileStoreTable table = readFailingFileStoreTable(new AtomicReference<>(), DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.BIGINT())), readFailure);
+        PaimonPageSourceProvider provider = new PaimonPageSourceProvider(
+                session -> {
+                    throw new AssertionError("filesystem should not be used when DV filters fall back to Paimon reader");
+                },
+                new PaimonMetadataFactory(new Options(),
+                        session -> {
+                            throw new AssertionError("filesystem should not be used by DV filter fallback catalog");
+                        },
+                        TESTING_TYPE_MANAGER)
+                {
+                    @Override
+                    public PaimonMetadata create()
+                    {
+                        return new PaimonMetadata(new TestingCatalog(table), TESTING_TYPE_MANAGER);
+                    }
+                },
+                new OrcReaderConfig(),
+                new ParquetReaderConfig());
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of(),
+                filter, Optional.empty(), Optional.empty(), OptionalLong.empty());
+        ConnectorSession session = io.trino.testing.TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        assertThatThrownBy(() -> provider.createPageSource(null, session,
+                PaimonSplit.fromSplit(rawFileSplit(List.of(new DeletionFile("dv", 0, 10, 1L)), 5), 1.0),
+                tableHandle,
+                List.of(idColumn),
+                DynamicFilter.EMPTY))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessage("Paimon page read uses features which are not supported by the Trino connector");
+                    assertThat(exception.getCause()).isSameAs(readFailure);
+                });
+    }
+
+    @Test
     void testDirectReaderDomainsMatchProjectedFieldsCaseInsensitively()
     {
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("ID", DataTypes.BIGINT());
@@ -3419,6 +3500,7 @@ public class PaimonPageSourceTest
                         yield proxy;
                     }
                     case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of();
                     case "coreOptions" -> new org.apache.paimon.CoreOptions(new Options());
                     case "newReadBuilder" -> readBuilder(readFailure);
                     case "toString" -> "read-failing-file-store-table";
@@ -3483,7 +3565,20 @@ public class PaimonPageSourceTest
 
     private static org.apache.paimon.table.source.Split rawFileSplit(long... rowCounts)
     {
+        return rawFileSplit(Optional.empty(), rowCounts);
+    }
+
+    private static org.apache.paimon.table.source.Split rawFileSplit(List<DeletionFile> deletionFiles, long... rowCounts)
+    {
+        return rawFileSplit(Optional.of(deletionFiles), rowCounts);
+    }
+
+    private static org.apache.paimon.table.source.Split rawFileSplit(Optional<List<DeletionFile>> deletionFiles, long... rowCounts)
+    {
         long[] fileRowCounts = rowCounts.clone();
+        List<DeletionFile> splitDeletionFiles = deletionFiles
+                .map(files -> Collections.unmodifiableList(new ArrayList<>(files)))
+                .orElse(null);
         return new org.apache.paimon.table.source.Split()
         {
             @Override
@@ -3511,6 +3606,12 @@ public class PaimonPageSourceTest
                             fileRowCounts[index]));
                 }
                 return Optional.of(rawFiles);
+            }
+
+            @Override
+            public Optional<List<DeletionFile>> deletionFiles()
+            {
+                return Optional.ofNullable(splitDeletionFiles);
             }
         };
     }
