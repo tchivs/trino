@@ -50,6 +50,18 @@ final class PaimonDynamicBucketUtils
         return Math.min(configuredParallelism, workerCount);
     }
 
+    static int dynamicBucketNumAssigners(CoreOptions coreOptions, int assignerParallelism)
+    {
+        requireNonNull(coreOptions, "coreOptions is null");
+        checkArgument(assignerParallelism > 0, "assignerParallelism must be positive: %s", assignerParallelism);
+        Integer initialBuckets = coreOptions.dynamicBucketInitialBuckets();
+        if (initialBuckets == null) {
+            return assignerParallelism;
+        }
+        checkArgument(initialBuckets > 0, "dynamic-bucket.initial-buckets must be positive: %s", initialBuckets);
+        return Math.min(initialBuckets, assignerParallelism);
+    }
+
     static List<Node> dynamicBucketAssignerNodes(NodeManager nodeManager, CoreOptions coreOptions)
     {
         requireNonNull(nodeManager, "nodeManager is null");

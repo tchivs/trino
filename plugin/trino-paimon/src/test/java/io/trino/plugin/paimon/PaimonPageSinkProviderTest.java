@@ -899,19 +899,42 @@ public class PaimonPageSinkProviderTest
                 List.of(),
                 Map.of(
                         CoreOptions.BUCKET.key(), "-1",
-                        CoreOptions.DYNAMIC_BUCKET_ASSIGNER_PARALLELISM.key(), "3"),
+                        CoreOptions.DYNAMIC_BUCKET_ASSIGNER_PARALLELISM.key(), "4",
+                        CoreOptions.DYNAMIC_BUCKET_INITIAL_BUCKETS.key(), "1"),
                 List.of("id"),
                 BucketMode.HASH_DYNAMIC);
         PaimonPageSink pageSink = new PaimonPageSink(
                 writer(List.of(), writeArguments),
                 List.of(INTEGER),
                 List.of(DataTypes.INT()),
-                PaimonPageSinkProvider.dynamicBucketWriter(table, true, pageSinkId(1), 4));
+                PaimonPageSinkProvider.dynamicBucketWriter(table, true, pageSinkId(2), 4));
 
         pageSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 11L)));
 
         assertThat(writeArguments.get()).hasSize(2);
-        assertThat(writeArguments.get()[1]).isEqualTo(1);
+        assertThat(writeArguments.get()[1]).isEqualTo(2);
+    }
+
+    @Test
+    public void testDynamicBucketNumAssignersFollowsPaimonInitialBucketsSemantics()
+    {
+        assertThat(PaimonDynamicBucketUtils.dynamicBucketNumAssigners(
+                new CoreOptions(new Options(Map.of())),
+                4))
+                .isEqualTo(4);
+        assertThat(PaimonDynamicBucketUtils.dynamicBucketNumAssigners(
+                new CoreOptions(new Options(Map.of(CoreOptions.DYNAMIC_BUCKET_INITIAL_BUCKETS.key(), "2"))),
+                4))
+                .isEqualTo(2);
+        assertThat(PaimonDynamicBucketUtils.dynamicBucketNumAssigners(
+                new CoreOptions(new Options(Map.of(CoreOptions.DYNAMIC_BUCKET_INITIAL_BUCKETS.key(), "8"))),
+                4))
+                .isEqualTo(4);
+        assertThatThrownBy(() -> PaimonDynamicBucketUtils.dynamicBucketNumAssigners(
+                new CoreOptions(new Options(Map.of(CoreOptions.DYNAMIC_BUCKET_INITIAL_BUCKETS.key(), "0"))),
+                4))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("dynamic-bucket.initial-buckets must be positive: 0");
     }
 
     @Test

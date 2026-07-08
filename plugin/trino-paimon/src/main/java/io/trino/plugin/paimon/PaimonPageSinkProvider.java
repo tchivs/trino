@@ -61,6 +61,7 @@ import java.util.stream.Collectors;
 
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketNumAssigners;
 import static java.util.Arrays.fill;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.utils.DefaultValueUtils.convertDefaultValue;
@@ -457,6 +458,7 @@ public class PaimonPageSinkProvider
     {
         CoreOptions coreOptions = table.coreOptions();
         int assignerParallelism = dynamicBucketAssignerParallelism(coreOptions, workerCount);
+        int numAssigners = dynamicBucketNumAssigners(coreOptions, assignerParallelism);
         int assignId = pageSinkTaskPartitionId(pageSinkId);
         if (assignId >= assignerParallelism) {
             throw new IllegalStateException(
@@ -478,7 +480,7 @@ public class PaimonPageSinkProvider
                     CoreOptions.createCommitUser(options),
                     table.store().newIndexFileHandler(),
                     assignerParallelism,
-                    assignerParallelism,
+                    numAssigners,
                     assignId,
                     coreOptions.dynamicBucketTargetRowNum(),
                     coreOptions.dynamicBucketMaxBuckets());

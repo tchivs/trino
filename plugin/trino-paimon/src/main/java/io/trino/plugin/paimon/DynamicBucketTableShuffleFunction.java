@@ -16,6 +16,7 @@ package io.trino.plugin.paimon;
 import io.trino.spi.Page;
 import io.trino.spi.connector.BucketFunction;
 import io.trino.spi.type.Type;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.codegen.CodeGenUtils;
 import org.apache.paimon.codegen.Projection;
 import org.apache.paimon.data.BinaryRow;
@@ -30,13 +31,15 @@ import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketNumAssigners;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketWritePartitionColumns;
 import static java.util.Objects.requireNonNull;
 
 public class DynamicBucketTableShuffleFunction
         implements BucketFunction
 {
-    private final int assignerCount;
+    private final int assignerChannelCount;
+    private final int numAssigners;
     private final ThreadLocal<Projection> partitionProjectionContext;
     private final ThreadLocal<Projection> trimmedPrimaryKeyProjectionContext;
     private final List<Type> paimonRowTypes;
@@ -63,7 +66,8 @@ public class DynamicBucketTableShuffleFunction
         this.trimmedPrimaryKeyProjectionContext = ThreadLocal.withInitial(() ->
                 CodeGenUtils.newProjection(inputType,
                         projection(inputFields, schema.trimmedPrimaryKeys(), "trimmed primary key")));
-        this.assignerCount = assignerCount;
+        this.assignerChannelCount = assignerCount;
+        this.numAssigners = dynamicBucketNumAssigners(new CoreOptions(schema.options()), assignerCount);
     }
 
     @Override
@@ -75,8 +79,8 @@ public class DynamicBucketTableShuffleFunction
         return BucketAssigner.computeAssigner(
                 partition.hashCode(),
                 trimmedPrimaryKey.hashCode(),
-                assignerCount,
-                assignerCount);
+                assignerChannelCount,
+                numAssigners);
     }
 
     private static List<DataType> projectedTypes(TableSchema schema, List<String> fieldNames)

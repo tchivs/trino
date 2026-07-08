@@ -40,6 +40,7 @@ import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.fail;
 
 public class TrinoPartitioningHandleTest
 {
@@ -272,6 +273,43 @@ public class TrinoPartitioningHandleTest
                 3);
 
         assertThat(bucketFunction.getBucket(page, 0)).isEqualTo(expected);
+    }
+
+    @Test
+    public void testDynamicBucketShuffleFunctionUsesInitialBucketsAsNumAssigners()
+            throws Exception
+    {
+        TableSchema schema = dynamicBucketSchema(Map.of(CoreOptions.DYNAMIC_BUCKET_INITIAL_BUCKETS.key(), "1"));
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(InstantiationUtil.serializeObject(schema));
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(new TestingNodeManager());
+        BucketFunction bucketFunction = provider.getBucketFunction(null, null, handle, List.of(BIGINT, BIGINT), 4);
+        RowPartitionKeyExtractor extractor = new RowPartitionKeyExtractor(schema);
+
+        for (long partitionValue = 1; partitionValue < 100; partitionValue++) {
+            for (long id = 1; id < 100; id++) {
+                Page page = new Page(
+                        1,
+                        writeNativeValue(BIGINT, partitionValue),
+                        writeNativeValue(BIGINT, id));
+                PaimonRow row = new PaimonRow(page, 0, RowKind.INSERT, List.of(BIGINT, BIGINT),
+                        List.of(DataTypes.BIGINT(), DataTypes.BIGINT()));
+                int expected = BucketAssigner.computeAssigner(
+                        extractor.partition(row).hashCode(),
+                        extractor.trimmedPrimaryKey(row).hashCode(),
+                        4,
+                        1);
+                int previousRouting = BucketAssigner.computeAssigner(
+                        extractor.partition(row).hashCode(),
+                        extractor.trimmedPrimaryKey(row).hashCode(),
+                        4,
+                        4);
+                if (expected != previousRouting) {
+                    assertThat(bucketFunction.getBucket(page, 0)).isEqualTo(expected);
+                    return;
+                }
+            }
+        }
+        fail("test data did not exercise a dynamic-bucket.initial-buckets routing difference");
     }
 
     private void testRoundTrip(PaimonPartitioningHandle expected)
