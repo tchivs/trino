@@ -128,6 +128,12 @@ public class PaimonFilterExtractor
                 unenforcedDomains.put(columnHandle, domain);
             }
         });
+        List<PaimonColumnHandle> pushedFilterColumns = new ArrayList<>(acceptedDomains.keySet());
+        pushedFilterColumns.addAll(trinoColumnHandleForExpressionFilter.keySet());
+        boolean partitionOnlyPushedFilter = pushedFilterColumns.stream()
+                .map(PaimonColumnHandle::getColumnName)
+                .map(FieldNameUtils::toLowerCase)
+                .allMatch(partitionKeyNames::contains);
 
         TupleDomain<PaimonColumnHandle> expressionFilter = TupleDomain.withColumnDomains(
                 trinoColumnHandleForExpressionFilter);
@@ -146,7 +152,7 @@ public class PaimonFilterExtractor
                 : constraint.getExpression();
 
         return Optional
-                .of(new TrinoFilter(newFilter, remain, remainingExpression));
+                .of(new TrinoFilter(newFilter, remain, remainingExpression, partitionOnlyPushedFilter));
     }
 
     private static void moveVirtualEngineOnlyDomainsToUnsupported(
@@ -372,7 +378,7 @@ public class PaimonFilterExtractor
 
     /** TrinoFilter for paimon trinoMetadata applyFilter. */
     public record TrinoFilter(TupleDomain<PaimonColumnHandle> filter, TupleDomain<ColumnHandle> remainFilter,
-                              ConnectorExpression remainingExpression)
+                              ConnectorExpression remainingExpression, boolean partitionOnlyPushedFilter)
     {
     }
 }

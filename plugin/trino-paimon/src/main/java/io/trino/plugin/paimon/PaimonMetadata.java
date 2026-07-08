@@ -3029,9 +3029,6 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return Optional.of(new ConstraintApplicationResult<>(paimonTableHandle.copy(TupleDomain.none()),
                     TupleDomain.all(), TRUE, false));
         }
-        if (paimonTableHandle.getLimit().isPresent()) {
-            return Optional.empty();
-        }
         if (constraint.getSummary().isAll() && constraint.getExpression().equals(TRUE)) {
             return Optional.empty();
         }
@@ -3040,12 +3037,26 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 paimonTableHandle, session, constraint);
         if (extract.isPresent()) {
             PaimonFilterExtractor.TrinoFilter trinoFilter = extract.get();
+            if (paimonTableHandle.getLimit().isPresent()
+                    && !canApplyFilterAfterLimit(trinoFilter)) {
+                return Optional.empty();
+            }
             return Optional.of(new ConstraintApplicationResult<>(paimonTableHandle.copy(trinoFilter.filter()),
                     trinoFilter.remainFilter(), trinoFilter.remainingExpression(), false));
         }
         else {
             return Optional.empty();
         }
+    }
+
+    private static boolean canApplyFilterAfterLimit(PaimonFilterExtractor.TrinoFilter trinoFilter)
+    {
+        if (trinoFilter.filter().isNone()) {
+            return true;
+        }
+        return trinoFilter.partitionOnlyPushedFilter()
+                && trinoFilter.remainFilter().isAll()
+                && trinoFilter.remainingExpression().equals(TRUE);
     }
 
     private static void validateFilterColumns(Constraint constraint)

@@ -3635,9 +3635,62 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testApplyFilterSkipsNonEmptyPushdownAfterAcceptedLimitBeforeCatalogInitialization()
+    public void testApplyFilterAllowsPartitionPushdownAfterAcceptedLimitAndRefreshesLatestSchema()
     {
-        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        FileStoreTable table = fileStoreTable(
+                BucketMode.HASH_FIXED,
+                copiedWithLatestSchema,
+                DataTypes.ROW(DataTypes.FIELD(0, "old_id", DataTypes.INT())),
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                        DataTypes.FIELD(1, "id", DataTypes.INT())),
+                List.of("dt"),
+                List.of("dt"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("DT", DataTypes.STRING());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(5));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(
+                dt, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-06-26")))));
+
+        assertThat(metadata.applyFilter(SESSION, tableHandle, constraint))
+                .isPresent()
+                .get()
+                .satisfies(result -> {
+                    PaimonTableHandle filteredHandle = (PaimonTableHandle) result.getHandle();
+                    assertThat(filteredHandle.getLimit()).hasValue(5);
+                    assertThat(filteredHandle.getFilter().getDomains().orElseThrow())
+                            .containsOnly(Map.entry(dt, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-06-26"))));
+                    assertThat(result.getRemainingFilter()).isEqualTo(TupleDomain.all());
+                    assertThat(result.getRemainingExpression()).contains(TRUE);
+                });
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testApplyFilterSkipsNonPartitionPushdownAfterAcceptedLimit()
+    {
+        FileStoreTable table = fileStoreTable(
+                BucketMode.HASH_FIXED,
+                new AtomicBoolean(),
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                        DataTypes.FIELD(1, "id", DataTypes.INT())),
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                        DataTypes.FIELD(1, "id", DataTypes.INT())),
+                List.of("dt"),
+                List.of("dt"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
         PaimonTableHandle tableHandle = new PaimonTableHandle(
@@ -3652,7 +3705,75 @@ public class PaimonMetadataTableModeTest
                 id, Domain.singleValue(INTEGER, 1L))));
 
         assertThat(metadata.applyFilter(SESSION, tableHandle, constraint)).isEmpty();
-        assertThat(catalog.initialized).isFalse();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testApplyFilterSkipsMixedPartitionAndNonPartitionPushdownAfterAcceptedLimit()
+    {
+        FileStoreTable table = fileStoreTable(
+                BucketMode.HASH_FIXED,
+                new AtomicBoolean(),
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                        DataTypes.FIELD(1, "id", DataTypes.INT())),
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                        DataTypes.FIELD(1, "id", DataTypes.INT())),
+                List.of("dt"),
+                List.of("dt"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(5));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(
+                dt, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-06-26")),
+                id, Domain.singleValue(INTEGER, 1L))));
+
+        assertThat(metadata.applyFilter(SESSION, tableHandle, constraint)).isEmpty();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testApplyFilterSkipsPartitionPushdownWithResidualFilterAfterAcceptedLimit()
+    {
+        FileStoreTable table = fileStoreTable(
+                BucketMode.HASH_FIXED,
+                new AtomicBoolean(),
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                        DataTypes.FIELD(1, "payload", DataTypes.BYTES())),
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.STRING()),
+                        DataTypes.FIELD(1, "payload", DataTypes.BYTES())),
+                List.of("dt"),
+                List.of("dt"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle dt = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        PaimonColumnHandle payload = PaimonColumnHandle.of("payload", DataTypes.BYTES());
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.of(5));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(
+                dt, Domain.singleValue(VARCHAR, Slices.utf8Slice("2026-06-26")),
+                payload, Domain.singleValue(VarbinaryType.VARBINARY, Slices.utf8Slice("x")))));
+
+        assertThat(metadata.applyFilter(SESSION, tableHandle, constraint)).isEmpty();
+        assertThat(catalog.initialized).isTrue();
     }
 
     @Test
