@@ -237,6 +237,78 @@ public class TestPaimonMinioSmokeTest
     }
 
     @Test
+    public void testMinioHashDynamicWriteSmoke()
+    {
+        String unpartitionedTable = "hash_dynamic_" + randomNameSuffix();
+        String partitionedTable = "hash_dynamic_partitioned_" + randomNameSuffix();
+        String qualifiedSchemaName = CATALOG + "." + SCHEMA;
+        String qualifiedUnpartitionedTable = qualifiedSchemaName + "." + unpartitionedTable;
+        String qualifiedPartitionedTable = qualifiedSchemaName + "." + partitionedTable;
+
+        assertUpdate("CREATE SCHEMA " + qualifiedSchemaName);
+        try {
+            assertUpdate("CREATE TABLE " + qualifiedUnpartitionedTable + " ("
+                    + "id integer, "
+                    + "name varchar) "
+                    + "WITH ("
+                    + "primary_key = ARRAY['id'], "
+                    + "bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2')");
+            assertUpdate("INSERT INTO " + qualifiedUnpartitionedTable + " VALUES "
+                    + "(1, 'old'), "
+                    + "(2, 'stale')", 2);
+            assertQuery(
+                    "SELECT id, name FROM " + qualifiedUnpartitionedTable + " ORDER BY id",
+                    "VALUES (1, 'old'), (2, 'stale')");
+
+            Session overwriteSession = Session.builder(getSession())
+                    .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR, "overwrite")
+                    .build();
+            assertUpdate(overwriteSession,
+                    "INSERT INTO " + qualifiedUnpartitionedTable + " VALUES "
+                            + "(3, 'new'), "
+                            + "(4, 'fresh')", 2);
+            assertQuery(
+                    "SELECT id, name FROM " + qualifiedUnpartitionedTable + " ORDER BY id",
+                    "VALUES (3, 'new'), (4, 'fresh')");
+
+            assertUpdate("CREATE TABLE " + qualifiedPartitionedTable + " ("
+                    + "ds varchar, "
+                    + "id integer, "
+                    + "name varchar) "
+                    + "WITH ("
+                    + "partitioned_by = ARRAY['ds'], "
+                    + "primary_key = ARRAY['ds', 'id'], "
+                    + "bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2')");
+            assertUpdate("INSERT INTO " + qualifiedPartitionedTable + " VALUES "
+                    + "('2026-07-01', 1, 'one'), "
+                    + "('2026-07-01', 2, 'two'), "
+                    + "('2026-07-02', 3, 'three'), "
+                    + "('2026-07-02', 4, 'four')", 4);
+            assertQuery(
+                    "SELECT ds, id, name FROM " + qualifiedPartitionedTable + " ORDER BY ds, id",
+                    "VALUES "
+                            + "('2026-07-01', 1, 'one'), "
+                            + "('2026-07-01', 2, 'two'), "
+                            + "('2026-07-02', 3, 'three'), "
+                            + "('2026-07-02', 4, 'four')");
+
+            try (MinioClient minioClient = minio.createMinioClient()) {
+                assertThat(minioClient.listObjects(bucketName, WAREHOUSE_PREFIX + "/" + SCHEMA + ".db/" + unpartitionedTable))
+                        .anyMatch(path -> !path.endsWith("_trino_paimon_directory_marker"));
+                assertThat(minioClient.listObjects(bucketName, WAREHOUSE_PREFIX + "/" + SCHEMA + ".db/" + partitionedTable))
+                        .anyMatch(path -> !path.endsWith("_trino_paimon_directory_marker"));
+            }
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + qualifiedPartitionedTable);
+            assertUpdate("DROP TABLE IF EXISTS " + qualifiedUnpartitionedTable);
+            assertUpdate("DROP SCHEMA IF EXISTS " + qualifiedSchemaName);
+        }
+    }
+
+    @Test
     public void testMinioSpillableWriteBufferSmoke()
     {
         String tableName = "spillable_write_" + randomNameSuffix();
