@@ -63,6 +63,38 @@ public class TrinoConnectorFactoryTest
     }
 
     @Test
+    public void testCreateConnectorAcceptsPaimonCatalogOptions()
+    {
+        Map<String, String> config = Map.ofEntries(
+                Map.entry("warehouse", tempFile.toString()),
+                Map.entry("metastore", "jdbc"),
+                Map.entry("uri", "jdbc:postgresql://localhost:5432/paimon"),
+                Map.entry("catalog-key", "prod"),
+                Map.entry("lock-key-max-length", "128"),
+                Map.entry("case-sensitive", "true"),
+                Map.entry("sync-all-properties", "false"),
+                Map.entry("cache-enabled", "false"),
+                Map.entry("cache.expiration-interval", "10 min"),
+                Map.entry("cache.manifest.max-memory", "256 MB"),
+                Map.entry("local-cache.enabled", "true"),
+                Map.entry("local-cache.dir", tempFile.resolve("cache").toString()),
+                Map.entry("allow-upper-case", "true"),
+                Map.entry("hive-conf-dir", tempFile.toString()),
+                Map.entry("hadoop-conf-dir", tempFile.toString()),
+                Map.entry("metastore.client.class", "org.apache.hadoop.hive.metastore.HiveMetaStoreClient"),
+                Map.entry("location-in-properties", "true"),
+                Map.entry("client-pool-cache.eviction-interval-ms", "60000"),
+                Map.entry("hive.skip-update-stats", "true"),
+                Map.entry("client-pool-cache.keys", "user_name"),
+                Map.entry("alter-table-cascade", "false"));
+        ConnectorFactory factory = new PaimonConnectorFactory();
+
+        Connector connector = factory.create("paimon", config, new TestingConnectorContext());
+
+        assertThat(connector).isNotNull();
+    }
+
+    @Test
     public void testConnectorShutdownDoesNotPropagateCatalogCloseFailure()
     {
         AtomicBoolean closeCalled = new AtomicBoolean();

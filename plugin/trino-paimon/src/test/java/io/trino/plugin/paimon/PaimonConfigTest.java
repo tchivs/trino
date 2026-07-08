@@ -53,6 +53,130 @@ public class PaimonConfigTest
     }
 
     @Test
+    public void testCatalogOptionsAreMapped()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setWarehouse("/tmp/warehouse")
+                .setMetastore("jdbc")
+                .setUri("jdbc:postgresql://localhost:5432/paimon")
+                .setTableType("EXTERNAL")
+                .setLockEnabled(true)
+                .setLockType("jdbc")
+                .setLockCheckMaxSleep("9 s")
+                .setLockAcquireTimeout("10 min")
+                .setClientPoolSize(8)
+                .setCaseSensitive(true)
+                .setSyncAllProperties(false)
+                .setFormatTableEnabled(false)
+                .setResolvingFileIoEnabled(true)
+                .setFileIoAllowCache(false)
+                .setCatalogKey("prod")
+                .setLockKeyMaxLength(128);
+
+        Options options = config.toOptions();
+
+        assertThat(options.toMap())
+                .containsEntry("warehouse", "/tmp/warehouse")
+                .containsEntry("metastore", "jdbc")
+                .containsEntry("uri", "jdbc:postgresql://localhost:5432/paimon")
+                .containsEntry("table.type", "EXTERNAL")
+                .containsEntry("lock.enabled", "true")
+                .containsEntry("lock.type", "jdbc")
+                .containsEntry("lock-check-max-sleep", "9 s")
+                .containsEntry("lock-acquire-timeout", "10 min")
+                .containsEntry("client-pool-size", "8")
+                .containsEntry("case-sensitive", "true")
+                .containsEntry("sync-all-properties", "false")
+                .containsEntry("format-table.enabled", "false")
+                .containsEntry("resolving-file-io.enabled", "true")
+                .containsEntry("file-io.allow-cache", "false")
+                .containsEntry("catalog-key", "prod")
+                .containsEntry("lock-key-max-length", "128");
+    }
+
+    @Test
+    public void testCatalogCacheOptionsAreMapped()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setCacheEnabled(false)
+                .setCacheExpireAfterAccess("11 min")
+                .setCacheExpirationInterval("10 min")
+                .setCacheExpireAfterWrite("12 min")
+                .setCachePartitionMaxNum(13L)
+                .setCacheManifestSmallFileMemory("14 MB")
+                .setCacheManifestSmallFileThreshold("15 MB")
+                .setCacheManifestMaxMemory("16 MB")
+                .setCacheManifestSoftValues(false)
+                .setCacheSnapshotMaxNumPerTable(17)
+                .setCacheDeletionVectorsMaxNum(18)
+                .setLocalCacheEnabled(true)
+                .setLocalCacheDir("/tmp/paimon-cache")
+                .setLocalCacheMaxSize("19 GB")
+                .setLocalCacheBlockSize("20 MB")
+                .setLocalCacheWhitelist("meta,data");
+
+        Options options = config.toOptions();
+
+        assertThat(options.toMap())
+                .containsEntry("cache-enabled", "false")
+                .containsEntry("cache.expire-after-access", "11 min")
+                .containsEntry("cache.expiration-interval", "10 min")
+                .containsEntry("cache.expire-after-write", "12 min")
+                .containsEntry("cache.partition.max-num", "13")
+                .containsEntry("cache.manifest.small-file-memory", "14 MB")
+                .containsEntry("cache.manifest.small-file-threshold", "15 MB")
+                .containsEntry("cache.manifest.max-memory", "16 MB")
+                .containsEntry("cache.manifest.soft-values", "false")
+                .containsEntry("cache.snapshot.max-num-per-table", "17")
+                .containsEntry("cache.deletion-vectors.max-num", "18")
+                .containsEntry("local-cache.enabled", "true")
+                .containsEntry("local-cache.dir", "/tmp/paimon-cache")
+                .containsEntry("local-cache.max-size", "19 GB")
+                .containsEntry("local-cache.block-size", "20 MB")
+                .containsEntry("local-cache.whitelist", "meta,data");
+    }
+
+    @Test
+    public void testCatalogFallbackOptionsAreMapped()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setCacheExpirationInterval("10 min")
+                .setAllowUpperCase(true);
+
+        Options options = config.toOptions();
+
+        assertThat(options.toMap())
+                .containsEntry("cache.expiration-interval", "10 min")
+                .containsEntry("allow-upper-case", "true");
+    }
+
+    @Test
+    public void testHiveCatalogOptionsAreMapped()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setHiveConfDir("/etc/hive/conf")
+                .setHadoopConfDir("/etc/hadoop/conf")
+                .setMetastoreClientClass("com.example.CustomHiveMetaStoreClient")
+                .setLocationInProperties(true)
+                .setClientPoolCacheEvictionIntervalMs(21L)
+                .setHiveSkipUpdateStats(true)
+                .setClientPoolCacheKeys("user_name,conf:hive.metastore.uris")
+                .setAlterTableCascade(false);
+
+        Options options = config.toOptions();
+
+        assertThat(options.toMap())
+                .containsEntry("hive-conf-dir", "/etc/hive/conf")
+                .containsEntry("hadoop-conf-dir", "/etc/hadoop/conf")
+                .containsEntry("metastore.client.class", "com.example.CustomHiveMetaStoreClient")
+                .containsEntry("location-in-properties", "true")
+                .containsEntry("client-pool-cache.eviction-interval-ms", "21")
+                .containsEntry("hive.skip-update-stats", "true")
+                .containsEntry("client-pool-cache.keys", "user_name,conf:hive.metastore.uris")
+                .containsEntry("alter-table-cascade", "false");
+    }
+
+    @Test
     public void testS3CredentialsAreMapped()
     {
         PaimonConfig config = new PaimonConfig()
@@ -113,7 +237,7 @@ public class PaimonConfigTest
 
         assertThat(options.toMap())
                 .containsEntry("warehouse", "/tmp/warehouse")
-                .doesNotContainKeys("s3.access-key", "s3.secret-key", "fs.native-s3.enabled");
+                .doesNotContainKeys("metastore", "uri", "s3.access-key", "s3.secret-key", "fs.native-s3.enabled");
     }
 
     @Test

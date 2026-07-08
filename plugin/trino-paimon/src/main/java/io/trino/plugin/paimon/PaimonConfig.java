@@ -30,6 +30,46 @@ import static io.trino.plugin.paimon.catalog.PaimonCatalog.DEFAULT_SESSION_CATAL
 public class PaimonConfig
 {
     private String warehouse;
+    private String metastore;
+    private String uri;
+    private String tableType;
+    private Boolean lockEnabled;
+    private String lockType;
+    private String lockCheckMaxSleep;
+    private String lockAcquireTimeout;
+    private Integer clientPoolSize;
+    private Boolean cacheEnabled;
+    private String cacheExpireAfterAccess;
+    private String cacheExpirationInterval;
+    private String cacheExpireAfterWrite;
+    private Long cachePartitionMaxNum;
+    private String cacheManifestSmallFileMemory;
+    private String cacheManifestSmallFileThreshold;
+    private String cacheManifestMaxMemory;
+    private Boolean cacheManifestSoftValues;
+    private Integer cacheSnapshotMaxNumPerTable;
+    private Integer cacheDeletionVectorsMaxNum;
+    private Boolean caseSensitive;
+    private Boolean allowUpperCase;
+    private Boolean syncAllProperties;
+    private Boolean formatTableEnabled;
+    private Boolean resolvingFileIoEnabled;
+    private Boolean fileIoAllowCache;
+    private Boolean localCacheEnabled;
+    private String localCacheDir;
+    private String localCacheMaxSize;
+    private String localCacheBlockSize;
+    private String localCacheWhitelist;
+    private String catalogKey;
+    private Integer lockKeyMaxLength;
+    private String hiveConfDir;
+    private String hadoopConfDir;
+    private String metastoreClientClass;
+    private Boolean locationInProperties;
+    private Long clientPoolCacheEvictionIntervalMs;
+    private Boolean hiveSkipUpdateStats;
+    private String clientPoolCacheKeys;
+    private Boolean alterTableCascade;
     private String s3Endpoint;
     private String s3AccessKey;
     private String s3SecretKey;
@@ -49,6 +89,486 @@ public class PaimonConfig
     public PaimonConfig setWarehouse(String warehouse)
     {
         this.warehouse = warehouse;
+        return this;
+    }
+
+    public String getMetastore()
+    {
+        return metastore;
+    }
+
+    @Config("metastore")
+    public PaimonConfig setMetastore(String metastore)
+    {
+        this.metastore = metastore;
+        return this;
+    }
+
+    public String getUri()
+    {
+        return uri;
+    }
+
+    @Config("uri")
+    public PaimonConfig setUri(String uri)
+    {
+        this.uri = uri;
+        return this;
+    }
+
+    public String getTableType()
+    {
+        return tableType;
+    }
+
+    @Config("table.type")
+    public PaimonConfig setTableType(String tableType)
+    {
+        this.tableType = tableType;
+        return this;
+    }
+
+    public Boolean getLockEnabled()
+    {
+        return lockEnabled;
+    }
+
+    @Config("lock.enabled")
+    public PaimonConfig setLockEnabled(Boolean lockEnabled)
+    {
+        this.lockEnabled = lockEnabled;
+        return this;
+    }
+
+    public String getLockType()
+    {
+        return lockType;
+    }
+
+    @Config("lock.type")
+    public PaimonConfig setLockType(String lockType)
+    {
+        this.lockType = lockType;
+        return this;
+    }
+
+    public String getLockCheckMaxSleep()
+    {
+        return lockCheckMaxSleep;
+    }
+
+    @Config("lock-check-max-sleep")
+    public PaimonConfig setLockCheckMaxSleep(String lockCheckMaxSleep)
+    {
+        this.lockCheckMaxSleep = lockCheckMaxSleep;
+        return this;
+    }
+
+    public String getLockAcquireTimeout()
+    {
+        return lockAcquireTimeout;
+    }
+
+    @Config("lock-acquire-timeout")
+    public PaimonConfig setLockAcquireTimeout(String lockAcquireTimeout)
+    {
+        this.lockAcquireTimeout = lockAcquireTimeout;
+        return this;
+    }
+
+    public Integer getClientPoolSize()
+    {
+        return clientPoolSize;
+    }
+
+    @Config("client-pool-size")
+    public PaimonConfig setClientPoolSize(Integer clientPoolSize)
+    {
+        this.clientPoolSize = clientPoolSize;
+        return this;
+    }
+
+    public Boolean getCacheEnabled()
+    {
+        return cacheEnabled;
+    }
+
+    @Config("cache-enabled")
+    public PaimonConfig setCacheEnabled(Boolean cacheEnabled)
+    {
+        this.cacheEnabled = cacheEnabled;
+        return this;
+    }
+
+    public String getCacheExpireAfterAccess()
+    {
+        return cacheExpireAfterAccess;
+    }
+
+    @Config("cache.expire-after-access")
+    public PaimonConfig setCacheExpireAfterAccess(String cacheExpireAfterAccess)
+    {
+        this.cacheExpireAfterAccess = cacheExpireAfterAccess;
+        return this;
+    }
+
+    public String getCacheExpirationInterval()
+    {
+        return cacheExpirationInterval;
+    }
+
+    @Config("cache.expiration-interval")
+    public PaimonConfig setCacheExpirationInterval(String cacheExpirationInterval)
+    {
+        this.cacheExpirationInterval = cacheExpirationInterval;
+        return this;
+    }
+
+    public String getCacheExpireAfterWrite()
+    {
+        return cacheExpireAfterWrite;
+    }
+
+    @Config("cache.expire-after-write")
+    public PaimonConfig setCacheExpireAfterWrite(String cacheExpireAfterWrite)
+    {
+        this.cacheExpireAfterWrite = cacheExpireAfterWrite;
+        return this;
+    }
+
+    public Long getCachePartitionMaxNum()
+    {
+        return cachePartitionMaxNum;
+    }
+
+    @Config("cache.partition.max-num")
+    public PaimonConfig setCachePartitionMaxNum(Long cachePartitionMaxNum)
+    {
+        this.cachePartitionMaxNum = cachePartitionMaxNum;
+        return this;
+    }
+
+    public String getCacheManifestSmallFileMemory()
+    {
+        return cacheManifestSmallFileMemory;
+    }
+
+    @Config("cache.manifest.small-file-memory")
+    public PaimonConfig setCacheManifestSmallFileMemory(String cacheManifestSmallFileMemory)
+    {
+        this.cacheManifestSmallFileMemory = cacheManifestSmallFileMemory;
+        return this;
+    }
+
+    public String getCacheManifestSmallFileThreshold()
+    {
+        return cacheManifestSmallFileThreshold;
+    }
+
+    @Config("cache.manifest.small-file-threshold")
+    public PaimonConfig setCacheManifestSmallFileThreshold(String cacheManifestSmallFileThreshold)
+    {
+        this.cacheManifestSmallFileThreshold = cacheManifestSmallFileThreshold;
+        return this;
+    }
+
+    public String getCacheManifestMaxMemory()
+    {
+        return cacheManifestMaxMemory;
+    }
+
+    @Config("cache.manifest.max-memory")
+    public PaimonConfig setCacheManifestMaxMemory(String cacheManifestMaxMemory)
+    {
+        this.cacheManifestMaxMemory = cacheManifestMaxMemory;
+        return this;
+    }
+
+    public Boolean getCacheManifestSoftValues()
+    {
+        return cacheManifestSoftValues;
+    }
+
+    @Config("cache.manifest.soft-values")
+    public PaimonConfig setCacheManifestSoftValues(Boolean cacheManifestSoftValues)
+    {
+        this.cacheManifestSoftValues = cacheManifestSoftValues;
+        return this;
+    }
+
+    public Integer getCacheSnapshotMaxNumPerTable()
+    {
+        return cacheSnapshotMaxNumPerTable;
+    }
+
+    @Config("cache.snapshot.max-num-per-table")
+    public PaimonConfig setCacheSnapshotMaxNumPerTable(Integer cacheSnapshotMaxNumPerTable)
+    {
+        this.cacheSnapshotMaxNumPerTable = cacheSnapshotMaxNumPerTable;
+        return this;
+    }
+
+    public Integer getCacheDeletionVectorsMaxNum()
+    {
+        return cacheDeletionVectorsMaxNum;
+    }
+
+    @Config("cache.deletion-vectors.max-num")
+    public PaimonConfig setCacheDeletionVectorsMaxNum(Integer cacheDeletionVectorsMaxNum)
+    {
+        this.cacheDeletionVectorsMaxNum = cacheDeletionVectorsMaxNum;
+        return this;
+    }
+
+    public Boolean getCaseSensitive()
+    {
+        return caseSensitive;
+    }
+
+    @Config("case-sensitive")
+    public PaimonConfig setCaseSensitive(Boolean caseSensitive)
+    {
+        this.caseSensitive = caseSensitive;
+        return this;
+    }
+
+    public Boolean getAllowUpperCase()
+    {
+        return allowUpperCase;
+    }
+
+    @Config("allow-upper-case")
+    public PaimonConfig setAllowUpperCase(Boolean allowUpperCase)
+    {
+        this.allowUpperCase = allowUpperCase;
+        return this;
+    }
+
+    public Boolean getSyncAllProperties()
+    {
+        return syncAllProperties;
+    }
+
+    @Config("sync-all-properties")
+    public PaimonConfig setSyncAllProperties(Boolean syncAllProperties)
+    {
+        this.syncAllProperties = syncAllProperties;
+        return this;
+    }
+
+    public Boolean getFormatTableEnabled()
+    {
+        return formatTableEnabled;
+    }
+
+    @Config("format-table.enabled")
+    public PaimonConfig setFormatTableEnabled(Boolean formatTableEnabled)
+    {
+        this.formatTableEnabled = formatTableEnabled;
+        return this;
+    }
+
+    public Boolean getResolvingFileIoEnabled()
+    {
+        return resolvingFileIoEnabled;
+    }
+
+    @Config("resolving-file-io.enabled")
+    public PaimonConfig setResolvingFileIoEnabled(Boolean resolvingFileIoEnabled)
+    {
+        this.resolvingFileIoEnabled = resolvingFileIoEnabled;
+        return this;
+    }
+
+    public Boolean getFileIoAllowCache()
+    {
+        return fileIoAllowCache;
+    }
+
+    @Config("file-io.allow-cache")
+    public PaimonConfig setFileIoAllowCache(Boolean fileIoAllowCache)
+    {
+        this.fileIoAllowCache = fileIoAllowCache;
+        return this;
+    }
+
+    public Boolean getLocalCacheEnabled()
+    {
+        return localCacheEnabled;
+    }
+
+    @Config("local-cache.enabled")
+    public PaimonConfig setLocalCacheEnabled(Boolean localCacheEnabled)
+    {
+        this.localCacheEnabled = localCacheEnabled;
+        return this;
+    }
+
+    public String getLocalCacheDir()
+    {
+        return localCacheDir;
+    }
+
+    @Config("local-cache.dir")
+    public PaimonConfig setLocalCacheDir(String localCacheDir)
+    {
+        this.localCacheDir = localCacheDir;
+        return this;
+    }
+
+    public String getLocalCacheMaxSize()
+    {
+        return localCacheMaxSize;
+    }
+
+    @Config("local-cache.max-size")
+    public PaimonConfig setLocalCacheMaxSize(String localCacheMaxSize)
+    {
+        this.localCacheMaxSize = localCacheMaxSize;
+        return this;
+    }
+
+    public String getLocalCacheBlockSize()
+    {
+        return localCacheBlockSize;
+    }
+
+    @Config("local-cache.block-size")
+    public PaimonConfig setLocalCacheBlockSize(String localCacheBlockSize)
+    {
+        this.localCacheBlockSize = localCacheBlockSize;
+        return this;
+    }
+
+    public String getLocalCacheWhitelist()
+    {
+        return localCacheWhitelist;
+    }
+
+    @Config("local-cache.whitelist")
+    public PaimonConfig setLocalCacheWhitelist(String localCacheWhitelist)
+    {
+        this.localCacheWhitelist = localCacheWhitelist;
+        return this;
+    }
+
+    public String getCatalogKey()
+    {
+        return catalogKey;
+    }
+
+    @Config("catalog-key")
+    public PaimonConfig setCatalogKey(String catalogKey)
+    {
+        this.catalogKey = catalogKey;
+        return this;
+    }
+
+    public Integer getLockKeyMaxLength()
+    {
+        return lockKeyMaxLength;
+    }
+
+    @Config("lock-key-max-length")
+    public PaimonConfig setLockKeyMaxLength(Integer lockKeyMaxLength)
+    {
+        this.lockKeyMaxLength = lockKeyMaxLength;
+        return this;
+    }
+
+    public String getHiveConfDir()
+    {
+        return hiveConfDir;
+    }
+
+    @Config("hive-conf-dir")
+    public PaimonConfig setHiveConfDir(String hiveConfDir)
+    {
+        this.hiveConfDir = hiveConfDir;
+        return this;
+    }
+
+    public String getHadoopConfDir()
+    {
+        return hadoopConfDir;
+    }
+
+    @Config("hadoop-conf-dir")
+    public PaimonConfig setHadoopConfDir(String hadoopConfDir)
+    {
+        this.hadoopConfDir = hadoopConfDir;
+        return this;
+    }
+
+    public String getMetastoreClientClass()
+    {
+        return metastoreClientClass;
+    }
+
+    @Config("metastore.client.class")
+    public PaimonConfig setMetastoreClientClass(String metastoreClientClass)
+    {
+        this.metastoreClientClass = metastoreClientClass;
+        return this;
+    }
+
+    public Boolean getLocationInProperties()
+    {
+        return locationInProperties;
+    }
+
+    @Config("location-in-properties")
+    public PaimonConfig setLocationInProperties(Boolean locationInProperties)
+    {
+        this.locationInProperties = locationInProperties;
+        return this;
+    }
+
+    public Long getClientPoolCacheEvictionIntervalMs()
+    {
+        return clientPoolCacheEvictionIntervalMs;
+    }
+
+    @Config("client-pool-cache.eviction-interval-ms")
+    public PaimonConfig setClientPoolCacheEvictionIntervalMs(Long clientPoolCacheEvictionIntervalMs)
+    {
+        this.clientPoolCacheEvictionIntervalMs = clientPoolCacheEvictionIntervalMs;
+        return this;
+    }
+
+    public Boolean getHiveSkipUpdateStats()
+    {
+        return hiveSkipUpdateStats;
+    }
+
+    @Config("hive.skip-update-stats")
+    public PaimonConfig setHiveSkipUpdateStats(Boolean hiveSkipUpdateStats)
+    {
+        this.hiveSkipUpdateStats = hiveSkipUpdateStats;
+        return this;
+    }
+
+    public String getClientPoolCacheKeys()
+    {
+        return clientPoolCacheKeys;
+    }
+
+    @Config("client-pool-cache.keys")
+    public PaimonConfig setClientPoolCacheKeys(String clientPoolCacheKeys)
+    {
+        this.clientPoolCacheKeys = clientPoolCacheKeys;
+        return this;
+    }
+
+    public Boolean getAlterTableCascade()
+    {
+        return alterTableCascade;
+    }
+
+    @Config("alter-table-cascade")
+    public PaimonConfig setAlterTableCascade(Boolean alterTableCascade)
+    {
+        this.alterTableCascade = alterTableCascade;
         return this;
     }
 
@@ -179,6 +699,46 @@ public class PaimonConfig
         if (warehouse != null) {
             options.put("warehouse", warehouse);
         }
+        putIfPresent(options, "metastore", metastore);
+        putIfPresent(options, "uri", uri);
+        putIfPresent(options, "table.type", tableType);
+        putIfPresent(options, "lock.enabled", lockEnabled);
+        putIfPresent(options, "lock.type", lockType);
+        putIfPresent(options, "lock-check-max-sleep", lockCheckMaxSleep);
+        putIfPresent(options, "lock-acquire-timeout", lockAcquireTimeout);
+        putIfPresent(options, "client-pool-size", clientPoolSize);
+        putIfPresent(options, "cache-enabled", cacheEnabled);
+        putIfPresent(options, "cache.expire-after-access", cacheExpireAfterAccess);
+        putIfPresent(options, "cache.expiration-interval", cacheExpirationInterval);
+        putIfPresent(options, "cache.expire-after-write", cacheExpireAfterWrite);
+        putIfPresent(options, "cache.partition.max-num", cachePartitionMaxNum);
+        putIfPresent(options, "cache.manifest.small-file-memory", cacheManifestSmallFileMemory);
+        putIfPresent(options, "cache.manifest.small-file-threshold", cacheManifestSmallFileThreshold);
+        putIfPresent(options, "cache.manifest.max-memory", cacheManifestMaxMemory);
+        putIfPresent(options, "cache.manifest.soft-values", cacheManifestSoftValues);
+        putIfPresent(options, "cache.snapshot.max-num-per-table", cacheSnapshotMaxNumPerTable);
+        putIfPresent(options, "cache.deletion-vectors.max-num", cacheDeletionVectorsMaxNum);
+        putIfPresent(options, "case-sensitive", caseSensitive);
+        putIfPresent(options, "allow-upper-case", allowUpperCase);
+        putIfPresent(options, "sync-all-properties", syncAllProperties);
+        putIfPresent(options, "format-table.enabled", formatTableEnabled);
+        putIfPresent(options, "resolving-file-io.enabled", resolvingFileIoEnabled);
+        putIfPresent(options, "file-io.allow-cache", fileIoAllowCache);
+        putIfPresent(options, "local-cache.enabled", localCacheEnabled);
+        putIfPresent(options, "local-cache.dir", localCacheDir);
+        putIfPresent(options, "local-cache.max-size", localCacheMaxSize);
+        putIfPresent(options, "local-cache.block-size", localCacheBlockSize);
+        putIfPresent(options, "local-cache.whitelist", localCacheWhitelist);
+        putIfPresent(options, "catalog-key", catalogKey);
+        putIfPresent(options, "lock-key-max-length", lockKeyMaxLength);
+        putIfPresent(options, "hive-conf-dir", hiveConfDir);
+        putIfPresent(options, "hadoop-conf-dir", hadoopConfDir);
+        putIfPresent(options, "metastore.client.class", metastoreClientClass);
+        putIfPresent(options, "location-in-properties", locationInProperties);
+        putIfPresent(options, "client-pool-cache.eviction-interval-ms", clientPoolCacheEvictionIntervalMs);
+        putIfPresent(options, "hive.skip-update-stats", hiveSkipUpdateStats);
+        putIfPresent(options, "client-pool-cache.keys", clientPoolCacheKeys);
+        putIfPresent(options, "alter-table-cascade", alterTableCascade);
         if (s3Endpoint != null) {
             options.put("s3.endpoint", s3Endpoint);
         }
@@ -202,5 +762,12 @@ public class PaimonConfig
         }
 
         return new Options(options);
+    }
+
+    private static void putIfPresent(Map<String, String> options, String key, Object value)
+    {
+        if (value != null) {
+            options.put(key, value.toString());
+        }
     }
 }
