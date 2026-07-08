@@ -153,6 +153,84 @@ public class TestPaimonExternalMinioSmokeTest
         }
     }
 
+    @Test
+    public void testExternalMinioHashDynamicWriteSmoke()
+            throws Exception
+    {
+        assumeTrue(configured("write-enabled").map(Boolean::parseBoolean).orElse(false),
+                "Set paimon.external-minio.write-enabled=true to run the external MinIO HASH_DYNAMIC write smoke test");
+
+        ExternalMinioConfig config = ExternalMinioConfig.loadForWrite();
+        String schema = "trino_paimon_hash_dynamic_" + randomNameSuffix();
+        String unpartitionedTable = "hash_dynamic_" + randomNameSuffix();
+        String partitionedTable = "hash_dynamic_partitioned_" + randomNameSuffix();
+
+        Session session = testSessionBuilder()
+                .setCatalog(CATALOG)
+                .setSchema(schema)
+                .build();
+        Session overwriteSession = Session.builder(session)
+                .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR, "overwrite")
+                .build();
+
+        try (DistributedQueryRunner queryRunner = DistributedQueryRunner.builder(session).build()) {
+            queryRunner.installPlugin(new PaimonPlugin());
+            queryRunner.createCatalog(CATALOG, CATALOG, config.catalogProperties());
+
+            String schemaName = qualifiedName(CATALOG, schema);
+            String unpartitionedTableName = qualifiedName(CATALOG, schema, unpartitionedTable);
+            String partitionedTableName = qualifiedName(CATALOG, schema, partitionedTable);
+            try {
+                queryRunner.execute("CREATE SCHEMA " + schemaName);
+
+                queryRunner.execute("CREATE TABLE " + unpartitionedTableName + " ("
+                        + "id integer, "
+                        + "name varchar) "
+                        + "WITH ("
+                        + "primary_key = ARRAY['id'], "
+                        + "bucket = '-1', "
+                        + "dynamic_bucket_assigner_parallelism = '2')");
+                assertThat(queryRunner.execute("INSERT INTO " + unpartitionedTableName + " VALUES "
+                        + "(1, 'old'), "
+                        + "(2, 'stale')").getUpdateCount())
+                        .hasValue(2);
+                assertThat(queryRunner.execute("SELECT array_join(array_agg(CAST(id AS varchar) || ':' || name ORDER BY id), ',') FROM " + unpartitionedTableName).getOnlyValue())
+                        .isEqualTo("1:old,2:stale");
+
+                assertThat(queryRunner.execute(overwriteSession,
+                        "INSERT INTO " + unpartitionedTableName + " VALUES "
+                                + "(3, 'new'), "
+                                + "(4, 'fresh')").getUpdateCount())
+                        .hasValue(2);
+                assertThat(queryRunner.execute("SELECT array_join(array_agg(CAST(id AS varchar) || ':' || name ORDER BY id), ',') FROM " + unpartitionedTableName).getOnlyValue())
+                        .isEqualTo("3:new,4:fresh");
+
+                queryRunner.execute("CREATE TABLE " + partitionedTableName + " ("
+                        + "ds varchar, "
+                        + "id integer, "
+                        + "name varchar) "
+                        + "WITH ("
+                        + "partitioned_by = ARRAY['ds'], "
+                        + "primary_key = ARRAY['ds', 'id'], "
+                        + "bucket = '-1', "
+                        + "dynamic_bucket_assigner_parallelism = '2')");
+                assertThat(queryRunner.execute("INSERT INTO " + partitionedTableName + " VALUES "
+                        + "('2026-07-01', 1, 'one'), "
+                        + "('2026-07-01', 2, 'two'), "
+                        + "('2026-07-02', 3, 'three'), "
+                        + "('2026-07-02', 4, 'four')").getUpdateCount())
+                        .hasValue(4);
+                assertThat(queryRunner.execute("SELECT array_join(array_agg(ds || ':' || CAST(id AS varchar) || ':' || name ORDER BY ds, id), ',') FROM " + partitionedTableName).getOnlyValue())
+                        .isEqualTo("2026-07-01:1:one,2026-07-01:2:two,2026-07-02:3:three,2026-07-02:4:four");
+            }
+            finally {
+                queryRunner.execute("DROP TABLE IF EXISTS " + partitionedTableName);
+                queryRunner.execute("DROP TABLE IF EXISTS " + unpartitionedTableName);
+                queryRunner.execute("DROP SCHEMA IF EXISTS " + schemaName);
+            }
+        }
+    }
+
     private static ReadTarget discoverReadTarget(DistributedQueryRunner queryRunner, ExternalMinioConfig config)
     {
         if (config.table().isPresent()) {
