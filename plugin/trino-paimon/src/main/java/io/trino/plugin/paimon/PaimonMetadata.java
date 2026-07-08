@@ -204,8 +204,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemTableWrite(paimonTableHandle, "insert layout");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "insert layout");
-        return writeLayout(storeTable.schema(), storeTable.bucketMode(), "insert layout",
+        Optional<ConnectorTableLayout> layout = writeLayout(storeTable.schema(), storeTable.bucketMode(), "insert layout",
                 schemaTableName(paimonTableHandle).toString());
+        paimonTableHandle.rememberPlannedInsertDynamicBucketAssignerParallelism(
+                dynamicBucketAssignerParallelism(layout));
+        return layout;
     }
 
     private Optional<ConnectorTableLayout> writeLayout(TableSchema tableSchema, String operation, String tableName)
@@ -472,8 +475,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectSystemTableWrite(paimonTableHandle, "begin insert");
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "begin insert");
+        OptionalInt plannedAssignerParallelism = paimonTableHandle.getPlannedInsertDynamicBucketAssignerParallelism();
         return paimonTableHandle.withWriteColumns(columns)
-                .withDynamicBucketAssignerParallelism(dynamicBucketAssignerParallelism(storeTable));
+                .withDynamicBucketAssignerParallelism(plannedAssignerParallelism.isPresent()
+                        ? plannedAssignerParallelism
+                        : dynamicBucketAssignerParallelism(storeTable));
     }
 
     @Override

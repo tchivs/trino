@@ -1493,6 +1493,37 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDynamicBucketBeginInsertUsesPlannedAssignerLayout()
+    {
+        AtomicInteger workerCount = new AtomicInteger(3);
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(
+                BucketMode.HASH_DYNAMIC,
+                new AtomicBoolean(),
+                rowType,
+                rowType,
+                List.of(),
+                List.of("id"),
+                "id",
+                Map.of(CoreOptions.BUCKET.key(), "-1"))),
+                TESTING_TYPE_MANAGER,
+                workerCount::get);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        ConnectorTableLayout insertLayout = metadata.getInsertLayout(SESSION, tableHandle).orElseThrow();
+        assertThat(insertLayout.getPartitioning().orElseThrow())
+                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle ->
+                        assertThat(handle.dynamicBucketAssignerParallelism()).hasValue(3));
+
+        workerCount.set(5);
+        PaimonTableHandle insertHandle = (PaimonTableHandle) metadata.beginInsert(SESSION, tableHandle,
+                List.of(PaimonColumnHandle.of("id", DataTypes.INT())),
+                RetryMode.NO_RETRIES);
+
+        assertThat(insertHandle.getDynamicBucketAssignerParallelism()).hasValue(3);
+    }
+
+    @Test
     public void testLayoutSerializationFailuresUsePaimonMetadataError()
     {
         IOException failure = new IOException("schema serialization failed");

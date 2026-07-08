@@ -111,6 +111,7 @@ public class PaimonTableHandle
     private final Map<String, String> dynamicOptions;
 
     private final transient Map<Catalog, Table> tablesByCatalog = Collections.synchronizedMap(new IdentityHashMap<>());
+    private transient OptionalInt plannedInsertDynamicBucketAssignerParallelism = OptionalInt.empty();
 
     public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions)
     {
@@ -372,6 +373,20 @@ public class PaimonTableHandle
     public OptionalInt getDynamicBucketAssignerParallelism()
     {
         return dynamicBucketAssignerParallelism;
+    }
+
+    synchronized void rememberPlannedInsertDynamicBucketAssignerParallelism(OptionalInt dynamicBucketAssignerParallelism)
+    {
+        OptionalInt parallelism = copyDynamicBucketAssignerParallelism(dynamicBucketAssignerParallelism);
+        if (parallelism.isEmpty() || plannedInsertDynamicBucketAssignerParallelism.isPresent()) {
+            return;
+        }
+        plannedInsertDynamicBucketAssignerParallelism = parallelism;
+    }
+
+    synchronized OptionalInt getPlannedInsertDynamicBucketAssignerParallelism()
+    {
+        return plannedInsertDynamicBucketAssignerParallelism;
     }
 
     public Table tableWithDynamicOptions(Catalog catalog, ConnectorSession session)
