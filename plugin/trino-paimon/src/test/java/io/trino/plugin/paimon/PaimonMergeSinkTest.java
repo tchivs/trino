@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_DATA_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.ConnectorMergeSink.DELETE_OPERATION_NUMBER;
 import static io.trino.spi.connector.ConnectorMergeSink.INSERT_OPERATION_NUMBER;
@@ -91,8 +92,13 @@ public class PaimonMergeSinkTest
         assertThatThrownBy(() -> mergeSink.storeMergedRows(new Page(1,
                 integerBlock(1),
                 tinyintBlock(INSERT_OPERATION_NUMBER))))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("inputPage channelCount (2) must equal dataColumns size (1) + 2");
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception.getCause())
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("inputPage channelCount (2) must equal dataColumns size (1) + 2");
+                })
+                .hasMessage("Failed to write data to Paimon: inputPage channelCount (2) must equal dataColumns size (1) + 2");
     }
 
     @Test
@@ -104,8 +110,13 @@ public class PaimonMergeSinkTest
                 integerBlock(1),
                 tinyintBlock(3),
                 integerBlock(10))))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Invalid merge operation: 3");
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception.getCause())
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("Invalid merge operation: 3");
+                })
+                .hasMessage("Failed to write data to Paimon: Invalid merge operation: 3");
     }
 
     @Test

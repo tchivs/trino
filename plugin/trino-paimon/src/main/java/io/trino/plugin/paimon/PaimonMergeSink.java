@@ -50,17 +50,22 @@ public class PaimonMergeSink
     public void storeMergedRows(Page page)
     {
         requireNonNull(page, "page is null");
-        validateInputPage(page);
-        if (page.getPositionCount() == 0) {
-            return;
-        }
+        try {
+            validateInputPage(page);
+            if (page.getPositionCount() == 0) {
+                return;
+            }
 
-        MergePage mergePage = MergePage.createDeleteAndInsertPages(page, dataColumnCount);
-        mergePage.getDeletionsPage()
-                .map(this::withoutRowIdColumn)
-                .ifPresent(delete -> pageSink.writePage(delete, RowKind.DELETE));
-        mergePage.getInsertionsPage()
-                .ifPresent(insert -> pageSink.writePage(insert, RowKind.INSERT));
+            MergePage mergePage = MergePage.createDeleteAndInsertPages(page, dataColumnCount);
+            mergePage.getDeletionsPage()
+                    .map(this::withoutRowIdColumn)
+                    .ifPresent(delete -> pageSink.writePage(delete, RowKind.DELETE));
+            mergePage.getInsertionsPage()
+                    .ifPresent(insert -> pageSink.writePage(insert, RowKind.INSERT));
+        }
+        catch (Exception e) {
+            throw PaimonPageSink.wrapWriteException(e);
+        }
     }
 
     private void validateInputPage(Page page)
