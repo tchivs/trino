@@ -80,7 +80,9 @@ public class PaimonNodePartitioningProvider
             return (page, position) -> 0;
         }
         if (bucketMode(paimonPartitioningHandle.getOriginalSchema()) == BucketMode.HASH_DYNAMIC) {
-            return new DynamicBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, workerCount);
+            int assignerCount = paimonPartitioningHandle.dynamicBucketAssignerParallelism()
+                    .orElse(workerCount);
+            return new DynamicBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, assignerCount);
         }
         return new FixedBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, workerCount);
     }

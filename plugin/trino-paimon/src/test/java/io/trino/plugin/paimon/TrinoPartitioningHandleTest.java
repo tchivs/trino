@@ -337,6 +337,46 @@ public class TrinoPartitioningHandleTest
     }
 
     @Test
+    public void testDynamicBucketShuffleFunctionUsesPlannedAssignerCount()
+            throws Exception
+    {
+        TableSchema schema = dynamicBucketSchema(Map.of());
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(
+                InstantiationUtil.serializeObject(schema),
+                false,
+                OptionalInt.of(2));
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(new TestingNodeManager());
+        BucketFunction bucketFunction = provider.getBucketFunction(null, null, handle, List.of(BIGINT, BIGINT), 5);
+        RowPartitionKeyExtractor extractor = new RowPartitionKeyExtractor(schema);
+
+        for (long partitionValue = 1; partitionValue < 100; partitionValue++) {
+            for (long id = 1; id < 100; id++) {
+                Page page = new Page(
+                        1,
+                        writeNativeValue(BIGINT, partitionValue),
+                        writeNativeValue(BIGINT, id));
+                PaimonRow row = new PaimonRow(page, 0, RowKind.INSERT, List.of(BIGINT, BIGINT),
+                        List.of(DataTypes.BIGINT(), DataTypes.BIGINT()));
+                int expected = BucketAssigner.computeAssigner(
+                        extractor.partition(row).hashCode(),
+                        extractor.trimmedPrimaryKey(row).hashCode(),
+                        2,
+                        2);
+                int unplanned = BucketAssigner.computeAssigner(
+                        extractor.partition(row).hashCode(),
+                        extractor.trimmedPrimaryKey(row).hashCode(),
+                        5,
+                        5);
+                if (expected != unplanned) {
+                    assertThat(bucketFunction.getBucket(page, 0)).isEqualTo(expected);
+                    return;
+                }
+            }
+        }
+        fail("test data did not exercise a planned assigner routing difference");
+    }
+
+    @Test
     public void testDynamicBucketShuffleFunctionUsesRowIdPrimaryKeyFields()
             throws Exception
     {

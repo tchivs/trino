@@ -1436,7 +1436,7 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testDynamicBucketWritePlanningUsesAssignerLayoutAndRejectsRowLevelChanges()
+    public void testDynamicBucketWritePlanningUsesAssignerLayoutForRowLevelChanges()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(
@@ -1466,30 +1466,47 @@ public class PaimonMetadataTableModeTest
                 RetryMode.NO_RETRIES);
         assertThat(insertHandle.getDynamicBucketAssignerParallelism()).hasValue(3);
 
-        assertThatThrownBy(() -> metadata.getRowChangeParadigm(SESSION, tableHandle))
-                .isInstanceOfSatisfying(TrinoException.class, exception -> {
-                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
-                    assertThat(exception).hasMessageContaining("INSERT writes");
+        assertThat(metadata.getRowChangeParadigm(SESSION, tableHandle)).isEqualTo(DELETE_ROW_AND_INSERT_ROW);
+        assertThat(metadata.getMergeRowIdColumnHandle(SESSION, tableHandle))
+                .isInstanceOfSatisfying(PaimonColumnHandle.class, rowId ->
+                        assertThat(rowId.getColumnName()).isEqualTo(PaimonColumnHandle.TRINO_ROW_ID_NAME));
+        assertThat(metadata.getUpdateLayout(SESSION, tableHandle).orElseThrow())
+                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> {
+                    assertThat(handle.isSingleNode()).isFalse();
+                    assertThat(handle.dynamicBucketAssignerParallelism()).hasValue(3);
                 });
-        assertThatThrownBy(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle))
-                .isInstanceOfSatisfying(TrinoException.class, exception -> {
-                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
-                    assertThat(exception).hasMessageContaining("INSERT writes");
-                });
-        assertThatThrownBy(() -> metadata.getUpdateLayout(SESSION, tableHandle))
-                .isInstanceOfSatisfying(TrinoException.class, exception -> {
-                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
-                    assertThat(exception).hasMessageContaining("INSERT writes");
-                });
-        assertThatThrownBy(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES))
-                .isInstanceOfSatisfying(TrinoException.class, exception -> {
-                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
-                    assertThat(exception).hasMessageContaining("INSERT writes");
-                });
+        assertThat(metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES))
+                .isInstanceOfSatisfying(PaimonMergeTableHandle.class, mergeHandle ->
+                        assertThat(mergeHandle.paimonTableHandle().getDynamicBucketAssignerParallelism()).hasValue(3));
+    }
+
+    @Test
+    public void testDynamicBucketBeginMergeUsesPlannedRowLevelAssignerLayout()
+    {
+        AtomicInteger workerCount = new AtomicInteger(3);
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(
+                BucketMode.HASH_DYNAMIC,
+                new AtomicBoolean(),
+                rowType,
+                rowType,
+                List.of(),
+                List.of("id"),
+                "id",
+                Map.of(CoreOptions.BUCKET.key(), "-1"))),
+                TESTING_TYPE_MANAGER,
+                workerCount::get);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        PaimonPartitioningHandle updateLayout = (PaimonPartitioningHandle) metadata.getUpdateLayout(SESSION, tableHandle)
+                .orElseThrow();
+        assertThat(updateLayout.dynamicBucketAssignerParallelism()).hasValue(3);
+
+        workerCount.set(5);
+        PaimonMergeTableHandle mergeHandle = (PaimonMergeTableHandle) metadata.beginMerge(SESSION, tableHandle,
+                RetryMode.NO_RETRIES);
+
+        assertThat(mergeHandle.paimonTableHandle().getDynamicBucketAssignerParallelism()).hasValue(3);
     }
 
     @Test

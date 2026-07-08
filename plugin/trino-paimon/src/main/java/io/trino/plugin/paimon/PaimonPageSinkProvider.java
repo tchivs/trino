@@ -133,6 +133,7 @@ public class PaimonPageSinkProvider
         BucketMode mode = requireFileStoreTable(table, "merge writes").bucketMode();
         switch (mode) {
             case HASH_FIXED :
+            case HASH_DYNAMIC :
                 break;
             default :
                 throw PaimonTableSupport.unsupportedBucketMode("merge writes", mode);

@@ -789,8 +789,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
             throw e;
         }
         try {
+            OptionalInt dynamicBucketAssignerParallelism = dynamicBucketAssignerParallelism(storeTable);
+            paimonTableHandle.rememberPlannedRowLevelDynamicBucketAssignerParallelism(
+                    dynamicBucketAssignerParallelism);
             return Optional.of(new PaimonPartitioningHandle(
-                    InstantiationUtil.serializeObject(storeTable.schema())));
+                    InstantiationUtil.serializeObject(storeTable.schema()),
+                    false,
+                    dynamicBucketAssignerParallelism));
         }
         catch (IOException e) {
             throw new TrinoException(PAIMON_METADATA_ERROR,
@@ -861,7 +866,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         FileStoreTable storeTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, operation);
         BucketMode bucketMode = storeTable.bucketMode();
-        if (bucketMode != BucketMode.HASH_FIXED) {
+        if (bucketMode != BucketMode.HASH_FIXED && bucketMode != BucketMode.HASH_DYNAMIC) {
             throw PaimonTableSupport.unsupportedBucketMode(operation, bucketMode);
         }
         PaimonTableSupport.validateRowLevelDelete(storeTable, operation);
@@ -872,7 +877,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(storeTable, "storeTable is null");
         BucketMode bucketMode = storeTable.bucketMode();
-        if (bucketMode != BucketMode.HASH_FIXED) {
+        if (bucketMode != BucketMode.HASH_FIXED && bucketMode != BucketMode.HASH_DYNAMIC) {
             throw PaimonTableSupport.unsupportedBucketMode(operation, bucketMode);
         }
         PaimonTableSupport.validateRowLevelDelete(storeTable, operation);
@@ -901,7 +906,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         List<ColumnHandle> writeColumns = storeTable.rowType().getFields().stream()
                 .map(this::toPaimonColumnHandle)
                 .collect(toList());
-        return new PaimonMergeTableHandle(paimonTableHandle.withWriteColumns(writeColumns));
+        OptionalInt plannedAssignerParallelism = paimonTableHandle.getPlannedRowLevelDynamicBucketAssignerParallelism();
+        return new PaimonMergeTableHandle(paimonTableHandle.withWriteColumns(writeColumns)
+                .withDynamicBucketAssignerParallelism(plannedAssignerParallelism.isPresent()
+                        ? plannedAssignerParallelism
+                        : dynamicBucketAssignerParallelism(storeTable)));
     }
 
     private static void validateNoQueryRetries(RetryMode retryMode)

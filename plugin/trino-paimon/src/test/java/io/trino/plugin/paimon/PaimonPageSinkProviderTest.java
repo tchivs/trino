@@ -109,13 +109,14 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
-    public void testMergeSupportsOnlyFixedBucketMode()
+    public void testMergeSupportsFixedAndDynamicBucketModes()
     {
         assertThatCode(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(BucketMode.HASH_FIXED)))
                 .doesNotThrowAnyException();
+        assertThatCode(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(BucketMode.HASH_DYNAMIC)))
+                .doesNotThrowAnyException();
 
         assertUnsupportedMergeBucketMode(BucketMode.BUCKET_UNAWARE);
-        assertUnsupportedMergeBucketMode(BucketMode.HASH_DYNAMIC);
         assertUnsupportedMergeBucketMode(BucketMode.KEY_DYNAMIC);
         assertUnsupportedMergeBucketMode(BucketMode.POSTPONE_MODE);
     }
@@ -378,7 +379,7 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
-    public void testDynamicBucketMergePageSinkRejected()
+    public void testDynamicBucketMergePageSinkCreatesDynamicBucketWriter()
     {
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
         PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
@@ -390,15 +391,13 @@ public class PaimonPageSinkProviderTest
                         List.of("id"),
                         BucketMode.HASH_DYNAMIC)), TestingIoManager::new, () -> 4);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
-                .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())));
+                .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())))
+                .withDynamicBucketAssignerParallelism(OptionalInt.of(4));
 
-        assertThatThrownBy(() -> provider.createMergeSink(null, SESSION, new PaimonMergeTableHandle(tableHandle),
-                pageSinkId(2)))
-                .isInstanceOfSatisfying(TrinoException.class, exception -> {
-                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
-                    assertThat(exception).hasMessageContaining("INSERT writes");
-                });
+        ConnectorMergeSink pageSink = provider.createMergeSink(null, SESSION, new PaimonMergeTableHandle(tableHandle),
+                pageSinkId(2));
+
+        assertThat(pageSink).isInstanceOf(PaimonMergeSink.class);
         assertThat(overwriteEnabled).isFalse();
     }
 
