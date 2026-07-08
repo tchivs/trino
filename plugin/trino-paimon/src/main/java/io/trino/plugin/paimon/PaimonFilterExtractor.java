@@ -369,7 +369,7 @@ public class PaimonFilterExtractor
                 && trinoType instanceof MapType mapType
                 && elementType.equals(mapType.getValueType())) {
             expressionPredicates.put(
-                    PaimonColumnHandle.of(toMapKey(columnName, nestedName), paimonColumnHandle.logicalType(),
+                    PaimonColumnHandle.of(toMapKey(paimonColumnHandle.getColumnName(), nestedName), paimonColumnHandle.logicalType(),
                             paimonColumnHandle.getTrinoType()),
                     Domain.create(SortedRangeSet.copyOf(elementType, ranges), false));
         }

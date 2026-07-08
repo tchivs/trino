@@ -580,6 +580,33 @@ public class TrinoFilterConverterTest
     }
 
     @Test
+    public void testMapElementExpressionExtractionUsesAssignedColumnName()
+    {
+        org.apache.paimon.types.MapType mapType = new org.apache.paimon.types.MapType(
+                new VarCharType(VarCharType.MAX_LENGTH), new VarCharType(VarCharType.MAX_LENGTH));
+        RowType rowType = new RowType(Collections.singletonList(new DataField(0, "properties", mapType)));
+        PaimonColumnHandle properties = PaimonColumnHandle.of("properties", mapType);
+        Call expression = new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(
+                mapElement("properties_symbol", properties.getTrinoType(), "region"),
+                new Constant(Slices.utf8Slice("ap-south"), VARCHAR)));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("properties_symbol", properties));
+
+        Map<PaimonColumnHandle, Domain> extracted = PaimonFilterExtractor
+                .extractTrinoColumnHandleForExpressionFilter(constraint);
+
+        PaimonColumnHandle mapElement = PaimonColumnHandle.of(toMapKey("properties", "region"),
+                properties.logicalType(), properties.getTrinoType());
+        assertThat(extracted).containsOnlyKeys(mapElement);
+        assertThat(extracted.get(mapElement)).isEqualTo(Domain.singleValue(VARCHAR, Slices.utf8Slice("ap-south")));
+
+        Predicate fileIndexPredicate = new PaimonFilterConverter(rowType)
+                .convertForFileIndex(TupleDomain.withColumnDomains(extracted))
+                .orElseThrow();
+        assertThat(fileIndexPredicate).isInstanceOf(LeafPredicate.class);
+        assertThat(((LeafPredicate) fileIndexPredicate).fieldNames()).containsExactly(toMapKey("properties", "region"));
+    }
+
+    @Test
     public void testMapElementExpressionFilterIsAppliedWhenSummaryIsUnchanged()
     {
         org.apache.paimon.types.MapType mapType = new org.apache.paimon.types.MapType(
