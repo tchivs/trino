@@ -36,13 +36,13 @@ import org.apache.paimon.table.source.Split;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
@@ -170,12 +170,8 @@ public class PaimonSplitManager
             pushLimit(readBuilder, tableHandle);
             List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
 
-            long maxRowCount = splits.stream().mapToLong(PaimonSplitManager::splitWeightRowCount).max().orElse(0L);
             double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
-            PaimonSplitSource splitSource = new PaimonSplitSource(splits.stream()
-                    .map(split -> PaimonSplit.fromSplit(split,
-                            calculateSplitWeight(split, maxRowCount, minimumSplitWeight)))
-                    .collect(Collectors.toList()), tableHandle.getLimit());
+            PaimonSplitSource splitSource = new PaimonSplitSource(toPaimonSplits(splits, minimumSplitWeight), tableHandle.getLimit());
 
             return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
         }
@@ -278,19 +274,59 @@ public class PaimonSplitManager
     static double calculateSplitWeight(Split split, long maxRowCount, double minimumSplitWeight)
     {
         requireNonNull(split, "split is null");
-        checkArgument(Double.isFinite(minimumSplitWeight) && minimumSplitWeight > 0 && minimumSplitWeight <= 1,
-                "minimumSplitWeight must be in the range (0, 1]");
-        long rowCount = splitWeightRowCount(split);
+        return calculateSplitWeight(splitWeightRowCount(split), maxRowCount, minimumSplitWeight);
+    }
+
+    static double calculateSplitWeight(long rowCount, long maxRowCount, double minimumSplitWeight)
+    {
+        checkMinimumSplitWeight(minimumSplitWeight);
+        checkArgument(rowCount >= 0, "split row count must be non-negative");
         if (maxRowCount <= 0 || rowCount <= 0) {
             return minimumSplitWeight;
         }
         return Math.min(Math.max((double) rowCount / maxRowCount, minimumSplitWeight), 1.0);
     }
 
+    static List<PaimonSplit> toPaimonSplits(List<Split> splits, double minimumSplitWeight)
+    {
+        requireNonNull(splits, "splits is null");
+        checkMinimumSplitWeight(minimumSplitWeight);
+
+        long[] rowCounts = new long[splits.size()];
+        long maxRowCount = 0;
+        int index = 0;
+        for (Split split : splits) {
+            requireNonNull(split, "splits contains null split");
+            long rowCount = splitWeightRowCount(split);
+            checkArgument(rowCount >= 0, "split row count must be non-negative");
+            rowCounts[index] = rowCount;
+            maxRowCount = Math.max(maxRowCount, rowCount);
+            index++;
+        }
+
+        List<PaimonSplit> paimonSplits = new ArrayList<>(splits.size());
+        index = 0;
+        for (Split split : splits) {
+            long rowCount = rowCounts[index];
+            paimonSplits.add(PaimonSplit.fromSplit(
+                    split,
+                    calculateSplitWeight(rowCount, maxRowCount, minimumSplitWeight),
+                    rowCount));
+            index++;
+        }
+        return paimonSplits;
+    }
+
+    private static void checkMinimumSplitWeight(double minimumSplitWeight)
+    {
+        checkArgument(Double.isFinite(minimumSplitWeight) && minimumSplitWeight > 0 && minimumSplitWeight <= 1,
+                "minimumSplitWeight must be in the range (0, 1]");
+    }
+
     static long splitWeightRowCount(Split split)
     {
         requireNonNull(split, "split is null");
-        return split.mergedRowCount().orElse(split.rowCount());
+        return split.mergedRowCount().orElseGet(split::rowCount);
     }
 
     static PaimonSplitSource emptySplitSource(PaimonTableHandle tableHandle)

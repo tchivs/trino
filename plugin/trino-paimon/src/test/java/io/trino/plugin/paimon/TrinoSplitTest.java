@@ -46,6 +46,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -179,6 +180,9 @@ public class TrinoSplitTest
         assertThatThrownBy(() -> new PaimonSplit("split", 0.1, -1L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("rowCount must be non-negative");
+        assertThatThrownBy(() -> PaimonSplitManager.toPaimonSplits(List.of(new TestingSplit(-1)), 0.1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("split row count must be non-negative");
     }
 
     @Test
@@ -225,6 +229,22 @@ public class TrinoSplitTest
 
         assertThat(PaimonSplitManager.splitWeightRowCount(split)).isEqualTo(25);
         assertThat(PaimonSplitManager.calculateSplitWeight(split, 100, 0.05)).isEqualTo(0.25);
+    }
+
+    @Test
+    public void testPlanningSplitConversionComputesRowCountsOnce()
+    {
+        CountingSplit first = new CountingSplit(100, null);
+        CountingSplit second = new CountingSplit(100, 25L);
+
+        List<PaimonSplit> splits = PaimonSplitManager.toPaimonSplits(List.of(first, second), 0.05);
+
+        assertThat(splits).extracting(PaimonSplit::rowCount).containsExactly(100L, 25L);
+        assertThat(splits).extracting(PaimonSplit::weight).containsExactly(1.0, 0.25);
+        assertThat(first.mergedRowCountCalls()).isEqualTo(1);
+        assertThat(first.rowCountCalls()).isEqualTo(1);
+        assertThat(second.mergedRowCountCalls()).isEqualTo(1);
+        assertThat(second.rowCountCalls()).isEqualTo(0);
     }
 
     @Test
@@ -772,6 +792,45 @@ public class TrinoSplitTest
         public Optional<List<RawFile>> convertToRawFiles()
         {
             return Optional.empty();
+        }
+    }
+
+    private static class CountingSplit
+            implements Split
+    {
+        private final long rowCount;
+        private final Long mergedRowCountValue;
+        private final AtomicInteger rowCountCalls = new AtomicInteger();
+        private final AtomicInteger mergedRowCountCalls = new AtomicInteger();
+
+        private CountingSplit(long rowCount, Long mergedRowCountValue)
+        {
+            this.rowCount = rowCount;
+            this.mergedRowCountValue = mergedRowCountValue;
+        }
+
+        @Override
+        public long rowCount()
+        {
+            rowCountCalls.incrementAndGet();
+            return rowCount;
+        }
+
+        @Override
+        public OptionalLong mergedRowCount()
+        {
+            mergedRowCountCalls.incrementAndGet();
+            return mergedRowCountValue == null ? OptionalLong.empty() : OptionalLong.of(mergedRowCountValue);
+        }
+
+        private int rowCountCalls()
+        {
+            return rowCountCalls.get();
+        }
+
+        private int mergedRowCountCalls()
+        {
+            return mergedRowCountCalls.get();
         }
     }
 

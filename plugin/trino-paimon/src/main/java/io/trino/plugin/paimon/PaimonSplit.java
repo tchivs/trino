@@ -70,7 +70,13 @@ public record PaimonSplit(String splitSerialized, Double weight, Long rowCount) 
     public static PaimonSplit fromSplit(Split split, Double weight)
     {
         requireNonNull(split, "split is null");
-        return new PaimonSplit(EncodingUtils.encodeObjectToString(split), weight, PaimonSplitManager.splitWeightRowCount(split));
+        return fromSplit(split, weight, PaimonSplitManager.splitWeightRowCount(split));
+    }
+
+    static PaimonSplit fromSplit(Split split, Double weight, long rowCount)
+    {
+        requireNonNull(split, "split is null");
+        return new PaimonSplit(EncodingUtils.encodeObjectToString(split), weight, rowCount);
     }
 
     public Split decodeSplit()

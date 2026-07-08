@@ -30,7 +30,6 @@ import javax.annotation.concurrent.GuardedBy;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
@@ -204,13 +203,9 @@ public class DynamicFilteringTrinoSplitSource
 
             LOG.debug("Planned %s splits after applying effective filters", splits.size());
 
-            long maxRowCount = splits.stream().mapToLong(PaimonSplitManager::splitWeightRowCount).max().orElse(0L);
             double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
 
-            return new PaimonSplitSource(splits.stream()
-                    .map(split -> PaimonSplit.fromSplit(split,
-                            PaimonSplitManager.calculateSplitWeight(split, maxRowCount, minimumSplitWeight)))
-                    .collect(Collectors.toList()), tableHandle.getLimit());
+            return new PaimonSplitSource(PaimonSplitManager.toPaimonSplits(splits, minimumSplitWeight), tableHandle.getLimit());
         }
         catch (UnsupportedOperationException e) {
             throw PaimonSplitManager.unsupportedReadOperation(tableHandle, e);
