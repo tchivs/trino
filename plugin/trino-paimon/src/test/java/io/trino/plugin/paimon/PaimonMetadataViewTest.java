@@ -13,7 +13,10 @@
  */
 package io.trino.plugin.paimon;
 
+import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.filesystem.TrinoInputFile;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.CatalogSchemaName;
@@ -36,6 +39,7 @@ import org.apache.paimon.view.ViewImpl;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.lang.reflect.Proxy;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +57,7 @@ import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
+import static org.apache.paimon.options.CatalogOptions.WAREHOUSE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -135,6 +140,25 @@ public class PaimonMetadataViewTest
         assertThat(metadata.getViews(SESSION, Optional.of(SYSTEM_DATABASE_NAME))).isEmpty();
         assertThat(metadata.getViews(SESSION, Optional.empty())).isEmpty();
         assertThat(catalog.listDatabasesCalls).isEqualTo(1);
+    }
+
+    @Test
+    public void testGetViewUsesTrinoFileSystemForFilesystemCatalogInitialization()
+    {
+        Options options = new Options();
+        options.set(WAREHOUSE, "s3://bucket/warehouse");
+        PaimonMetadata metadata = new PaimonMetadata(
+                new PaimonCatalog(options, ignored -> failingFileSystem()),
+                TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.getView(SESSION, VIEW_NAME))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_METADATA_ERROR.toErrorCode());
+                    assertThat(exception)
+                            .hasMessageContaining("Failed to access Paimon warehouse 's3://bucket/warehouse' with Trino file system")
+                            .hasMessageNotContaining("Hadoop configuration is not available")
+                            .hasRootCauseMessage("simulated S3 probe failure");
+                });
     }
 
     @Test
@@ -903,6 +927,54 @@ public class PaimonMetadataViewTest
                 dialects,
                 null,
                 options);
+    }
+
+    private static TrinoFileSystem failingFileSystem()
+    {
+        return (TrinoFileSystem) Proxy.newProxyInstance(
+                PaimonMetadataViewTest.class.getClassLoader(),
+                new Class<?>[] {TrinoFileSystem.class},
+                (proxy, method, args) -> {
+                    if (method.getDeclaringClass() == Object.class) {
+                        return handleObjectMethod(method.getName(), proxy, args);
+                    }
+                    if (method.getName().equals("newInputFile")) {
+                        return failingInputFile((Location) args[0]);
+                    }
+                    if (method.getName().equals("directoryExists")) {
+                        throw new IOException("simulated S3 probe failure");
+                    }
+                    throw new AssertionError("Unexpected filesystem call: " + method.getName());
+                });
+    }
+
+    private static TrinoInputFile failingInputFile(Location location)
+    {
+        return (TrinoInputFile) Proxy.newProxyInstance(
+                PaimonMetadataViewTest.class.getClassLoader(),
+                new Class<?>[] {TrinoInputFile.class},
+                (proxy, method, args) -> {
+                    if (method.getDeclaringClass() == Object.class) {
+                        return handleObjectMethod(method.getName(), proxy, args);
+                    }
+                    if (method.getName().equals("exists")) {
+                        throw new IOException("simulated S3 probe failure");
+                    }
+                    if (method.getName().equals("location")) {
+                        return location;
+                    }
+                    throw new AssertionError("Unexpected input file call: " + method.getName());
+                });
+    }
+
+    private static Object handleObjectMethod(String name, Object proxy, Object[] args)
+    {
+        return switch (name) {
+            case "toString" -> proxy.getClass().getInterfaces()[0].getSimpleName() + " proxy";
+            case "hashCode" -> System.identityHashCode(proxy);
+            case "equals" -> proxy == args[0];
+            default -> throw new AssertionError("Unexpected Object method: " + name);
+        };
     }
 
     private static View viewWithUnreadableRowType(Map<String, String> dialects)
