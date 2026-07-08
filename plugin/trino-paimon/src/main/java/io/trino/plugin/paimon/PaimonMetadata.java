@@ -801,7 +801,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         FileStoreTable storeTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, operation);
         BucketMode bucketMode = storeTable.bucketMode();
-        if (bucketMode != BucketMode.HASH_FIXED && bucketMode != BucketMode.HASH_DYNAMIC) {
+        if (bucketMode != BucketMode.HASH_FIXED) {
             throw PaimonTableSupport.unsupportedBucketMode(operation, bucketMode);
         }
         PaimonTableSupport.validateRowLevelDelete(storeTable, operation);
@@ -812,7 +812,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(storeTable, "storeTable is null");
         BucketMode bucketMode = storeTable.bucketMode();
-        if (bucketMode != BucketMode.HASH_FIXED && bucketMode != BucketMode.HASH_DYNAMIC) {
+        if (bucketMode != BucketMode.HASH_FIXED) {
             throw PaimonTableSupport.unsupportedBucketMode(operation, bucketMode);
         }
         PaimonTableSupport.validateRowLevelDelete(storeTable, operation);

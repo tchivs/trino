@@ -67,7 +67,7 @@ public final class PaimonTableSupport
         return switch (mode) {
             case HASH_DYNAMIC -> new TrinoException(NOT_SUPPORTED,
                     "Unsupported table bucket mode: HASH_DYNAMIC for Paimon " + operation
-                            + ". HASH_DYNAMIC is supported only for primary-key FileStoreTable writes and row-level changes");
+                            + ". HASH_DYNAMIC is supported only for primary-key FileStoreTable INSERT writes");
             case KEY_DYNAMIC -> new TrinoException(NOT_SUPPORTED,
                     "Unsupported table bucket mode: KEY_DYNAMIC for Paimon " + operation
                             + ". Key-dynamic tables require a global key-to-bucket index, which is not implemented by this Trino connector");

@@ -1195,7 +1195,7 @@ public class TestTrinoITCase
     }
 
     @Test
-    public void testHashDynamicDeleteUpdateAndMerge()
+    public void testHashDynamicRejectsDeleteUpdateAndMerge()
     {
         sql("CREATE TABLE paimon.default.hash_dynamic_mutations ("
                 + "id integer, "
@@ -1206,23 +1206,32 @@ public class TestTrinoITCase
         sql("INSERT INTO paimon.default.hash_dynamic_mutations VALUES "
                 + "(1, 'one', 10), (2, 'two', 20), (3, 'three', 30)");
 
-        sql("DELETE FROM paimon.default.hash_dynamic_mutations WHERE id = 3");
         assertThat(sql("SELECT * FROM paimon.default.hash_dynamic_mutations ORDER BY id"))
-                .isEqualTo("[[1, one, 10], [2, two, 20]]");
+                .isEqualTo("[[1, one, 10], [2, two, 20], [3, three, 30]]");
 
-        sql("UPDATE paimon.default.hash_dynamic_mutations SET name = 'two-updated', score = 22 WHERE id = 2");
-        assertThat(sql("SELECT * FROM paimon.default.hash_dynamic_mutations ORDER BY id"))
-                .isEqualTo("[[1, one, 10], [2, two-updated, 22]]");
+        assertQueryFails(
+                "DELETE FROM paimon.default.hash_dynamic_mutations WHERE id = 3",
+                ".*Unsupported table bucket mode: HASH_DYNAMIC for Paimon .*"
+                        + "HASH_DYNAMIC is supported only for primary-key FileStoreTable INSERT writes.*");
 
-        sql("MERGE INTO paimon.default.hash_dynamic_mutations t "
-                + "USING (VALUES (1, 'one-updated', 11), (2, 'two-deleted', -1), (4, 'four', 40)) "
-                + "AS s(id, name, score) "
-                + "ON (t.id = s.id) "
-                + "WHEN MATCHED AND s.score < 0 THEN DELETE "
-                + "WHEN MATCHED THEN UPDATE SET name = s.name, score = s.score "
-                + "WHEN NOT MATCHED THEN INSERT (id, name, score) VALUES (s.id, s.name, s.score)");
+        assertQueryFails(
+                "UPDATE paimon.default.hash_dynamic_mutations SET name = 'two-updated', score = 22 WHERE id = 2",
+                ".*Unsupported table bucket mode: HASH_DYNAMIC for Paimon .*"
+                        + "HASH_DYNAMIC is supported only for primary-key FileStoreTable INSERT writes.*");
+
+        assertQueryFails(
+                "MERGE INTO paimon.default.hash_dynamic_mutations t "
+                        + "USING (VALUES (1, 'one-updated', 11), (2, 'two-deleted', -1), (4, 'four', 40)) "
+                        + "AS s(id, name, score) "
+                        + "ON (t.id = s.id) "
+                        + "WHEN MATCHED AND s.score < 0 THEN DELETE "
+                        + "WHEN MATCHED THEN UPDATE SET name = s.name, score = s.score "
+                        + "WHEN NOT MATCHED THEN INSERT (id, name, score) VALUES (s.id, s.name, s.score)",
+                ".*Unsupported table bucket mode: HASH_DYNAMIC for Paimon .*"
+                        + "HASH_DYNAMIC is supported only for primary-key FileStoreTable INSERT writes.*");
+
         assertThat(sql("SELECT * FROM paimon.default.hash_dynamic_mutations ORDER BY id"))
-                .isEqualTo("[[1, one-updated, 11], [4, four, 40]]");
+                .isEqualTo("[[1, one, 10], [2, two, 20], [3, three, 30]]");
     }
 
     @Test

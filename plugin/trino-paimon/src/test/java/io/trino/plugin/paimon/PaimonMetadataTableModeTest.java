@@ -1435,7 +1435,7 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testDynamicBucketWritePlanningUsesAssignerLayoutAndSupportsRowLevelChanges()
+    public void testDynamicBucketWritePlanningUsesAssignerLayoutAndRejectsRowLevelChanges()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(
@@ -1455,23 +1455,30 @@ public class PaimonMetadataTableModeTest
         assertThat(insertLayout.getPartitioning().orElseThrow())
                 .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> assertThat(handle.isSingleNode()).isFalse());
 
-        assertThat(metadata.getRowChangeParadigm(SESSION, tableHandle)).isEqualTo(DELETE_ROW_AND_INSERT_ROW);
-        PaimonColumnHandle rowId = (PaimonColumnHandle) metadata.getMergeRowIdColumnHandle(SESSION, tableHandle);
-        assertThat(rowId.getColumnName()).isEqualTo(PaimonColumnHandle.TRINO_ROW_ID_NAME);
-        assertThat(((org.apache.paimon.types.RowType) rowId.logicalType()).getFieldNames())
-                .containsExactly("id");
-
-        PaimonPartitioningHandle updateLayout = (PaimonPartitioningHandle) metadata.getUpdateLayout(SESSION, tableHandle)
-                .orElseThrow();
-        assertThat(updateLayout.isSingleNode()).isFalse();
-        assertThat(new CoreOptions(new Options(updateLayout.getOriginalSchema().options())).bucket()).isEqualTo(-1);
-
-        PaimonMergeTableHandle mergeHandle = (PaimonMergeTableHandle) metadata.beginMerge(SESSION, tableHandle,
-                RetryMode.NO_RETRIES);
-        assertThat(mergeHandle.isMetadataDeleteFallback()).isFalse();
-        assertThat(mergeHandle.paimonTableHandle().getWriteColumns().orElseThrow())
-                .extracting(column -> ((PaimonColumnHandle) column).getColumnName())
-                .containsExactly("id");
+        assertThatThrownBy(() -> metadata.getRowChangeParadigm(SESSION, tableHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
+                    assertThat(exception).hasMessageContaining("INSERT writes");
+                });
+        assertThatThrownBy(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
+                    assertThat(exception).hasMessageContaining("INSERT writes");
+                });
+        assertThatThrownBy(() -> metadata.getUpdateLayout(SESSION, tableHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
+                    assertThat(exception).hasMessageContaining("INSERT writes");
+                });
+        assertThatThrownBy(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
+                    assertThat(exception).hasMessageContaining("INSERT writes");
+                });
     }
 
     @Test
