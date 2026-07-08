@@ -105,14 +105,13 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
-    public void testMergeSupportsFixedAndDynamicBucketModes()
+    public void testMergeSupportsOnlyFixedBucketMode()
     {
         assertThatCode(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(BucketMode.HASH_FIXED)))
                 .doesNotThrowAnyException();
-        assertThatCode(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(BucketMode.HASH_DYNAMIC)))
-                .doesNotThrowAnyException();
 
         assertUnsupportedMergeBucketMode(BucketMode.BUCKET_UNAWARE);
+        assertUnsupportedMergeBucketMode(BucketMode.HASH_DYNAMIC);
         assertUnsupportedMergeBucketMode(BucketMode.KEY_DYNAMIC);
         assertUnsupportedMergeBucketMode(BucketMode.POSTPONE_MODE);
     }
@@ -375,7 +374,7 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
-    public void testDynamicBucketMergePageSinkUsesPageSinkTaskPartitionAsAssigner()
+    public void testDynamicBucketMergePageSinkRejected()
     {
         AtomicBoolean overwriteEnabled = new AtomicBoolean();
         PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
@@ -389,18 +388,14 @@ public class PaimonPageSinkProviderTest
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
                 .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())));
 
-        ConnectorMergeSink sink = provider.createMergeSink(null, SESSION, new PaimonMergeTableHandle(tableHandle),
-                pageSinkId(2));
-
-        assertThat(sink).isNotNull();
-        assertThat(overwriteEnabled).isFalse();
         assertThatThrownBy(() -> provider.createMergeSink(null, SESSION, new PaimonMergeTableHandle(tableHandle),
-                pageSinkId(4)))
+                pageSinkId(2)))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
-                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
-                    assertThat(exception).hasMessage(
-                            "Failed to write data to Paimon: Paimon HASH_DYNAMIC writer task partition 4 is outside assigner parallelism 4");
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessageContaining("HASH_DYNAMIC");
+                    assertThat(exception).hasMessageContaining("INSERT writes");
                 });
+        assertThat(overwriteEnabled).isFalse();
     }
 
     @Test
