@@ -2475,6 +2475,16 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPageSourceArrayConversionRejectsInvalidSize()
+    {
+        io.trino.spi.type.ArrayType arrayType = new io.trino.spi.type.ArrayType(INTEGER);
+
+        assertThatThrownBy(() -> appendSingleColumn(arrayType, DataTypes.ARRAY(DataTypes.INT()), internalArrayWithSize(-1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Paimon ARRAY/VECTOR size must be non-negative: -1");
+    }
+
+    @Test
     void testPageSourceRowConversionRequiresRowLogicalTypeAndMatchingFieldCount()
     {
         RowType rowType = RowType.anonymous(List.of(INTEGER));
@@ -3612,6 +3622,18 @@ public class PaimonPageSourceTest
     private record TestingInternalMap(int size, InternalArray keyArray, InternalArray valueArray)
             implements InternalMap
     {
+    }
+
+    private static InternalArray internalArrayWithSize(int size)
+    {
+        return (InternalArray) Proxy.newProxyInstance(
+                InternalArray.class.getClassLoader(),
+                new Class<?>[] {InternalArray.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "size" -> size;
+                    case "toString" -> "TestingInternalArray[size=" + size + "]";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
     }
 
     private static FileStoreTable fileStoreTable()

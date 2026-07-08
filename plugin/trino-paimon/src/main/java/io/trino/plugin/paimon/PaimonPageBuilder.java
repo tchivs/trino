@@ -231,11 +231,13 @@ public final class PaimonPageBuilder
     {
         if (type instanceof ArrayType) {
             ArrayBlockBuilder arrayBlockBuilder = (ArrayBlockBuilder) output;
+            InternalArray arrayData = (InternalArray) value;
+            int arraySize = arrayData.size();
+            validateArraySize(arraySize);
+            DataType elementType = arrayElementLogicalType(logicalType);
             try {
                 arrayBlockBuilder.buildEntry((ArrayValueBuilder<Throwable>) elementBuilder -> {
-                    InternalArray arrayData = (InternalArray) value;
-                    DataType elementType = arrayElementLogicalType(logicalType);
-                    for (int i = 0; i < arrayData.size(); i++) {
+                    for (int i = 0; i < arraySize; i++) {
                         appendTo(type.getTypeParameters().get(0), elementType,
                                 InternalRowUtils.get(arrayData, i, elementType), elementBuilder);
                     }
@@ -309,6 +311,13 @@ public final class PaimonPageBuilder
             return;
         }
         throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unhandled type for Block: " + type.getTypeSignature());
+    }
+
+    private static void validateArraySize(int arraySize)
+    {
+        if (arraySize < 0) {
+            throw new IllegalArgumentException("Paimon ARRAY/VECTOR size must be non-negative: " + arraySize);
+        }
     }
 
     private static void validateMapArraySizes(int mapSize, int keyArraySize, int valueArraySize)
