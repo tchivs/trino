@@ -877,6 +877,36 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testPageSinkReportsCompletedBytesAfterSuccessfulWrite()
+    {
+        PaimonPageSink pageSink = new PaimonPageSink(writer(), List.of(INTEGER), List.of(DataTypes.INT()));
+        io.trino.spi.Page page = new io.trino.spi.Page(1, writeNativeValue(INTEGER, 7L));
+
+        assertThat(page.getSizeInBytes()).isPositive();
+        assertThat(pageSink.getCompletedBytes()).isZero();
+
+        pageSink.appendPage(page);
+
+        assertThat(pageSink.getCompletedBytes()).isEqualTo(page.getSizeInBytes());
+    }
+
+    @Test
+    public void testPageSinkDoesNotReportCompletedBytesForFailedWrite()
+    {
+        PaimonPageSink pageSink = new PaimonPageSink(
+                writer(List.of(), new IOException("write failed"), null, null),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()));
+        io.trino.spi.Page page = new io.trino.spi.Page(1, writeNativeValue(INTEGER, 7L));
+
+        assertThatThrownBy(() -> pageSink.appendPage(page))
+                .isInstanceOf(TrinoException.class)
+                .hasMessage("Failed to write data to Paimon: write failed");
+
+        assertThat(pageSink.getCompletedBytes()).isZero();
+    }
+
+    @Test
     public void testPageSinkMapsInputColumnsIntoLatestSchemaRow()
     {
         AtomicReference<Object[]> writeArguments = new AtomicReference<>();

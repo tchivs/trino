@@ -58,6 +58,7 @@ import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_CLOSE_ERROR;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_DATA_ERROR;
+import static io.trino.plugin.paimon.PaimonLongUtils.saturatedAdd;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.completedFuture;
@@ -82,6 +83,7 @@ public class PaimonPageSink
     @Nullable
     private final DynamicBucketWriter dynamicBucketWriter;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private long completedBytes;
 
     public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes)
     {
@@ -225,6 +227,12 @@ public class PaimonPageSink
     }
 
     @Override
+    public long getCompletedBytes()
+    {
+        return completedBytes;
+    }
+
+    @Override
     public long getMemoryUsage()
     {
         if (memoryPoolFactory == null) {
@@ -264,6 +272,7 @@ public class PaimonPageSink
                     dynamicBucketWriter.write(writer, row);
                 }
             }
+            completedBytes = saturatedAdd(completedBytes, page.getSizeInBytes(), "completed bytes");
         }
         catch (Exception e) {
             throw wrapWriteException(e);
