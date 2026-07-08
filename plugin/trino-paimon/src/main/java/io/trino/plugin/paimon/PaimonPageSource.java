@@ -54,9 +54,24 @@ public class PaimonPageSource
     public PaimonPageSource(RecordReader<InternalRow> reader, List<? extends ColumnHandle> projectedColumns,
             OptionalLong limit)
     {
-        this.limit = requireNonNull(limit, "limit is null");
-        checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
         RecordReader<InternalRow> recordReader = requireNonNull(reader, "reader is null");
+        try {
+            this.limit = requireNonNull(limit, "limit is null");
+            checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
+            PageSourceColumns pageSourceColumns = pageSourceColumns(projectedColumns);
+            this.pageBuilder = new PaimonPageBuilder(pageSourceColumns.columnTypes(), pageSourceColumns.logicalTypes());
+        }
+        catch (RuntimeException | Error e) {
+            closeAllSuppress(e, recordReader);
+            throw e;
+        }
+
+        // Paimon's RecordReaderIterator closes the reader if the initial readBatch fails.
+        this.iterator = recordReader.toCloseableIterator();
+    }
+
+    private static PageSourceColumns pageSourceColumns(List<? extends ColumnHandle> projectedColumns)
+    {
         List<Type> columnTypes = new ArrayList<>();
         List<DataType> logicalTypes = new ArrayList<>();
         requireNonNull(projectedColumns, "projectedColumns is null");
@@ -68,10 +83,10 @@ public class PaimonPageSource
             columnTypes.add(paimonColumnHandle.getTrinoType());
             logicalTypes.add(paimonColumnHandle.logicalType());
         }
-
-        this.pageBuilder = new PaimonPageBuilder(columnTypes, logicalTypes);
-        this.iterator = recordReader.toCloseableIterator();
+        return new PageSourceColumns(columnTypes, logicalTypes);
     }
+
+    private record PageSourceColumns(List<Type> columnTypes, List<DataType> logicalTypes) {}
 
     @Override
     public long getCompletedBytes()

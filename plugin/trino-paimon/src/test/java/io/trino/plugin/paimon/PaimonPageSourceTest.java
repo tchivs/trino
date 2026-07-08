@@ -2234,7 +2234,7 @@ public class PaimonPageSourceTest
     }
 
     @Test
-    void testPaimonPageSourceValidatesColumnsBeforeOpeningReader()
+    void testPaimonPageSourceClosesReaderWhenColumnValidationFails()
     {
         TrackingRecordReader reader = new TrackingRecordReader(GenericRow.of(1L));
 
@@ -2245,7 +2245,83 @@ public class PaimonPageSourceTest
 
         assertThat(reader.readBatchCalls()).isZero();
         assertThat(reader.releaseBatchCalls()).isZero();
-        assertThat(reader.closeCalls()).isZero();
+        assertThat(reader.closeCalls()).isEqualTo(1);
+    }
+
+    @Test
+    void testPaimonPageSourceSuppressesCloseFailureWhenColumnValidationFails()
+    {
+        IOException closeFailure = new IOException("close failed");
+        RecordReader<InternalRow> reader = new RecordReader<>()
+        {
+            @Override
+            public RecordIterator<InternalRow> readBatch()
+            {
+                throw new AssertionError("readBatch should not be called");
+            }
+
+            @Override
+            public void close()
+                    throws IOException
+            {
+                throw closeFailure;
+            }
+        };
+
+        assertThatThrownBy(() -> new PaimonPageSource(reader, List.of(new ColumnHandle() {}),
+                OptionalLong.empty()))
+                .isInstanceOfSatisfying(IllegalArgumentException.class, exception -> {
+                    assertThat(exception).hasMessageContaining("Paimon page source requires PaimonColumnHandle, got:");
+                    assertThat(exception.getSuppressed()).containsExactly(closeFailure);
+                });
+    }
+
+    @Test
+    void testPaimonPageSourceClosesReaderWhenLimitValidationFails()
+    {
+        TrackingRecordReader reader = new TrackingRecordReader(GenericRow.of(1L));
+
+        assertThatThrownBy(() -> new PaimonPageSource(reader, List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
+                OptionalLong.of(-1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("limit must be non-negative");
+
+        assertThat(reader.readBatchCalls()).isZero();
+        assertThat(reader.releaseBatchCalls()).isZero();
+        assertThat(reader.closeCalls()).isEqualTo(1);
+    }
+
+    @Test
+    void testPaimonPageSourceDoesNotDoubleCloseReaderWhenIteratorInitializationFails()
+    {
+        IOException failure = new IOException("readBatch failed");
+        AtomicInteger readBatchCalls = new AtomicInteger();
+        AtomicInteger closeCalls = new AtomicInteger();
+        RecordReader<InternalRow> reader = new RecordReader<>()
+        {
+            @Override
+            public RecordIterator<InternalRow> readBatch()
+                    throws IOException
+            {
+                readBatchCalls.incrementAndGet();
+                throw failure;
+            }
+
+            @Override
+            public void close()
+            {
+                closeCalls.incrementAndGet();
+            }
+        };
+
+        assertThatThrownBy(() -> new PaimonPageSource(
+                reader,
+                List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
+                OptionalLong.empty()))
+                .isInstanceOfSatisfying(RuntimeException.class, exception -> assertThat(exception.getCause()).isSameAs(failure));
+
+        assertThat(readBatchCalls).hasValue(1);
+        assertThat(closeCalls).hasValue(1);
     }
 
     @Test
