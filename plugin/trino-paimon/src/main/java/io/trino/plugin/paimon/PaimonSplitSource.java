@@ -56,6 +56,7 @@ public class PaimonSplitSource
         List<ConnectorSplit> batch = new ArrayList<>();
         for (int i = 0; i < maxSize; i++) {
             if (limitReached()) {
+                close();
                 break;
             }
             PaimonSplit split = splits.poll();
@@ -64,6 +65,10 @@ public class PaimonSplitSource
             }
             countRowsForLimit(split);
             batch.add(split);
+            if (limitReached()) {
+                close();
+                break;
+            }
         }
         return CompletableFuture.completedFuture(new ConnectorSplitBatch(batch, isFinished()));
     }

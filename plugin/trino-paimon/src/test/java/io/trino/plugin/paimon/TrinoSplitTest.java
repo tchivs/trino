@@ -605,7 +605,7 @@ public class TrinoSplitTest
 
         assertThat(batch.getSplits()).isEmpty();
         assertThat(batch.isNoMoreSplits()).isTrue();
-        assertThat(queuedSplitCount(splitSource)).isEqualTo(1);
+        assertThat(queuedSplitCount(splitSource)).isEqualTo(0);
     }
 
     @Test
@@ -652,7 +652,7 @@ public class TrinoSplitTest
         assertThat(firstBatch.getSplits()).containsExactly(first, second);
         assertThat(firstBatch.isNoMoreSplits()).isTrue();
         assertThat(secondBatch.getSplits()).isEmpty();
-        assertThat(queuedSplitCount(splitSource)).isEqualTo(1);
+        assertThat(queuedSplitCount(splitSource)).isEqualTo(0);
     }
 
     @Test
@@ -670,11 +670,11 @@ public class TrinoSplitTest
         assertThat(firstBatch.getSplits()).containsExactly(first, second);
         assertThat(firstBatch.isNoMoreSplits()).isTrue();
         assertThat(secondBatch.getSplits()).isEmpty();
-        assertThat(queuedSplitCount(splitSource)).isEqualTo(1);
+        assertThat(queuedSplitCount(splitSource)).isEqualTo(0);
     }
 
     @Test
-    public void testSplitSourceDoesNotUsePossiblyDuplicateRowCountForLimit()
+    public void testSplitSourceLimitUsesRowCountWhenMergedCountIsMissing()
             throws Exception
     {
         PaimonSplit first = PaimonSplit.fromSplit(new TestingSplit(100, null), 0.1);
@@ -683,7 +683,7 @@ public class TrinoSplitTest
 
         ConnectorSplitSource.ConnectorSplitBatch batch = splitSource.getNextBatch(10).get();
 
-        assertThat(batch.getSplits()).containsExactly(first, second);
+        assertThat(batch.getSplits()).containsExactly(first);
         assertThat(batch.isNoMoreSplits()).isTrue();
         assertThat(queuedSplitCount(splitSource)).isEqualTo(0);
     }
