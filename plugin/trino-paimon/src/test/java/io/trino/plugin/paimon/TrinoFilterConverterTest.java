@@ -77,6 +77,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.LongTimestampWithTimeZone.fromEpochMillisAndFraction;
 import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TimeType.TIME_MICROS;
+import static io.trino.spi.type.TimeType.TIME_MILLIS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
@@ -232,7 +233,7 @@ public class TrinoFilterConverterTest
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("t", new org.apache.paimon.types.TimeType(6));
         TupleDomain<PaimonColumnHandle> eq = TupleDomain
                 .withColumnDomains(Map.of(idColumn,
-                        Domain.singleValue(TIME_MICROS, 12_345L * PICOSECONDS_PER_MILLISECOND)));
+                        Domain.singleValue(TIME_MILLIS, 12_345L * PICOSECONDS_PER_MILLISECOND)));
         Predicate expectedEqq = builder.equal(0, 12_345);
         Predicate actualEqq = converter.convert(eq).get();
         assertThat(actualEqq).isEqualTo(expectedEqq);
@@ -277,6 +278,24 @@ public class TrinoFilterConverterTest
         PaimonColumnHandle timeColumn = PaimonColumnHandle.of("t", new org.apache.paimon.types.TimeType(6));
         TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(Map.of(timeColumn,
                 Domain.singleValue(TIME_MICROS, Long.MAX_VALUE)));
+
+        LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
+        LinkedHashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();
+
+        assertThat(converter.convert(domain, acceptedDomains, unsupportedDomains)).isEmpty();
+        assertThat(acceptedDomains).isEmpty();
+        assertThat(unsupportedDomains).containsEntry(timeColumn, domain.getDomains().orElseThrow().get(timeColumn));
+    }
+
+    @Test
+    public void testSubMillisecondTimeLiteralConversionRemainsUnsupported()
+    {
+        RowType rowType = new RowType(
+                Collections.singletonList(new DataField(0, "t", new org.apache.paimon.types.TimeType(6))));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PaimonColumnHandle timeColumn = PaimonColumnHandle.of("t", new org.apache.paimon.types.TimeType(6));
+        TupleDomain<PaimonColumnHandle> domain = TupleDomain.withColumnDomains(Map.of(timeColumn,
+                Domain.singleValue(TIME_MICROS, 12_345L * PICOSECONDS_PER_MILLISECOND + 1)));
 
         LinkedHashMap<PaimonColumnHandle, Domain> acceptedDomains = new LinkedHashMap<>();
         LinkedHashMap<PaimonColumnHandle, Domain> unsupportedDomains = new LinkedHashMap<>();

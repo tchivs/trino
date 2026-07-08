@@ -6794,12 +6794,23 @@ public class PaimonMetadataTableModeTest
         assertThat(beginCreateCatalog.initialized).isFalse();
         assertThat(beginCreateCatalog.createdSchema).isNull();
 
+        ConnectorTableMetadata unsupportedTimeCreateTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("event_time", io.trino.spi.type.TimeType.TIME_MICROS)));
+        CapturingDdlCatalog createTimeCatalog = new CapturingDdlCatalog();
+        PaimonMetadata createTimeMetadata = new PaimonMetadata(createTimeCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> createTimeMetadata.createTable(SESSION, unsupportedTimeCreateTable,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(), "Paimon stores time values with millisecond precision, got time(6)");
+        assertThat(createTimeCatalog.initialized).isFalse();
+        assertThat(createTimeCatalog.createdSchema).isNull();
+
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
         CapturingDdlCatalog addColumnCatalog = new CapturingDdlCatalog();
         PaimonMetadata addColumnMetadata = new PaimonMetadata(addColumnCatalog, TESTING_TYPE_MANAGER);
         assertTrinoError(() -> addColumnMetadata.addColumn(SESSION, tableHandle,
-                        new ColumnMetadata("event_time", io.trino.spi.type.TimeType.TIME_PICOS)),
-                NOT_SUPPORTED.toErrorCode(), "Paimon supports time precision up to 9, got time(12)");
+                        new ColumnMetadata("event_time", io.trino.spi.type.TimeType.TIME_MICROS)),
+                NOT_SUPPORTED.toErrorCode(), "Paimon stores time values with millisecond precision, got time(6)");
         assertThat(addColumnCatalog.alterCalls).isEqualTo(0);
 
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));

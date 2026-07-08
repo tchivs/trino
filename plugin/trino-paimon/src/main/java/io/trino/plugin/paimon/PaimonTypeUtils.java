@@ -67,6 +67,9 @@ import static java.util.Objects.requireNonNull;
 
 public class PaimonTypeUtils
 {
+    // Paimon TimeType metadata allows 0..9, but internal rows and file formats store int milliseconds.
+    private static final int PAIMON_TIME_MAX_STORED_PRECISION = 3;
+
     private PaimonTypeUtils()
     {
     }
@@ -239,7 +242,8 @@ public class PaimonTypeUtils
         @Override
         public Type visit(TimeType timeType)
         {
-            return io.trino.spi.type.TimeType.createTimeType(timeType.getPrecision());
+            return io.trino.spi.type.TimeType.createTimeType(
+                    Math.min(timeType.getPrecision(), PAIMON_TIME_MAX_STORED_PRECISION));
         }
 
         @Override
@@ -352,7 +356,7 @@ public class PaimonTypeUtils
             }
             else if (trinoType instanceof io.trino.spi.type.TimeType) {
                 int precision = ((io.trino.spi.type.TimeType) trinoType).getPrecision();
-                checkPaimonTemporalPrecision("time", trinoType, precision, TimeType.MAX_PRECISION);
+                checkPaimonStoredTimePrecision(trinoType, precision);
                 return new TimeType(precision);
             }
             else if (trinoType instanceof io.trino.spi.type.TimestampType) {
@@ -392,6 +396,15 @@ public class PaimonTypeUtils
                 throw new UnsupportedOperationException(
                         "Paimon supports %s precision up to %s, got %s"
                                 .formatted(typeName, maxPrecision, trinoType.getDisplayName()));
+            }
+        }
+
+        private static void checkPaimonStoredTimePrecision(Type trinoType, int precision)
+        {
+            if (precision > PAIMON_TIME_MAX_STORED_PRECISION) {
+                throw new UnsupportedOperationException(
+                        "Paimon stores time values with millisecond precision, got %s"
+                                .formatted(trinoType.getDisplayName()));
             }
         }
 

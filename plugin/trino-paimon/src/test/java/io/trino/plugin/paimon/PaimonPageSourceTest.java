@@ -124,7 +124,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.StandardTypes.JSON;
-import static io.trino.spi.type.TimeType.TIME_MICROS;
+import static io.trino.spi.type.TimeType.TIME_MILLIS;
 import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
@@ -161,7 +161,7 @@ public class PaimonPageSourceTest
         Page page = pageSource.getNextPage();
 
         assertThat(page.getPositionCount()).isEqualTo(1);
-        assertThat(TypeUtils.readNativeValue(TIME_MICROS, page.getBlock(0), 0))
+        assertThat(TypeUtils.readNativeValue(TIME_MILLIS, page.getBlock(0), 0))
                 .isEqualTo(12_345L * PICOSECONDS_PER_MILLISECOND);
         assertThat(TypeUtils.readNativeValue(TIMESTAMP_NANOS, page.getBlock(1), 0))
                 .isEqualTo(new LongTimestamp(1_695_645_403_123_456L, 789_000));

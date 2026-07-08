@@ -40,6 +40,9 @@ final class PaimonTrinoTypeConversions
 
     static int trinoTimePicosToPaimonMillis(long picosOfDay)
     {
+        if (picosOfDay % PICOSECONDS_PER_MILLISECOND != 0) {
+            throw new IllegalArgumentException("Paimon stores TIME values with millisecond precision");
+        }
         return toIntExact(picosOfDay / PICOSECONDS_PER_MILLISECOND);
     }
 

@@ -111,7 +111,10 @@ public class PaimonTypeTest
         assertThat(requireNonNull(timeType).getDisplayName()).isEqualTo("time(0)");
 
         Type timeType6 = PaimonTypeUtils.fromPaimonType(new TimeType(6));
-        assertThat(requireNonNull(timeType6).getDisplayName()).isEqualTo("time(6)");
+        assertThat(requireNonNull(timeType6).getDisplayName()).isEqualTo("time(3)");
+
+        Type timeType9 = PaimonTypeUtils.fromPaimonType(new TimeType(9));
+        assertThat(requireNonNull(timeType9).getDisplayName()).isEqualTo("time(3)");
 
         Type timestampType6 = PaimonTypeUtils.fromPaimonType(DataTypes.TIMESTAMP());
         assertThat(requireNonNull(timestampType6).getDisplayName()).isEqualTo("timestamp(6)");
@@ -206,9 +209,6 @@ public class PaimonTypeTest
         DataType timeType = PaimonTypeUtils.toPaimonType(io.trino.spi.type.TimeType.TIME_MILLIS);
         assertThat(timeType.asSQLString()).isEqualTo("TIME(3)");
 
-        DataType timeType6 = PaimonTypeUtils.toPaimonType(io.trino.spi.type.TimeType.TIME_MICROS);
-        assertThat(timeType6.asSQLString()).isEqualTo("TIME(6)");
-
         DataType timestampType0 = PaimonTypeUtils.toPaimonType(TimestampType.TIMESTAMP_SECONDS);
         assertThat(timestampType0.asSQLString()).isEqualTo("TIMESTAMP(0)");
 
@@ -255,15 +255,22 @@ public class PaimonTypeTest
     @Test
     public void testToPaimonTypeRejectsUnsupportedTemporalPrecision()
     {
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(io.trino.spi.type.TimeType.TIME_MICROS))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon stores time values with millisecond precision, got time(6)");
         assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(io.trino.spi.type.TimeType.TIME_PICOS))
                 .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessage("Paimon supports time precision up to 9, got time(12)");
+                .hasMessage("Paimon stores time values with millisecond precision, got time(12)");
         assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(TimestampType.TIMESTAMP_PICOS))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("Paimon supports timestamp precision up to 9, got timestamp(12)");
         assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(TimestampWithTimeZoneType.TIMESTAMP_TZ_PICOS))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("Paimon supports timestamp with time zone precision up to 9, got timestamp(12) with time zone");
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(RowType.from(List.of(
+                RowType.field("event_time", io.trino.spi.type.TimeType.TIME_MICROS)))))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon stores time values with millisecond precision, got time(6)");
         assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(RowType.from(List.of(
                 RowType.field("event_time", TimestampType.TIMESTAMP_PICOS)))))
                 .isInstanceOf(UnsupportedOperationException.class)

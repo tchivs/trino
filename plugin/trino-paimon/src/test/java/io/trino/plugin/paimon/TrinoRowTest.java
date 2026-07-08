@@ -60,7 +60,7 @@ import static io.trino.spi.type.LongTimestampWithTimeZone.fromEpochMillisAndFrac
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.StandardTypes.JSON;
-import static io.trino.spi.type.TimeType.TIME_MICROS;
+import static io.trino.spi.type.TimeType.TIME_MILLIS;
 import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
@@ -163,10 +163,10 @@ public class TrinoRowTest
         LongTimestampWithTimeZone timestampWithTimeZone = fromEpochMillisAndFraction(1_695_645_403_123L,
                 456_000_000, UTC_KEY);
         Page singlePage = new Page(1,
-                writeNativeValue(TIME_MICROS, 12_345L * PICOSECONDS_PER_MILLISECOND),
+                writeNativeValue(TIME_MILLIS, 12_345L * PICOSECONDS_PER_MILLISECOND),
                 writeNativeValue(TIMESTAMP_NANOS, timestamp),
                 writeNativeValue(TIMESTAMP_TZ_MICROS, timestampWithTimeZone));
-        List<Type> types = List.of(TIME_MICROS, TIMESTAMP_NANOS, TIMESTAMP_TZ_MICROS);
+        List<Type> types = List.of(TIME_MILLIS, TIMESTAMP_NANOS, TIMESTAMP_TZ_MICROS);
         PaimonRow trinoRow = new PaimonRow(singlePage, RowKind.INSERT, types, logicalTypes(types));
 
         assertThat(trinoRow.getInt(0)).isEqualTo(12_345);
@@ -218,7 +218,7 @@ public class TrinoRowTest
         ArrayType timestampArrayType = new ArrayType(TIMESTAMP_NANOS);
         MapType timestampMapType = new MapType(INTEGER, TIMESTAMP_TZ_MICROS, new TypeOperators());
         DecimalType longDecimalType = DecimalType.createDecimalType(38, 0);
-        RowType rowType = RowType.anonymous(List.of(TIME_MICROS, longDecimalType));
+        RowType rowType = RowType.anonymous(List.of(TIME_MILLIS, longDecimalType));
 
         LongTimestamp timestamp = new LongTimestamp(1_695_645_403_123_456L, 789_000);
         LongTimestampWithTimeZone timestampWithTimeZone = fromEpochMillisAndFraction(1_695_645_403_123L,
@@ -232,7 +232,7 @@ public class TrinoRowTest
             writeNativeValue(TIMESTAMP_TZ_MICROS, valueBuilder, timestampWithTimeZone);
         });
         SqlRow row = buildRowValue(rowType, fieldBuilders -> {
-            writeNativeValue(TIME_MICROS, fieldBuilders.get(0), 12_345L * PICOSECONDS_PER_MILLISECOND);
+            writeNativeValue(TIME_MILLIS, fieldBuilders.get(0), 12_345L * PICOSECONDS_PER_MILLISECOND);
             writeNativeValue(longDecimalType, fieldBuilders.get(1),
                     encodeScaledValue(decimalValue, longDecimalType.getScale()));
         });
