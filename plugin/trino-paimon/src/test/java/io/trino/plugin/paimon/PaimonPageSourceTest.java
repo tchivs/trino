@@ -2407,6 +2407,69 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPaimonPageSourceRetriesCloseAfterReaderCloseFailure()
+            throws IOException
+    {
+        IOException closeFailure = new IOException("close failed once");
+        AtomicInteger readBatchCalls = new AtomicInteger();
+        AtomicInteger releaseBatchCalls = new AtomicInteger();
+        AtomicInteger closeCalls = new AtomicInteger();
+        AtomicBoolean failClose = new AtomicBoolean(true);
+        RecordReader<InternalRow> reader = new RecordReader<>()
+        {
+            @Override
+            public RecordIterator<InternalRow> readBatch()
+            {
+                readBatchCalls.incrementAndGet();
+                return new RecordIterator<>()
+                {
+                    @Override
+                    public InternalRow next()
+                    {
+                        return null;
+                    }
+
+                    @Override
+                    public void releaseBatch()
+                    {
+                        releaseBatchCalls.incrementAndGet();
+                    }
+                };
+            }
+
+            @Override
+            public void close()
+                    throws IOException
+            {
+                closeCalls.incrementAndGet();
+                if (failClose.getAndSet(false)) {
+                    throw closeFailure;
+                }
+            }
+        };
+        PaimonPageSource pageSource = new PaimonPageSource(
+                reader,
+                List.of(PaimonColumnHandle.of("id", DataTypes.BIGINT())),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::close).isSameAs(closeFailure);
+        assertThat(pageSource.isFinished()).isTrue();
+        assertThat(readBatchCalls.get()).isEqualTo(1);
+        assertThat(releaseBatchCalls.get()).isEqualTo(1);
+        assertThat(closeCalls.get()).isEqualTo(1);
+
+        pageSource.close();
+        assertThat(readBatchCalls.get()).isEqualTo(1);
+        assertThat(releaseBatchCalls.get()).isEqualTo(2);
+        assertThat(closeCalls.get()).isEqualTo(2);
+
+        pageSource.close();
+        assertThat(readBatchCalls.get()).isEqualTo(1);
+        assertThat(releaseBatchCalls.get()).isEqualTo(2);
+        assertThat(closeCalls.get()).isEqualTo(2);
+    }
+
+    @Test
     void testPaimonPageSourceReportsBufferedPageBuilderMemory()
     {
         AtomicReference<PaimonPageSource> pageSourceReference = new AtomicReference<>();

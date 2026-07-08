@@ -218,7 +218,6 @@ public class PaimonPageSource
         if (closed) {
             return;
         }
-        closed = true;
         isFinished = true;
         try {
             this.iterator.close();
@@ -229,5 +228,6 @@ public class PaimonPageSource
         catch (Exception e) {
             throw new IOException(e);
         }
+        closed = true;
     }
 }
