@@ -144,6 +144,7 @@ public class PaimonTableOptionUtilsTest
     public void testRuntimeOnlyTablePropertiesAreIdentifiedFromTrinoKeys()
     {
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("scan_snapshot_id")).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("stream_scan_mode")).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("incremental_between")).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("incremental_to_auto_tag")).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyTableProperty("scan_version")).isTrue();
@@ -160,6 +161,7 @@ public class PaimonTableOptionUtilsTest
     public void testRuntimeOnlyPaimonOptionKeysAreIdentified()
     {
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_SNAPSHOT_ID.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.STREAM_SCAN_MODE.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.INCREMENTAL_BETWEEN.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_IGNORE_LOST_FILE.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKey(CoreOptions.SCAN_MANIFEST_PARALLELISM.key())).isTrue();
@@ -175,6 +177,7 @@ public class PaimonTableOptionUtilsTest
     public void testWriteDynamicOnlyPaimonOptionKeysAreIdentified()
     {
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_SNAPSHOT_ID.key())).isTrue();
+        assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.STREAM_SCAN_MODE.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_FALLBACK_SNAPSHOT_BRANCH.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_FALLBACK_DELTA_BRANCH.key())).isTrue();
         assertThat(PaimonTableOptionUtils.isRuntimeOnlyPaimonOptionKeyForWrite(CoreOptions.SCAN_FALLBACK_BRANCH.key())).isTrue();

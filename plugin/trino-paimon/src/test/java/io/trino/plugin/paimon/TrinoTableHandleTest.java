@@ -378,6 +378,7 @@ public class TrinoTableHandleTest
             throws Exception
     {
         assertWriteDynamicOptionsDropsReadOptions(Map.of(CoreOptions.SCAN_VERSION.key(), "tag-1"));
+        assertWriteDynamicOptionsDropsReadOptions(Map.of(CoreOptions.STREAM_SCAN_MODE.key(), "FROM_SNAPSHOT"));
         assertWriteDynamicOptionsDropsReadOptions(Map.of(CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"));
         assertWriteDynamicOptionsDropsReadOptions(Map.of(CoreOptions.SCAN_FILE_CREATION_TIME_MILLIS.key(), "1000"));
         assertWriteDynamicOptionsDropsReadOptions(Map.of(CoreOptions.SCAN_CREATION_TIME_MILLIS.key(), "2000"));
