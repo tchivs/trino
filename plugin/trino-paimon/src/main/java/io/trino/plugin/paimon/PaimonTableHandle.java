@@ -704,7 +704,7 @@ public class PaimonTableHandle
             return cause.getMessage();
         }
         return "Unsupported Paimon column '%s' with type %s: %s"
-                .formatted(columnName, columnType, unsupportedOperationMessage(cause));
+                .formatted(columnName, dataTypeName(columnType), unsupportedOperationMessage(cause));
     }
 
     private static String unsupportedPaimonTypeMessage(DataType type, UnsupportedOperationException cause)
@@ -712,13 +712,27 @@ public class PaimonTableHandle
         if (hasMessage(cause)) {
             return cause.getMessage();
         }
-        return "Unsupported Paimon type %s: %s".formatted(type, unsupportedOperationMessage(cause));
+        return "Unsupported Paimon type %s: %s".formatted(dataTypeName(type), unsupportedOperationMessage(cause));
     }
 
     private static boolean hasMessage(UnsupportedOperationException cause)
     {
         String message = cause.getMessage();
         return message != null && !message.isBlank();
+    }
+
+    private static String dataTypeName(DataType type)
+    {
+        try {
+            String name = type.toString();
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+        }
+        catch (RuntimeException ignored) {
+            // Fall through to the implementation class; this path is already formatting an unsupported type failure.
+        }
+        return type.getClass().getName();
     }
 
     private static String unsupportedOperationMessage(UnsupportedOperationException cause)

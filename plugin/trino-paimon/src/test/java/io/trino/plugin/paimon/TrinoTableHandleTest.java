@@ -785,6 +785,23 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testTableMetadataUnsupportedTypeWithBrokenTypeStringReportsStableNotSupported()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, tableWithRowType(DataTypes.ROW(
+                DataTypes.FIELD(0, "id", unsupportedDataTypeWithBrokenSqlString()))));
+
+        assertThatThrownBy(() -> handle.tableMetadata(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception)
+                            .hasMessage("Unsupported Paimon type io.trino.plugin.paimon.TrinoTableHandleTest$UnsupportedTestingDataType: UnsupportedOperationException");
+                });
+    }
+
+    @Test
     public void testTableUsesPluginContextClassLoader()
             throws Exception
     {
@@ -1690,38 +1707,57 @@ public class TrinoTableHandleTest
 
     private static DataType unsupportedDataTypeWithoutMessage()
     {
-        return new DataType(true, DataTypeRoot.BOOLEAN)
+        return new UnsupportedTestingDataType(false);
+    }
+
+    private static DataType unsupportedDataTypeWithBrokenSqlString()
+    {
+        return new UnsupportedTestingDataType(true);
+    }
+
+    private static class UnsupportedTestingDataType
+            extends DataType
+    {
+        private final boolean brokenSqlString;
+
+        private UnsupportedTestingDataType(boolean brokenSqlString)
         {
-            @Override
-            public DataTypeRoot getTypeRoot()
-            {
+            super(true, DataTypeRoot.BOOLEAN);
+            this.brokenSqlString = brokenSqlString;
+        }
+
+        @Override
+        public DataTypeRoot getTypeRoot()
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public int defaultSize()
+        {
+            return 1;
+        }
+
+        @Override
+        public DataType copy(boolean isNullable)
+        {
+            return this;
+        }
+
+        @Override
+        public String asSQLString()
+        {
+            if (brokenSqlString) {
                 throw new UnsupportedOperationException();
             }
+            return "UNSUPPORTED_TEST_TYPE";
+        }
 
-            @Override
-            public int defaultSize()
-            {
-                return 1;
-            }
-
-            @Override
-            public DataType copy(boolean isNullable)
-            {
-                return this;
-            }
-
-            @Override
-            public String asSQLString()
-            {
-                return "UNSUPPORTED_TEST_TYPE";
-            }
-
-            @Override
-            public <R> R accept(DataTypeVisitor<R> visitor)
-            {
-                throw new UnsupportedOperationException();
-            }
-        };
+        @Override
+        public <R> R accept(DataTypeVisitor<R> visitor)
+        {
+            throw new UnsupportedOperationException();
+        }
     }
 
     private static PaimonCatalog testingCatalog()
