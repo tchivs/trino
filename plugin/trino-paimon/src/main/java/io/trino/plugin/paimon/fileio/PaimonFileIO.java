@@ -624,7 +624,10 @@ public class PaimonFileIO
         private final TrinoFileSystem trinoFileSystem;
         private final PositionOutputStream outputStream;
 
-        private boolean closed;
+        private boolean outputClosed;
+        private boolean commitClosed;
+        private boolean abortCloseStarted;
+        private boolean abortCleanupFinished;
 
         private DirectObjectStoreTwoPhaseOutputStream(Path targetPath, Location targetLocation, TrinoFileSystem trinoFileSystem, PositionOutputStream outputStream)
         {
@@ -673,10 +676,11 @@ public class PaimonFileIO
         public void close()
                 throws IOException
         {
-            if (closed) {
+            if (commitClosed || (outputClosed && abortCleanupFinished)) {
                 return;
             }
 
+            abortCloseStarted = true;
             IOException failure = null;
             try {
                 closeOutput();
@@ -684,15 +688,18 @@ public class PaimonFileIO
             catch (IOException e) {
                 failure = e;
             }
-            try {
-                trinoFileSystem.deleteFile(targetLocation);
-            }
-            catch (IOException e) {
-                if (failure != null) {
-                    failure.addSuppressed(e);
+            if (!abortCleanupFinished) {
+                try {
+                    trinoFileSystem.deleteFile(targetLocation);
+                    abortCleanupFinished = true;
                 }
-                else {
-                    failure = e;
+                catch (IOException e) {
+                    if (failure != null) {
+                        failure.addSuppressed(e);
+                    }
+                    else {
+                        failure = e;
+                    }
                 }
             }
             if (failure != null) {
@@ -704,19 +711,20 @@ public class PaimonFileIO
         public Committer closeForCommit()
                 throws IOException
         {
-            if (closed) {
+            if (commitClosed || abortCloseStarted || outputClosed) {
                 throw new IOException("Stream is already closed");
             }
             closeOutput();
+            commitClosed = true;
             return new DirectObjectStoreCommitter(targetPath);
         }
 
         private void closeOutput()
                 throws IOException
         {
-            if (!closed) {
+            if (!outputClosed) {
                 outputStream.close();
-                closed = true;
+                outputClosed = true;
             }
         }
     }

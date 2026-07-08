@@ -457,6 +457,58 @@ public class TestPaimonFileIO
     }
 
     @Test
+    public void testObjectStoreTwoPhaseOutputStreamCloseRetriesFailedTargetCleanup()
+            throws IOException
+    {
+        DeleteFailingOnceFileSystem fileSystem = new DeleteFailingOnceFileSystem();
+        PaimonFileIO fileIO = objectStoreFileIO(fileSystem);
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/data/data-0.parquet");
+
+        TwoPhaseOutputStream out = fileIO.newTwoPhaseOutputStream(target, false);
+        out.write("data".getBytes(StandardCharsets.UTF_8));
+
+        assertThatThrownBy(out::close)
+                .isInstanceOf(IOException.class)
+                .hasMessage("transient delete failure for " + target);
+        assertThat(fileIO.exists(target)).isTrue();
+        assertThat(fileSystem.getDeleteCalls()).isEqualTo(1);
+
+        out.close();
+
+        assertThat(fileIO.exists(target)).isFalse();
+        assertThat(fileSystem.getDeleteCalls()).isEqualTo(2);
+        assertThatThrownBy(out::closeForCommit)
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("already closed");
+    }
+
+    @Test
+    public void testObjectStoreTwoPhaseOutputStreamCloseRetriesFailedOutputCloseAfterCleanup()
+            throws IOException
+    {
+        OutputCloseFailingOnceFileSystem fileSystem = new OutputCloseFailingOnceFileSystem();
+        PaimonFileIO fileIO = objectStoreFileIO(fileSystem);
+        Path target = new Path("memory:///warehouse/minio_smoke.db/orders/data/data-0.parquet");
+
+        TwoPhaseOutputStream out = fileIO.newTwoPhaseOutputStream(target, false);
+        out.write("data".getBytes(StandardCharsets.UTF_8));
+
+        assertThatThrownBy(out::close)
+                .isInstanceOf(IOException.class)
+                .hasMessage("transient output close failure");
+        assertThat(fileIO.exists(target)).isFalse();
+        assertThat(fileSystem.getDeleteCalls()).isEqualTo(1);
+
+        out.close();
+
+        assertThat(fileIO.exists(target)).isFalse();
+        assertThat(fileSystem.getDeleteCalls()).isEqualTo(1);
+        assertThatThrownBy(out::closeForCommit)
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("already closed");
+    }
+
+    @Test
     public void testObjectStoreTwoPhaseOutputStreamCloseAfterCloseForCommitKeepsTarget()
             throws IOException
     {
@@ -907,6 +959,103 @@ public class TestPaimonFileIO
                 throws IOException
         {
             throw new IOException("deleteFile should not be called for " + location);
+        }
+    }
+
+    private static class DeleteFailingOnceFileSystem
+            extends NoRenameFileSystem
+    {
+        private int deleteCalls;
+
+        @Override
+        public void deleteFile(Location location)
+                throws IOException
+        {
+            deleteCalls++;
+            if (deleteCalls == 1) {
+                throw new IOException("transient delete failure for " + location);
+            }
+            super.deleteFile(location);
+        }
+
+        private int getDeleteCalls()
+        {
+            return deleteCalls;
+        }
+    }
+
+    private static class OutputCloseFailingOnceFileSystem
+            extends NoRenameFileSystem
+    {
+        private int deleteCalls;
+        private boolean closeFailureThrown;
+
+        @Override
+        public TrinoOutputFile newOutputFile(Location location)
+        {
+            TrinoOutputFile delegate = super.newOutputFile(location);
+            return new TrinoOutputFile()
+            {
+                @Override
+                public void createOrOverwrite(byte[] data)
+                        throws IOException
+                {
+                    delegate.createOrOverwrite(data);
+                }
+
+                @Override
+                public OutputStream create(AggregatedMemoryContext memoryContext)
+                        throws IOException
+                {
+                    OutputStream delegateStream = delegate.create(memoryContext);
+                    return new OutputStream()
+                    {
+                        @Override
+                        public void write(int b)
+                                throws IOException
+                        {
+                            delegateStream.write(b);
+                        }
+
+                        @Override
+                        public void write(byte[] bytes, int off, int len)
+                                throws IOException
+                        {
+                            delegateStream.write(bytes, off, len);
+                        }
+
+                        @Override
+                        public void close()
+                                throws IOException
+                        {
+                            delegateStream.close();
+                            if (!closeFailureThrown) {
+                                closeFailureThrown = true;
+                                throw new IOException("transient output close failure");
+                            }
+                        }
+                    };
+                }
+
+                @Override
+                public Location location()
+                {
+                    return delegate.location();
+                }
+            };
+        }
+
+        @Override
+        public void deleteFile(Location location)
+                throws IOException
+        {
+            deleteCalls++;
+            super.deleteFile(location);
+        }
+
+        private int getDeleteCalls()
+        {
+            return deleteCalls;
         }
     }
 
