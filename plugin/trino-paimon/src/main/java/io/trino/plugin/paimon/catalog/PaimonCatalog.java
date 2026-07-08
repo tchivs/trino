@@ -66,6 +66,8 @@ import java.util.Optional;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.options.CatalogOptions.METASTORE;
@@ -87,6 +89,7 @@ public class PaimonCatalog
 
     private final Map<SessionCatalogKey, Catalog> catalogs = new LinkedHashMap<>(16, 0.75f, true);
     private final ThreadLocal<Catalog> currentCatalog = new ThreadLocal<>();
+    private volatile boolean closed;
 
     public PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory)
     {
@@ -115,6 +118,7 @@ public class PaimonCatalog
         requireNonNull(connectorSession, "connectorSession is null");
         SessionCatalogKey key = SessionCatalogKey.from(requireNonNull(connectorSession.getIdentity(), "connectorSession identity is null"));
         synchronized (catalogs) {
+            checkState(!closed, "Paimon catalog is already closed");
             Catalog catalog = catalogs.get(key);
             if (catalog != null) {
                 return catalog;
@@ -124,21 +128,30 @@ public class PaimonCatalog
         Catalog createdCatalog = createCatalog(connectorSession);
         Catalog catalogToClose = null;
         Catalog evictedCatalog = null;
-        Catalog result;
+        Catalog result = null;
+        boolean closedAfterCreate = false;
         synchronized (catalogs) {
-            Catalog existingCatalog = catalogs.get(key);
-            if (existingCatalog != null) {
-                result = existingCatalog;
+            if (closed) {
                 catalogToClose = createdCatalog;
+                closedAfterCreate = true;
             }
             else {
-                result = createdCatalog;
-                catalogs.put(key, createdCatalog);
-                evictedCatalog = evictCatalogIfNeeded();
+                Catalog existingCatalog = catalogs.get(key);
+                if (existingCatalog != null) {
+                    result = existingCatalog;
+                    catalogToClose = createdCatalog;
+                }
+                else {
+                    result = createdCatalog;
+                    catalogs.put(key, createdCatalog);
+                    evictedCatalog = evictCatalogIfNeeded();
+                }
             }
         }
         closeCatalogQuietly(catalogToClose);
         closeCatalogQuietly(evictedCatalog);
+        checkState(!closedAfterCreate, "Paimon catalog is already closed");
+        verify(result != null, "Paimon session catalog result is null");
         return result;
     }
 
@@ -754,6 +767,10 @@ public class PaimonCatalog
         Exception failure = null;
         List<Catalog> catalogsToClose;
         synchronized (catalogs) {
+            if (closed) {
+                return;
+            }
+            closed = true;
             catalogsToClose = List.copyOf(catalogs.values());
             catalogs.clear();
         }
@@ -820,6 +837,7 @@ public class PaimonCatalog
 
     private Catalog current()
     {
+        checkState(!closed, "Paimon catalog is already closed");
         Catalog catalog = currentCatalog.get();
         if (catalog == null) {
             throw new IllegalStateException("Paimon catalog has not been initialized for a Trino session");

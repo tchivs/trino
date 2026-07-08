@@ -40,6 +40,11 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.apache.paimon.options.CatalogOptions.WAREHOUSE;
@@ -226,6 +231,52 @@ public class PaimonCatalogTest
         assertThat(catalog.listDatabases()).contains("bob_db").doesNotContain("alice_db", "carol_db");
         assertThat(catalog.cachedCatalogCount()).isEqualTo(2);
         assertThat(fileSystemFactory.createCalls()).hasValue(4);
+    }
+
+    @Test
+    public void testCatalogRejectsSessionInitializationAfterClose()
+            throws Exception
+    {
+        RecordingFileSystemFactory fileSystemFactory = new RecordingFileSystemFactory(root);
+        PaimonCatalog catalog = catalog(fileSystemFactory);
+
+        catalog.close();
+
+        assertThatThrownBy(() -> catalog.initSession(session("alice")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon catalog is already closed");
+        setCurrentCatalog(catalog, new RecordingCatalog().catalog());
+        assertThatThrownBy(catalog::listDatabases)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon catalog is already closed");
+        assertThat(catalog.cachedCatalogCount()).isZero();
+        assertThat(fileSystemFactory.createCalls()).hasValue(0);
+    }
+
+    @Test
+    public void testCatalogCloseWinsConcurrentSessionCatalogCreation()
+            throws Exception
+    {
+        BlockingFileSystemFactory fileSystemFactory = new BlockingFileSystemFactory(root);
+        PaimonCatalog catalog = catalog(fileSystemFactory);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> initSession = executor.submit(() -> catalog.initSession(session("alice")));
+            assertThat(fileSystemFactory.awaitCreateStarted()).isTrue();
+
+            catalog.close();
+            fileSystemFactory.releaseCreate();
+
+            assertThatThrownBy(() -> initSession.get(30, TimeUnit.SECONDS))
+                    .isInstanceOf(java.util.concurrent.ExecutionException.class)
+                    .hasCauseInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Paimon catalog is already closed");
+            assertThat(catalog.cachedCatalogCount()).isZero();
+        }
+        finally {
+            fileSystemFactory.releaseCreate();
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -430,6 +481,46 @@ public class PaimonCatalogTest
         public AtomicInteger createCalls()
         {
             return createCalls;
+        }
+    }
+
+    private static final class BlockingFileSystemFactory
+            implements TrinoFileSystemFactory
+    {
+        private final RecordingFileSystemFactory delegate;
+        private final CountDownLatch createStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseCreate = new CountDownLatch(1);
+
+        private BlockingFileSystemFactory(Path root)
+        {
+            this.delegate = new RecordingFileSystemFactory(root);
+        }
+
+        @Override
+        public TrinoFileSystem create(ConnectorIdentity identity)
+        {
+            createStarted.countDown();
+            try {
+                if (!releaseCreate.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Timed out waiting to release catalog creation");
+                }
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+            return delegate.create(identity);
+        }
+
+        private boolean awaitCreateStarted()
+                throws InterruptedException
+        {
+            return createStarted.await(30, TimeUnit.SECONDS);
+        }
+
+        private void releaseCreate()
+        {
+            releaseCreate.countDown();
         }
     }
 }
