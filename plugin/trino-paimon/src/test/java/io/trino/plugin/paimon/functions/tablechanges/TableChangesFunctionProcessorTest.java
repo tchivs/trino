@@ -54,6 +54,7 @@ import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 public class TableChangesFunctionProcessorTest
 {
@@ -251,6 +252,26 @@ public class TableChangesFunctionProcessorTest
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("close failure");
                 });
+        assertThat(pageSource.closeCount()).isEqualTo(1);
+    }
+
+    @Test
+    public void testProcessorDoesNotRetryTerminalCloseFailure()
+    {
+        CloseFailurePageSource pageSource = new CloseFailurePageSource(true, true);
+        TableChangesFunctionProcessor processor = new TableChangesFunctionProcessor(
+                SESSION,
+                handleWithProjectedColumns(),
+                new PaimonSplit("split", 1.0),
+                pageSourceProvider(pageSource));
+
+        Throwable firstFailure = catchThrowable(processor::process);
+        Throwable secondFailure = catchThrowable(processor::process);
+
+        assertThat(firstFailure)
+                .isInstanceOfSatisfying(TrinoException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode()));
+        assertThat(secondFailure).isSameAs(firstFailure);
         assertThat(pageSource.closeCount()).isEqualTo(1);
     }
 
