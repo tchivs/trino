@@ -79,7 +79,10 @@ public class PaimonSplitSource
             return;
         }
         try {
-            count = saturatedAdd(count, PaimonSplitManager.splitWeightRowCount(split.decodeSplit()), "split row count");
+            long rowCount = split.rowCount() == null
+                    ? PaimonSplitManager.splitWeightRowCount(split.decodeSplit())
+                    : split.rowCount();
+            count = saturatedAdd(count, rowCount, "split row count");
         }
         catch (TrinoException e) {
             throw e;

@@ -69,7 +69,14 @@ public class TrinoSplitTest
         PaimonSplit expected = PaimonSplit.fromSplit(new TestingSplit(100), 0.1);
         String json = codec.toJson(expected);
         PaimonSplit actual = codec.fromJson(json);
-        assertThat(actual.splitSerialized()).isEqualTo(expected.splitSerialized());
+        assertThat(actual).isEqualTo(expected);
+    }
+
+    @Test
+    public void testFromSplitCachesLimitRowCount()
+    {
+        assertThat(PaimonSplit.fromSplit(new TestingSplit(100), 0.1).rowCount()).isEqualTo(100);
+        assertThat(PaimonSplit.fromSplit(new TestingSplit(100, 25L), 0.1).rowCount()).isEqualTo(25);
     }
 
     @Test
@@ -164,6 +171,14 @@ public class TrinoSplitTest
         assertThatThrownBy(() -> new PaimonSplit("split", 1.1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("weight must be in the range (0, 1]");
+    }
+
+    @Test
+    public void testInvalidSplitRowCountFailsFast()
+    {
+        assertThatThrownBy(() -> new PaimonSplit("split", 0.1, -1L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("rowCount must be non-negative");
     }
 
     @Test
@@ -639,6 +654,20 @@ public class TrinoSplitTest
                     assertThat(exception.getCause()).isInstanceOf(IllegalArgumentException.class)
                             .hasMessage("splitSerialized must contain a serialized Paimon Split");
                 });
+    }
+
+    @Test
+    public void testSplitSourceLimitUsesCachedRowCountWithoutDecoding()
+            throws Exception
+    {
+        PaimonSplit split = new PaimonSplit("not-a-serialized-split", 0.1, 3L);
+        PaimonSplitSource splitSource = new PaimonSplitSource(List.of(split), OptionalLong.of(2));
+
+        ConnectorSplitSource.ConnectorSplitBatch batch = splitSource.getNextBatch(100).get();
+
+        assertThat(batch.getSplits()).containsExactly(split);
+        assertThat(batch.isNoMoreSplits()).isTrue();
+        assertThat(queuedSplitCount(splitSource)).isEqualTo(0);
     }
 
     @Test
