@@ -157,6 +157,34 @@ public class TrinoSplitTest
                       "weight": 0.1
                     }
                     """))
+                .hasStackTraceContaining("splitSerialized must contain a serialized Paimon Split")
+                .hasStackTraceContaining("Encoded string does not contain a serialized Java object");
+    }
+
+    @Test
+    public void testJsonRejectsInvalidBase64SerializedSplit()
+    {
+        assertThatThrownBy(() -> codec.fromJson("""
+                    {
+                      "splitSerialized": "not!base64",
+                      "weight": 0.1
+                    }
+                    """))
+                .hasStackTraceContaining("splitSerialized must contain a serialized Paimon Split")
+                .hasStackTraceContaining("Encoded string is not valid URL-safe Base64");
+    }
+
+    @Test
+    public void testJsonRejectsSerializedNonSplitPayload()
+    {
+        String encodedNonSplit = EncodingUtils.encodeObjectToString("not a Paimon split");
+
+        assertThatThrownBy(() -> codec.fromJson("""
+                    {
+                      "splitSerialized": "%s",
+                      "weight": 0.1
+                    }
+                    """.formatted(encodedNonSplit)))
                 .hasRootCauseMessage("splitSerialized must contain a serialized Paimon Split");
     }
 

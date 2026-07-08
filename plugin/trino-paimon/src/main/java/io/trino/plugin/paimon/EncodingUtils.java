@@ -18,6 +18,7 @@ import org.apache.paimon.utils.InstantiationUtil;
 import java.util.Base64;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Objects.requireNonNull;
 
 public class EncodingUtils
 {
@@ -28,25 +29,34 @@ public class EncodingUtils
     {
     }
 
-    public static <T> String encodeObjectToString(T t)
+    public static <T> String encodeObjectToString(T object)
     {
+        requireNonNull(object, "object is null");
         try {
-            byte[] bytes = InstantiationUtil.serializeObject(t);
+            byte[] bytes = InstantiationUtil.serializeObject(object);
             return new String(BASE64_ENCODER.encode(bytes), UTF_8);
         }
         catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new IllegalArgumentException(
+                    "Failed to serialize object of type " + object.getClass().getName(), e);
         }
     }
 
     public static <T> T decodeStringToObject(String encodedStr)
     {
-        final byte[] bytes = BASE64_DECODER.decode(encodedStr.getBytes(UTF_8));
+        requireNonNull(encodedStr, "encodedStr is null");
+        final byte[] bytes;
+        try {
+            bytes = BASE64_DECODER.decode(encodedStr.getBytes(UTF_8));
+        }
+        catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Encoded string is not valid URL-safe Base64", e);
+        }
         try {
             return InstantiationUtil.deserializeObject(bytes, EncodingUtils.class.getClassLoader());
         }
         catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new IllegalArgumentException("Encoded string does not contain a serialized Java object", e);
         }
     }
 }

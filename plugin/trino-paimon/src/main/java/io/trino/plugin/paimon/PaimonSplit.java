@@ -91,7 +91,7 @@ public record PaimonSplit(String splitSerialized, Double weight, Long rowCount) 
             decoded = EncodingUtils.decodeStringToObject(splitSerialized);
         }
         catch (RuntimeException e) {
-            throw new IllegalArgumentException("splitSerialized must contain a serialized Paimon Split");
+            throw new IllegalArgumentException("splitSerialized must contain a serialized Paimon Split", e);
         }
         checkArgument(decoded instanceof Split, "splitSerialized must contain a serialized Paimon Split");
         return (Split) decoded;
