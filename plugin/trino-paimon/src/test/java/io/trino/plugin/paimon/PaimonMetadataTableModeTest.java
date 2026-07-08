@@ -1339,9 +1339,9 @@ public class PaimonMetadataTableModeTest
         assertThat(fixedSchema.bucketKeys()).containsExactly("bucket_key");
 
         ConnectorTableLayout dynamicLayout = metadata.getNewTableLayout(SESSION, hashDynamicTable).orElseThrow();
-        assertThat(dynamicLayout.getPartitionColumns()).isEmpty();
+        assertThat(dynamicLayout.getPartitionColumns()).containsExactly("dt", "id");
         assertThat(dynamicLayout.getPartitioning().orElseThrow())
-                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> assertThat(handle.isSingleNode()).isTrue());
+                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> assertThat(handle.isSingleNode()).isFalse());
 
         assertThat(metadata.getNewTableLayout(SESSION, unawareTable)).isEmpty();
         assertThat(catalog.initialized).isFalse();
@@ -1437,7 +1437,7 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testDynamicBucketWritePlanningUsesSingleNodeLayoutAndRejectsRowLevelChanges()
+    public void testDynamicBucketWritePlanningUsesAssignerLayoutAndRejectsRowLevelChanges()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(
@@ -1451,9 +1451,9 @@ public class PaimonMetadataTableModeTest
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
         ConnectorTableLayout insertLayout = metadata.getInsertLayout(SESSION, tableHandle).orElseThrow();
-        assertThat(insertLayout.getPartitionColumns()).isEmpty();
+        assertThat(insertLayout.getPartitionColumns()).containsExactly("id");
         assertThat(insertLayout.getPartitioning().orElseThrow())
-                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> assertThat(handle.isSingleNode()).isTrue());
+                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> assertThat(handle.isSingleNode()).isFalse());
 
         assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
                 NOT_SUPPORTED.toErrorCode(),

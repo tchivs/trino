@@ -21,6 +21,7 @@ import io.trino.spi.connector.ConnectorMergeSink;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPageSink;
+import io.trino.spi.connector.ConnectorPageSinkId;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
@@ -71,6 +72,7 @@ import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
+import static io.trino.testing.TestingPageSinkId.TESTING_PAGE_SINK_ID;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -264,7 +266,8 @@ public class PaimonPageSinkProviderTest
                         PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE.name()))
                 .build();
 
-        ConnectorPageSink pageSink = provider.createPageSink(null, overwriteSession, (ConnectorInsertTableHandle) tableHandle, null);
+        ConnectorPageSink pageSink = provider.createPageSink(null, overwriteSession, (ConnectorInsertTableHandle) tableHandle,
+                TESTING_PAGE_SINK_ID);
 
         assertThat(pageSink).isNotNull();
         assertThat(overwriteEnabled).isTrue();
@@ -340,7 +343,8 @@ public class PaimonPageSinkProviderTest
                         PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE.name()))
                 .build();
 
-        ConnectorPageSink pageSink = provider.createPageSink(null, overwriteSession, (ConnectorInsertTableHandle) tableHandle, null);
+        ConnectorPageSink pageSink = provider.createPageSink(null, overwriteSession,
+                (ConnectorInsertTableHandle) tableHandle, TESTING_PAGE_SINK_ID);
 
         assertThat(pageSink).isNotNull();
         assertThat(overwriteEnabled).isTrue();
@@ -882,6 +886,58 @@ public class PaimonPageSinkProviderTest
 
         assertThat(pageSink.finish().join()).isEmpty();
         assertThat(assignerPrepared).isTrue();
+    }
+
+    @Test
+    public void testDynamicBucketWriterUsesPageSinkTaskPartitionAsAssigner()
+    {
+        AtomicReference<Object[]> writeArguments = new AtomicReference<>();
+        FileStoreTable table = writeReadyFileStoreTable(
+                new AtomicBoolean(),
+                new AtomicReference<>(),
+                new AtomicBoolean(),
+                List.of(),
+                Map.of(
+                        CoreOptions.BUCKET.key(), "-1",
+                        CoreOptions.DYNAMIC_BUCKET_ASSIGNER_PARALLELISM.key(), "3"),
+                List.of("id"),
+                BucketMode.HASH_DYNAMIC);
+        PaimonPageSink pageSink = new PaimonPageSink(
+                writer(List.of(), writeArguments),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()),
+                PaimonPageSinkProvider.dynamicBucketWriter(table, true, pageSinkId(1), 4));
+
+        pageSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 11L)));
+
+        assertThat(writeArguments.get()).hasSize(2);
+        assertThat(writeArguments.get()[1]).isEqualTo(1);
+    }
+
+    @Test
+    public void testDynamicBucketWriterRejectsTaskPartitionOutsideAssignerParallelism()
+    {
+        FileStoreTable table = writeReadyFileStoreTable(
+                new AtomicBoolean(),
+                new AtomicReference<>(),
+                new AtomicBoolean(),
+                List.of(),
+                Map.of(CoreOptions.BUCKET.key(), "-1"),
+                List.of("id"),
+                BucketMode.HASH_DYNAMIC);
+
+        assertThatThrownBy(() -> PaimonPageSinkProvider.dynamicBucketWriter(table, true, pageSinkId(2), 2))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon HASH_DYNAMIC writer task partition 2 is outside assigner parallelism 2");
+    }
+
+    @Test
+    public void testPageSinkTaskPartitionIdIsDecodedFromPageSinkId()
+    {
+        assertThat(PaimonPageSinkProvider.pageSinkTaskPartitionId(pageSinkId(0))).isEqualTo(0);
+        assertThat(PaimonPageSinkProvider.pageSinkTaskPartitionId(pageSinkId(17))).isEqualTo(17);
+        assertThat(PaimonPageSinkProvider.pageSinkTaskPartitionId(() -> (9L << 32) + (42L << 8) + 7L))
+                .isEqualTo(42);
     }
 
     @Test
@@ -1811,6 +1867,11 @@ public class PaimonPageSinkProviderTest
         result.putAll(first);
         result.putAll(second);
         return Map.copyOf(result);
+    }
+
+    private static ConnectorPageSinkId pageSinkId(int taskPartitionId)
+    {
+        return () -> (long) taskPartitionId << 8;
     }
 
     private static FileStoreTable writerInitializationFailingFileStoreTable(

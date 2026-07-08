@@ -531,8 +531,6 @@ public class PaimonPageSink
         {
             BinaryRow partition = keyExtractor.partition(row);
             int bucket = bucketAssigner.assign(partition, keyExtractor.trimmedPrimaryKey(row).hashCode());
-            // TODO: Split HASH_DYNAMIC writes into a Flink-style bucket assigner stage and
-            // partition+bucket writer stage once the connector can coordinate bucket index state.
             writer.write(row, bucket);
         }
 

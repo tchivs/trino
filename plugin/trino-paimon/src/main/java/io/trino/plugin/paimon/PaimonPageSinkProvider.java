@@ -16,6 +16,7 @@ package io.trino.plugin.paimon;
 import com.google.inject.Inject;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.plugin.paimon.format.TrinoPaimonFileFormat;
+import io.trino.spi.NodeManager;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeSink;
@@ -54,10 +55,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism;
 import static java.util.Arrays.fill;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.utils.DefaultValueUtils.convertDefaultValue;
@@ -69,12 +72,22 @@ public class PaimonPageSinkProvider
     private final PaimonCatalog paimonCatalog;
     private final TypeManager typeManager;
     private final Supplier<IOManager> ioManagerFactory;
+    private final IntSupplier dynamicBucketWorkerCountSupplier;
 
     @Inject
+    public PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, PaimonConfig config,
+            NodeManager nodeManager)
+    {
+        this(paimonMetadataFactory, () -> createIoManager(requireNonNull(config, "config is null")
+                .getWriteSpillPath()), () -> requireNonNull(nodeManager, "nodeManager is null")
+                        .getRequiredWorkerNodes()
+                        .size());
+    }
+
     public PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, PaimonConfig config)
     {
         this(paimonMetadataFactory, () -> createIoManager(requireNonNull(config, "config is null")
-                .getWriteSpillPath()));
+                .getWriteSpillPath()), () -> 1);
     }
 
     public PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory)
@@ -84,10 +97,18 @@ public class PaimonPageSinkProvider
 
     PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, Supplier<IOManager> ioManagerFactory)
     {
+        this(paimonMetadataFactory, ioManagerFactory, () -> 1);
+    }
+
+    PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, Supplier<IOManager> ioManagerFactory,
+            IntSupplier dynamicBucketWorkerCountSupplier)
+    {
         requireNonNull(paimonMetadataFactory, "trinoMetadataFactory is null");
         this.paimonCatalog = paimonMetadataFactory.create().catalog();
         this.typeManager = paimonMetadataFactory.typeManager();
         this.ioManagerFactory = requireNonNull(ioManagerFactory, "ioManagerFactory is null");
+        this.dynamicBucketWorkerCountSupplier = requireNonNull(dynamicBucketWorkerCountSupplier,
+                "dynamicBucketWorkerCountSupplier is null");
     }
 
     static void validateWriteBucketMode(Table table)
@@ -126,7 +147,7 @@ public class PaimonPageSinkProvider
             ConnectorOutputTableHandle outputTableHandle, ConnectorPageSinkId pageSinkId)
     {
         requireNonNull(session, "session is null");
-        return createOutputPageSink(getOutputTableHandle(outputTableHandle), session);
+        return createOutputPageSink(getOutputTableHandle(outputTableHandle), session, pageSinkId);
     }
 
     @Override
@@ -134,10 +155,11 @@ public class PaimonPageSinkProvider
             ConnectorInsertTableHandle insertTableHandle, ConnectorPageSinkId pageSinkId)
     {
         requireNonNull(session, "session is null");
-        return createInsertPageSink(getInsertTableHandle(insertTableHandle), session);
+        return createInsertPageSink(getInsertTableHandle(insertTableHandle), session, pageSinkId);
     }
 
-    private ConnectorPageSink createOutputPageSink(PaimonTableHandle tableHandle, ConnectorSession session)
+    private ConnectorPageSink createOutputPageSink(PaimonTableHandle tableHandle, ConnectorSession session,
+            ConnectorPageSinkId pageSinkId)
     {
         requireNonNull(session, "session is null");
         List<PaimonColumnHandle> writeColumns = getWriteColumns(tableHandle);
@@ -147,11 +169,12 @@ public class PaimonPageSinkProvider
                     "writes");
             validateWriteBucketMode(table);
             validateWriteColumns(table, writeColumns);
-            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager));
+            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), pageSinkId);
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
-    private ConnectorPageSink createInsertPageSink(PaimonTableHandle tableHandle, ConnectorSession session)
+    private ConnectorPageSink createInsertPageSink(PaimonTableHandle tableHandle, ConnectorSession session,
+            ConnectorPageSinkId pageSinkId)
     {
         requireNonNull(session, "session is null");
         List<PaimonColumnHandle> writeColumns = getWriteColumns(tableHandle);
@@ -165,7 +188,7 @@ public class PaimonPageSinkProvider
             if (overwrite) {
                 PaimonTableSupport.validateInsertOverwrite(table);
             }
-            return createPageSink(table, overwrite, writeLayout(table, writeColumns, typeManager));
+            return createPageSink(table, overwrite, writeLayout(table, writeColumns, typeManager), pageSinkId);
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -180,7 +203,7 @@ public class PaimonPageSinkProvider
             validateMergeBucketMode(table);
             PaimonTableSupport.validateRowLevelDelete(table, "merge writes");
             validateMergeWriteColumns(table, writeColumns);
-            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager));
+            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), null);
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -369,7 +392,8 @@ public class PaimonPageSinkProvider
         }
     }
 
-    private PaimonPageSink createPageSink(FileStoreTable table, boolean overwrite, WriteLayout writeLayout)
+    private PaimonPageSink createPageSink(FileStoreTable table, boolean overwrite, WriteLayout writeLayout,
+            ConnectorPageSinkId pageSinkId)
     {
         BatchTableWrite write = null;
         IOManager ioManager = null;
@@ -386,7 +410,8 @@ public class PaimonPageSinkProvider
             write.withMemoryPoolFactory(memoryPoolFactory);
             if (table.bucketMode() == BucketMode.HASH_DYNAMIC) {
                 return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
-                        writeLayout.inputChannels(), writeLayout.defaultValues(), dynamicBucketWriter(table, overwrite),
+                        writeLayout.inputChannels(), writeLayout.defaultValues(),
+                        dynamicBucketWriter(table, overwrite, pageSinkId, dynamicBucketWorkerCountSupplier.getAsInt()),
                         memoryPoolFactory, ioManager);
             }
             return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
@@ -427,14 +452,22 @@ public class PaimonPageSinkProvider
                 coreOptions.pageSize()));
     }
 
-    private static PaimonPageSink.DynamicBucketWriter dynamicBucketWriter(FileStoreTable table, boolean overwrite)
+    static PaimonPageSink.DynamicBucketWriter dynamicBucketWriter(FileStoreTable table, boolean overwrite,
+            ConnectorPageSinkId pageSinkId, int workerCount)
     {
         CoreOptions coreOptions = table.coreOptions();
+        int assignerParallelism = dynamicBucketAssignerParallelism(coreOptions, workerCount);
+        int assignId = pageSinkTaskPartitionId(pageSinkId);
+        if (assignId >= assignerParallelism) {
+            throw new IllegalStateException(
+                    "Paimon HASH_DYNAMIC writer task partition %s is outside assigner parallelism %s"
+                            .formatted(assignId, assignerParallelism));
+        }
         BucketAssigner bucketAssigner;
         if (overwrite) {
             bucketAssigner = new SimpleHashBucketAssigner(
-                    1,
-                    0,
+                    assignerParallelism,
+                    assignId,
                     coreOptions.dynamicBucketTargetRowNum(),
                     coreOptions.dynamicBucketMaxBuckets());
         }
@@ -444,17 +477,19 @@ public class PaimonPageSinkProvider
                     table.store().snapshotManager(),
                     CoreOptions.createCommitUser(options),
                     table.store().newIndexFileHandler(),
-                    1,
-                    1,
-                    0,
+                    assignerParallelism,
+                    assignerParallelism,
+                    assignId,
                     coreOptions.dynamicBucketTargetRowNum(),
                     coreOptions.dynamicBucketMaxBuckets());
         }
-        // TODO: Replace this single-writer HASH_DYNAMIC INSERT/overwrite path with a Flink-style
-        // two-stage topology: first route rows by partition + primary-key hash into bucket
-        // assigners, then route partition + bucket to writers while sharing dynamic bucket index state.
-        // DELETE, UPDATE, and MERGE should stay fail-fast until that coordination exists.
         return new PaimonPageSink.DynamicBucketWriter(new RowPartitionKeyExtractor(table.schema()), bucketAssigner);
+    }
+
+    static int pageSinkTaskPartitionId(ConnectorPageSinkId pageSinkId)
+    {
+        long id = requireNonNull(pageSinkId, "pageSinkId is null").getId();
+        return (int) ((id >>> 8) & 0x00FF_FFFFL);
     }
 
     @Override

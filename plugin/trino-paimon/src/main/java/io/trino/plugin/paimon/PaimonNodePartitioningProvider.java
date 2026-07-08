@@ -14,6 +14,7 @@
 package io.trino.plugin.paimon;
 
 import com.google.inject.Inject;
+import io.trino.spi.NodeManager;
 import io.trino.spi.connector.BucketFunction;
 import io.trino.spi.connector.ConnectorBucketNodeMap;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
@@ -21,28 +22,43 @@ import io.trino.spi.connector.ConnectorPartitioningHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.type.Type;
+import org.apache.paimon.CoreOptions;
+import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.table.BucketMode;
 
 import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerNodes;
+import static io.trino.spi.connector.ConnectorBucketNodeMap.createBucketNodeMap;
 import static java.util.Objects.requireNonNull;
 
 public class PaimonNodePartitioningProvider
         implements
         ConnectorNodePartitioningProvider
 {
+    private final NodeManager nodeManager;
+
     @Inject
-    public PaimonNodePartitioningProvider()
+    public PaimonNodePartitioningProvider(NodeManager nodeManager)
     {
+        this.nodeManager = requireNonNull(nodeManager, "nodeManager is null");
     }
 
     @Override
     public Optional<ConnectorBucketNodeMap> getBucketNodeMapping(ConnectorTransactionHandle transactionHandle,
             ConnectorSession session, ConnectorPartitioningHandle partitioningHandle)
     {
-        if (getPartitioningHandle(partitioningHandle).isSingleNode()) {
-            return Optional.of(ConnectorBucketNodeMap.createBucketNodeMap(1));
+        PaimonPartitioningHandle paimonPartitioningHandle = getPartitioningHandle(partitioningHandle);
+        if (paimonPartitioningHandle.isSingleNode()) {
+            return Optional.of(createBucketNodeMap(1));
+        }
+        TableSchema schema = paimonPartitioningHandle.getOriginalSchema();
+        if (bucketMode(schema) == BucketMode.HASH_DYNAMIC) {
+            return Optional.of(createBucketNodeMap(dynamicBucketAssignerNodes(
+                    nodeManager,
+                    new CoreOptions(schema.options()))));
         }
         return Optional.empty();
     }
@@ -58,6 +74,9 @@ public class PaimonNodePartitioningProvider
         if (paimonPartitioningHandle.isSingleNode()) {
             return (page, position) -> 0;
         }
+        if (bucketMode(paimonPartitioningHandle.getOriginalSchema()) == BucketMode.HASH_DYNAMIC) {
+            return new DynamicBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, workerCount);
+        }
         return new FixedBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, workerCount);
     }
 
@@ -68,5 +87,21 @@ public class PaimonNodePartitioningProvider
                     + partitioningHandle.getClass().getName());
         }
         return paimonPartitioningHandle;
+    }
+
+    private static BucketMode bucketMode(TableSchema schema)
+    {
+        requireNonNull(schema, "schema is null");
+        int bucket = CoreOptions.fromMap(schema.options()).bucket();
+        if (bucket == BucketMode.POSTPONE_BUCKET) {
+            return BucketMode.POSTPONE_MODE;
+        }
+        if (bucket != -1) {
+            return BucketMode.HASH_FIXED;
+        }
+        if (schema.primaryKeys().isEmpty()) {
+            return BucketMode.BUCKET_UNAWARE;
+        }
+        return schema.crossPartitionUpdate() ? BucketMode.KEY_DYNAMIC : BucketMode.HASH_DYNAMIC;
     }
 }

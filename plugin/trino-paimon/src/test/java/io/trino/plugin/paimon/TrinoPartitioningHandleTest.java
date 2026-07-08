@@ -14,17 +14,29 @@
 package io.trino.plugin.paimon;
 
 import io.airlift.json.JsonCodec;
+import io.trino.client.NodeVersion;
+import io.trino.metadata.InternalNode;
+import io.trino.spi.Node;
+import io.trino.spi.Page;
+import io.trino.spi.connector.BucketFunction;
 import io.trino.spi.connector.ConnectorPartitioningHandle;
+import io.trino.testing.TestingNodeManager;
+import org.apache.paimon.CoreOptions;
+import org.apache.paimon.index.BucketAssigner;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.table.sink.RowPartitionKeyExtractor;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.InstantiationUtil;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.util.List;
 import java.util.Map;
 
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -182,7 +194,7 @@ public class TrinoPartitioningHandleTest
     public void testNodePartitioningProviderRejectsMalformedInputs()
             throws Exception
     {
-        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider();
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(new TestingNodeManager());
         PaimonPartitioningHandle handle = new PaimonPartitioningHandle(serializedTestSchema());
 
         assertThatThrownBy(() -> provider.getBucketFunction(null, null, handle, null, 1))
@@ -203,7 +215,7 @@ public class TrinoPartitioningHandleTest
     public void testSingleNodePartitioningProviderRoutesAllRowsToSingleBucket()
             throws Exception
     {
-        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider();
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(new TestingNodeManager());
         PaimonPartitioningHandle handle = new PaimonPartitioningHandle(serializedTestSchema(), true);
 
         assertThat(provider.getBucketNodeMapping(null, null, handle))
@@ -213,6 +225,53 @@ public class TrinoPartitioningHandleTest
         assertThat(provider.getBucketFunction(null, null, handle, List.of(BIGINT), 8)
                 .getBucket(null, 0))
                 .isEqualTo(0);
+    }
+
+    @Test
+    public void testDynamicBucketPartitioningProviderUsesFixedWorkerAssignerMapping()
+            throws Exception
+    {
+        Node nodeB = node("node-b", "127.0.0.2");
+        Node nodeA = node("node-a", "127.0.0.1");
+        Node nodeC = node("node-c", "127.0.0.3");
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(
+                new TestingNodeManager(List.of(nodeB, nodeA, nodeC)));
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(InstantiationUtil.serializeObject(
+                dynamicBucketSchema(Map.of(CoreOptions.DYNAMIC_BUCKET_ASSIGNER_PARALLELISM.key(), "2"))));
+
+        assertThat(provider.getBucketNodeMapping(null, null, handle))
+                .get()
+                .satisfies(mapping -> {
+                    assertThat(mapping.getBucketCount()).isEqualTo(2);
+                    assertThat(mapping.hasFixedMapping()).isTrue();
+                    assertThat(mapping.getFixedMapping())
+                            .extracting(Node::getNodeIdentifier)
+                            .containsExactly("node-a", "node-b");
+                });
+    }
+
+    @Test
+    public void testDynamicBucketShuffleFunctionUsesPaimonAssignerHash()
+            throws Exception
+    {
+        TableSchema schema = dynamicBucketSchema(Map.of());
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(InstantiationUtil.serializeObject(schema));
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(new TestingNodeManager());
+        BucketFunction bucketFunction = provider.getBucketFunction(null, null, handle, List.of(BIGINT, BIGINT), 3);
+        Page page = new Page(
+                1,
+                writeNativeValue(BIGINT, 20260708L),
+                writeNativeValue(BIGINT, 11L));
+        PaimonRow row = new PaimonRow(page, 0, RowKind.INSERT, List.of(BIGINT, BIGINT),
+                List.of(DataTypes.BIGINT(), DataTypes.BIGINT()));
+        RowPartitionKeyExtractor extractor = new RowPartitionKeyExtractor(schema);
+        int expected = BucketAssigner.computeAssigner(
+                extractor.partition(row).hashCode(),
+                extractor.trimmedPrimaryKey(row).hashCode(),
+                3,
+                3);
+
+        assertThat(bucketFunction.getBucket(page, 0)).isEqualTo(expected);
     }
 
     private void testRoundTrip(PaimonPartitioningHandle expected)
@@ -247,5 +306,30 @@ public class TrinoPartitioningHandleTest
                 List.of(),
                 Map.of(),
                 ""));
+    }
+
+    private static TableSchema dynamicBucketSchema(Map<String, String> options)
+    {
+        return TableSchema.create(1, new Schema(
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.BIGINT()),
+                        DataTypes.FIELD(1, "id", DataTypes.BIGINT())).getFields(),
+                List.of("dt"),
+                List.of("dt", "id"),
+                mergeOptions(Map.of(CoreOptions.BUCKET.key(), "-1"), options),
+                ""));
+    }
+
+    private static Map<String, String> mergeOptions(Map<String, String> first, Map<String, String> second)
+    {
+        java.util.HashMap<String, String> result = new java.util.HashMap<>();
+        result.putAll(first);
+        result.putAll(second);
+        return Map.copyOf(result);
+    }
+
+    private static Node node(String identifier, String host)
+    {
+        return new InternalNode(identifier, URI.create("local://%s".formatted(host)), NodeVersion.UNKNOWN, false);
     }
 }

@@ -118,6 +118,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static io.trino.plugin.paimon.PaimonColumnHandle.TRINO_ROW_ID_NAME;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketWritePartitionColumns;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
 import static io.trino.plugin.paimon.PaimonSchemaProperties.COMMENT_PROPERTY;
@@ -226,11 +227,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 }
             case HASH_DYNAMIC :
                 try {
-                    // TODO: Replace this single-writer HASH_DYNAMIC INSERT layout with a Flink-style
-                    // two-stage assigner/writer topology that coordinates dynamic bucket index state.
                     return Optional.of(new ConnectorTableLayout(
-                            new PaimonPartitioningHandle(InstantiationUtil.serializeObject(tableSchema), true),
-                            List.of(), false));
+                            new PaimonPartitioningHandle(InstantiationUtil.serializeObject(tableSchema)),
+                            dynamicBucketWritePartitionColumns(tableSchema), false));
                 }
                 catch (IOException e) {
                     throw new TrinoException(PAIMON_METADATA_ERROR,
