@@ -6772,6 +6772,65 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDdlRejectsTemporalPrecisionUnsupportedByPaimon()
+    {
+        ConnectorTableMetadata unsupportedCreateTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("event_time", createTimestampType(12))));
+        CapturingDdlCatalog createCatalog = new CapturingDdlCatalog();
+        PaimonMetadata createMetadata = new PaimonMetadata(createCatalog, TESTING_TYPE_MANAGER);
+
+        assertTrinoError(() -> createMetadata.createTable(SESSION, unsupportedCreateTable,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(), "Paimon supports timestamp precision up to 9, got timestamp(12)");
+        assertThat(createCatalog.initialized).isFalse();
+        assertThat(createCatalog.createdSchema).isNull();
+
+        CapturingDdlCatalog beginCreateCatalog = new CapturingDdlCatalog();
+        PaimonMetadata beginCreateMetadata = new PaimonMetadata(beginCreateCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> beginCreateMetadata.beginCreateTable(SESSION, unsupportedCreateTable,
+                        Optional.empty(), RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(), "Paimon supports timestamp precision up to 9, got timestamp(12)");
+        assertThat(beginCreateCatalog.initialized).isFalse();
+        assertThat(beginCreateCatalog.createdSchema).isNull();
+
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        CapturingDdlCatalog addColumnCatalog = new CapturingDdlCatalog();
+        PaimonMetadata addColumnMetadata = new PaimonMetadata(addColumnCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> addColumnMetadata.addColumn(SESSION, tableHandle,
+                        new ColumnMetadata("event_time", io.trino.spi.type.TimeType.TIME_PICOS)),
+                NOT_SUPPORTED.toErrorCode(), "Paimon supports time precision up to 9, got time(12)");
+        assertThat(addColumnCatalog.alterCalls).isEqualTo(0);
+
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        CapturingDdlCatalog setColumnCatalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata setColumnMetadata = new PaimonMetadata(setColumnCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> setColumnMetadata.setColumnType(SESSION, tableHandle,
+                        PaimonColumnHandle.of("id", DataTypes.INT()),
+                        io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_PICOS),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon supports timestamp with time zone precision up to 9, got timestamp(12) with time zone");
+        assertThat(setColumnCatalog.alterCalls).isEqualTo(0);
+
+        CapturingDdlCatalog addFieldCatalog = new CapturingDdlCatalog();
+        PaimonMetadata addFieldMetadata = new PaimonMetadata(addFieldCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> addFieldMetadata.addField(SESSION, tableHandle, List.of(),
+                        "event_time", createTimestampType(12), false),
+                NOT_SUPPORTED.toErrorCode(), "Paimon supports timestamp precision up to 9, got timestamp(12)");
+        assertThat(addFieldCatalog.initialized).isFalse();
+        assertThat(addFieldCatalog.alterCalls).isEqualTo(0);
+
+        CapturingDdlCatalog setFieldCatalog = new CapturingDdlCatalog();
+        PaimonMetadata setFieldMetadata = new PaimonMetadata(setFieldCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> setFieldMetadata.setFieldType(SESSION, tableHandle, List.of("payload", "event_time"),
+                        createTimestampType(12)),
+                NOT_SUPPORTED.toErrorCode(), "Paimon supports timestamp precision up to 9, got timestamp(12)");
+        assertThat(setFieldCatalog.initialized).isFalse();
+        assertThat(setFieldCatalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testAddColumnRejectsNotNullBeforeCatalogAlter()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();

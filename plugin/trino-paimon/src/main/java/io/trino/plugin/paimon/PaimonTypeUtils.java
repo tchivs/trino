@@ -368,14 +368,19 @@ public class PaimonTypeUtils
                 return DataTypes.DATE();
             }
             else if (trinoType instanceof io.trino.spi.type.TimeType) {
-                return new TimeType(((io.trino.spi.type.TimeType) trinoType).getPrecision());
+                int precision = ((io.trino.spi.type.TimeType) trinoType).getPrecision();
+                checkPaimonTemporalPrecision("time", trinoType, precision, TimeType.MAX_PRECISION);
+                return new TimeType(precision);
             }
             else if (trinoType instanceof io.trino.spi.type.TimestampType) {
                 int precision = ((io.trino.spi.type.TimestampType) trinoType).getPrecision();
+                checkPaimonTemporalPrecision("timestamp", trinoType, precision, TimestampType.MAX_PRECISION);
                 return new TimestampType(precision);
             }
             else if (trinoType instanceof TimestampWithTimeZoneType) {
-                return DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(((TimestampWithTimeZoneType) trinoType).getPrecision());
+                int precision = ((TimestampWithTimeZoneType) trinoType).getPrecision();
+                checkPaimonTemporalPrecision("timestamp with time zone", trinoType, precision, LocalZonedTimestampType.MAX_PRECISION);
+                return DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(precision);
             }
             else if (trinoType instanceof io.trino.spi.type.ArrayType) {
                 return DataTypes.ARRAY(visit(((io.trino.spi.type.ArrayType) trinoType).getElementType()));
@@ -395,6 +400,15 @@ public class PaimonTypeUtils
             }
             else {
                 throw new UnsupportedOperationException("Unsupported type: " + trinoType);
+            }
+        }
+
+        private static void checkPaimonTemporalPrecision(String typeName, Type trinoType, int precision, int maxPrecision)
+        {
+            if (precision > maxPrecision) {
+                throw new UnsupportedOperationException(
+                        "Paimon supports %s precision up to %s, got %s"
+                                .formatted(typeName, maxPrecision, trinoType.getDisplayName()));
             }
         }
     }

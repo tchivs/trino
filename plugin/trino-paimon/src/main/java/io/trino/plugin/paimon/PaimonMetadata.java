@@ -1908,7 +1908,17 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     private static DataType toPaimonType(ColumnMetadata column)
     {
-        return PaimonTypeUtils.toPaimonType(column.getType()).copy(column.isNullable());
+        return toPaimonType(column.getType()).copy(column.isNullable());
+    }
+
+    private static DataType toPaimonType(Type type)
+    {
+        try {
+            return PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"));
+        }
+        catch (UnsupportedOperationException e) {
+            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+        }
     }
 
     private static RuntimeException paimonAlterTableException(SchemaTableName tableName, Exception exception)
@@ -2265,7 +2275,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectPartitionKeyChange("set column type", "update", paimonColumnHandle, schemaEvolutionKeys);
         rejectPrimaryKeyChange("set column type", "update", paimonColumnHandle, schemaEvolutionKeys);
 
-        DataType paimonType = PaimonTypeUtils.toPaimonType(type)
+        DataType paimonType = toPaimonType(type)
                 .copy(field.type().isNullable());
 
         List<SchemaChange> changes = new ArrayList<>();
@@ -2320,7 +2330,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectPaimonSystemRootField("add field", fieldNames[0]);
 
         // Convert Trino Type to Paimon DataType
-        DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"));
+        DataType paimonType = toPaimonType(type);
 
         List<SchemaChange> changes = new ArrayList<>();
 
@@ -2433,7 +2443,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         String[] fieldNames = fieldPath.toArray(new String[0]);
 
         // Convert Trino Type to Paimon DataType
-        DataType paimonType = PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"));
+        DataType paimonType = toPaimonType(type);
 
         List<SchemaChange> changes = new ArrayList<>();
 
@@ -3265,7 +3275,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .mapToObj(index -> {
                     ConnectorViewDefinition.ViewColumn column = definition.getColumns().get(index);
                     return new DataField(index, column.getName(),
-                            PaimonTypeUtils.toPaimonType(typeManager.getType(column.getType())),
+                            toPaimonType(typeManager.getType(column.getType())),
                             column.getComment().orElse(null));
                 })
                 .collect(toList());

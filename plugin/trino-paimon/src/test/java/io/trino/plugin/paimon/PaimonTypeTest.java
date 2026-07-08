@@ -239,6 +239,24 @@ public class PaimonTypeTest
     }
 
     @Test
+    public void testToPaimonTypeRejectsUnsupportedTemporalPrecision()
+    {
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(io.trino.spi.type.TimeType.TIME_PICOS))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon supports time precision up to 9, got time(12)");
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(TimestampType.TIMESTAMP_PICOS))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon supports timestamp precision up to 9, got timestamp(12)");
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(TimestampWithTimeZoneType.TIMESTAMP_TZ_PICOS))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon supports timestamp with time zone precision up to 9, got timestamp(12) with time zone");
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(RowType.from(List.of(
+                RowType.field("event_time", TimestampType.TIMESTAMP_PICOS)))))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon supports timestamp precision up to 9, got timestamp(12)");
+    }
+
+    @Test
     public void testNestedRowFieldIdsAreGloballyUnique()
     {
         Type rowType = RowType.from(List.of(
