@@ -269,6 +269,8 @@ public final class PaimonPageBuilder
             InternalMap mapData = (InternalMap) value;
             InternalArray keyArray = mapData.keyArray();
             InternalArray valueArray = mapData.valueArray();
+            int mapSize = mapData.size();
+            validateMapArraySizes(mapSize, keyArray.size(), valueArray.size());
             DataType keyType;
             DataType valueType;
             boolean multiset = false;
@@ -291,7 +293,7 @@ public final class PaimonPageBuilder
             MapBlockBuilder mapBlockBuilder = (MapBlockBuilder) output;
             try {
                 mapBlockBuilder.buildEntry((MapValueBuilder<Throwable>) (keyBuilder, valueBuilder) -> {
-                    for (int i = 0; i < keyArray.size(); i++) {
+                    for (int i = 0; i < mapSize; i++) {
                         appendTo(type.getTypeParameters().get(0), keyType, InternalRowUtils.get(keyArray, i, keyType), keyBuilder);
                         Object mapValue = InternalRowUtils.get(valueArray, i, valueType);
                         if (validateMultisetCounts) {
@@ -307,6 +309,17 @@ public final class PaimonPageBuilder
             return;
         }
         throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unhandled type for Block: " + type.getTypeSignature());
+    }
+
+    private static void validateMapArraySizes(int mapSize, int keyArraySize, int valueArraySize)
+    {
+        if (mapSize < 0) {
+            throw new IllegalArgumentException("Paimon MAP size must be non-negative: " + mapSize);
+        }
+        if (keyArraySize != mapSize || valueArraySize != mapSize) {
+            throw new IllegalArgumentException("Paimon MAP key/value array size mismatch: map size %s, key array size %s, value array size %s"
+                    .formatted(mapSize, keyArraySize, valueArraySize));
+        }
     }
 
     private static void validateMultisetCount(Object count)

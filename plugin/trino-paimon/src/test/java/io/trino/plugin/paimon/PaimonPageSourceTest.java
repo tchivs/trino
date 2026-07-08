@@ -62,6 +62,8 @@ import org.apache.paimon.data.Blob;
 import org.apache.paimon.data.GenericArray;
 import org.apache.paimon.data.GenericMap;
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.data.InternalArray;
+import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.GenericVariant;
@@ -2524,6 +2526,24 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testPageSourceMapConversionRejectsInconsistentArraySizes()
+    {
+        MapType mapType = new MapType(VARCHAR, INTEGER, new TypeOperators());
+        DataType logicalType = DataTypes.MAP(DataTypes.STRING(), DataTypes.INT());
+        GenericArray oneKey = new GenericArray(new Object[] {BinaryString.fromString("red")});
+        GenericArray twoValues = new GenericArray(new Object[] {1, 2});
+
+        assertThatThrownBy(() -> appendSingleColumn(mapType, logicalType,
+                new TestingInternalMap(-1, new GenericArray(new Object[] {}), new GenericArray(new Object[] {}))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Paimon MAP size must be non-negative: -1");
+        assertThatThrownBy(() -> appendSingleColumn(mapType, logicalType,
+                new TestingInternalMap(2, oneKey, twoValues)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Paimon MAP key/value array size mismatch: map size 2, key array size 1, value array size 2");
+    }
+
+    @Test
     void testGetNextPageMapsUnsupportedReadFeaturesToNotSupported()
     {
         UnsupportedOperationException failure =
@@ -3587,6 +3607,11 @@ public class PaimonPageSourceTest
     {
         PaimonPageBuilder pageBuilder = new PaimonPageBuilder(List.of(type), List.of(logicalType));
         pageBuilder.appendRow(GenericRow.of(value));
+    }
+
+    private record TestingInternalMap(int size, InternalArray keyArray, InternalArray valueArray)
+            implements InternalMap
+    {
     }
 
     private static FileStoreTable fileStoreTable()
