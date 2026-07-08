@@ -149,7 +149,9 @@ import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
+import static io.trino.spi.type.TimeType.TIME_MICROS;
 import static io.trino.spi.type.TimestampType.createTimestampType;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.Objects.requireNonNull;
@@ -2579,6 +2581,39 @@ public class PaimonMetadataTableModeTest
                 .contains(List.of(Map.of(
                         "dt", "2026-06-26",
                         "region", "7")));
+        assertThat(copiedWithLatestSchema).isTrue();
+        assertThat(truncated).isFalse();
+        assertThat(truncatedPartitions.get()).isNull();
+        assertThat(catalog.initialized).isTrue();
+    }
+
+    @Test
+    public void testApplyDeleteIgnoresUnsafeTimePartitionValue()
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean truncated = new AtomicBoolean();
+        AtomicReference<List<Map<String, String>>> truncatedPartitions = new AtomicReference<>();
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "event_time", new org.apache.paimon.types.TimeType(6)),
+                DataTypes.FIELD(1, "id", DataTypes.INT()));
+        FileStoreTable table = truncateFileStoreTable(copiedWithLatestSchema, truncated, truncatedPartitions,
+                rowType, List.of("event_time"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonColumnHandle eventTime = PaimonColumnHandle.of("event_time", new org.apache.paimon.types.TimeType(6));
+        PaimonTableHandle tableHandle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.withColumnDomains(Map.of(eventTime,
+                        Domain.singleValue(TIME_MICROS, 12_345L * PICOSECONDS_PER_MILLISECOND + 1))),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty());
+
+        Optional<ConnectorTableHandle> deleteHandle = metadata.applyDelete(SESSION, tableHandle);
+
+        assertThat(deleteHandle).isEmpty();
         assertThat(copiedWithLatestSchema).isTrue();
         assertThat(truncated).isFalse();
         assertThat(truncatedPartitions.get()).isNull();

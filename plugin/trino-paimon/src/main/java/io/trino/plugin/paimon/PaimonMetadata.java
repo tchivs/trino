@@ -3122,7 +3122,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         try {
             return Optional.of(PaimonFilterConverter.getLiteralValue(columnHandle.getTrinoType(), value));
         }
-        catch (UnsupportedOperationException | ClassCastException | ArithmeticException e) {
+        catch (UnsupportedOperationException | ClassCastException | ArithmeticException | IllegalArgumentException e) {
             return Optional.empty();
         }
     }
