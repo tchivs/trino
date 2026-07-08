@@ -71,6 +71,10 @@ public class PaimonConnectorFactory
     private static final String HADOOP_CONF_PREFIX = "hadoop.";
     private static final String PAIMON_S3_ACCESS_KEY = "s3.access-key";
     private static final String PAIMON_S3_SECRET_KEY = "s3.secret-key";
+    private static final String PAIMON_S3_ACCESS_KEY_FALLBACK = "s3.access.key";
+    private static final String PAIMON_S3_SECRET_KEY_FALLBACK = "s3.secret.key";
+    private static final String PAIMON_S3_PATH_STYLE_ACCESS = "s3.path-style-access";
+    private static final String PAIMON_S3_PATH_STYLE_ACCESS_FALLBACK = "s3.path.style.access";
     private static final String TRINO_S3_ACCESS_KEY = "s3.aws-access-key";
     private static final String TRINO_S3_SECRET_KEY = "s3.aws-secret-key";
 
@@ -199,6 +203,9 @@ public class PaimonConnectorFactory
 
     static void addS3CredentialProperties(Map<String, String> config)
     {
+        copyIfMissingOrBlank(config, PAIMON_S3_ACCESS_KEY_FALLBACK, PAIMON_S3_ACCESS_KEY);
+        copyIfMissingOrBlank(config, PAIMON_S3_SECRET_KEY_FALLBACK, PAIMON_S3_SECRET_KEY);
+        copyIfMissingOrBlank(config, PAIMON_S3_PATH_STYLE_ACCESS_FALLBACK, PAIMON_S3_PATH_STYLE_ACCESS);
         copyIfMissingOrBlank(config, PAIMON_S3_ACCESS_KEY, TRINO_S3_ACCESS_KEY);
         copyIfMissingOrBlank(config, PAIMON_S3_SECRET_KEY, TRINO_S3_SECRET_KEY);
         copyIfMissingOrBlank(config, TRINO_S3_ACCESS_KEY, PAIMON_S3_ACCESS_KEY);

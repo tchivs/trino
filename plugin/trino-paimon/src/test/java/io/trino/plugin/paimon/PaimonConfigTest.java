@@ -215,6 +215,59 @@ public class PaimonConfigTest
     }
 
     @Test
+    public void testS3FallbackAliasesAreMappedToCanonicalOptions()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setS3AccessKeyFallback("access")
+                .setS3SecretKeyFallback("secret")
+                .setS3PathStyleAccessFallback(true);
+
+        Options options = config.toOptions();
+
+        assertThat(options.toMap())
+                .containsEntry("s3.access-key", "access")
+                .containsEntry("s3.secret-key", "secret")
+                .containsEntry("s3.path-style-access", "true")
+                .doesNotContainKeys("s3.access.key", "s3.secret.key", "s3.path.style.access");
+    }
+
+    @Test
+    public void testTrinoS3CredentialAliasesAreMappedToCanonicalOptions()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setS3AwsAccessKey("access")
+                .setS3AwsSecretKey("secret");
+
+        Options options = config.toOptions();
+
+        assertThat(options.toMap())
+                .containsEntry("s3.access-key", "access")
+                .containsEntry("s3.secret-key", "secret")
+                .doesNotContainKeys("s3.aws-access-key", "s3.aws-secret-key");
+    }
+
+    @Test
+    public void testS3CanonicalOptionsTakePrecedenceOverAliases()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setS3AccessKey("canonical-access")
+                .setS3AccessKeyFallback("fallback-access")
+                .setS3AwsAccessKey("trino-access")
+                .setS3SecretKey("canonical-secret")
+                .setS3SecretKeyFallback("fallback-secret")
+                .setS3AwsSecretKey("trino-secret")
+                .setS3PathStyleAccess(false)
+                .setS3PathStyleAccessFallback(true);
+
+        Options options = config.toOptions();
+
+        assertThat(options.toMap())
+                .containsEntry("s3.access-key", "canonical-access")
+                .containsEntry("s3.secret-key", "canonical-secret")
+                .containsEntry("s3.path-style-access", "false");
+    }
+
+    @Test
     public void testFileSystemFlagsAreMapped()
     {
         PaimonConfig config = new PaimonConfig()

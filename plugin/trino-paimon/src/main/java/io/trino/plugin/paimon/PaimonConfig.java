@@ -14,6 +14,7 @@
 package io.trino.plugin.paimon;
 
 import io.airlift.configuration.Config;
+import io.airlift.configuration.ConfigSecuritySensitive;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotBlank;
 import org.apache.paimon.options.Options;
@@ -72,8 +73,13 @@ public class PaimonConfig
     private Boolean alterTableCascade;
     private String s3Endpoint;
     private String s3AccessKey;
+    private String s3AccessKeyFallback;
+    private String s3AwsAccessKey;
     private String s3SecretKey;
+    private String s3SecretKeyFallback;
+    private String s3AwsSecretKey;
     private Boolean s3PathStyleAccess;
+    private Boolean s3PathStyleAccessFallback;
     private String s3Region;
     private Boolean fsNativeS3Enabled;
     private Boolean fsHadoopEnabled;
@@ -596,15 +602,66 @@ public class PaimonConfig
         return this;
     }
 
+    public String getS3AccessKeyFallback()
+    {
+        return s3AccessKeyFallback;
+    }
+
+    @Config("s3.access.key")
+    public PaimonConfig setS3AccessKeyFallback(String s3AccessKey)
+    {
+        this.s3AccessKeyFallback = s3AccessKey;
+        return this;
+    }
+
+    public String getS3AwsAccessKey()
+    {
+        return s3AwsAccessKey;
+    }
+
+    @Config("s3.aws-access-key")
+    public PaimonConfig setS3AwsAccessKey(String s3AwsAccessKey)
+    {
+        this.s3AwsAccessKey = s3AwsAccessKey;
+        return this;
+    }
+
     public String getS3SecretKey()
     {
         return s3SecretKey;
     }
 
     @Config("s3.secret-key")
+    @ConfigSecuritySensitive
     public PaimonConfig setS3SecretKey(String s3SecretKey)
     {
         this.s3SecretKey = s3SecretKey;
+        return this;
+    }
+
+    public String getS3SecretKeyFallback()
+    {
+        return s3SecretKeyFallback;
+    }
+
+    @Config("s3.secret.key")
+    @ConfigSecuritySensitive
+    public PaimonConfig setS3SecretKeyFallback(String s3SecretKey)
+    {
+        this.s3SecretKeyFallback = s3SecretKey;
+        return this;
+    }
+
+    public String getS3AwsSecretKey()
+    {
+        return s3AwsSecretKey;
+    }
+
+    @Config("s3.aws-secret-key")
+    @ConfigSecuritySensitive
+    public PaimonConfig setS3AwsSecretKey(String s3AwsSecretKey)
+    {
+        this.s3AwsSecretKey = s3AwsSecretKey;
         return this;
     }
 
@@ -617,6 +674,18 @@ public class PaimonConfig
     public PaimonConfig setS3PathStyleAccess(Boolean s3PathStyleAccess)
     {
         this.s3PathStyleAccess = s3PathStyleAccess;
+        return this;
+    }
+
+    public Boolean getS3PathStyleAccessFallback()
+    {
+        return s3PathStyleAccessFallback;
+    }
+
+    @Config("s3.path.style.access")
+    public PaimonConfig setS3PathStyleAccessFallback(Boolean s3PathStyleAccess)
+    {
+        this.s3PathStyleAccessFallback = s3PathStyleAccess;
         return this;
     }
 
@@ -742,15 +811,9 @@ public class PaimonConfig
         if (s3Endpoint != null) {
             options.put("s3.endpoint", s3Endpoint);
         }
-        if (s3AccessKey != null) {
-            options.put("s3.access-key", s3AccessKey);
-        }
-        if (s3SecretKey != null) {
-            options.put("s3.secret-key", s3SecretKey);
-        }
-        if (s3PathStyleAccess != null) {
-            options.put("s3.path-style-access", s3PathStyleAccess.toString());
-        }
+        putIfPresent(options, "s3.access-key", firstNonNull(s3AccessKey, s3AccessKeyFallback, s3AwsAccessKey));
+        putIfPresent(options, "s3.secret-key", firstNonNull(s3SecretKey, s3SecretKeyFallback, s3AwsSecretKey));
+        putIfPresent(options, "s3.path-style-access", firstNonNull(s3PathStyleAccess, s3PathStyleAccessFallback));
         if (s3Region != null) {
             options.put("s3.region", s3Region);
         }
@@ -769,5 +832,24 @@ public class PaimonConfig
         if (value != null) {
             options.put(key, value.toString());
         }
+    }
+
+    private static <T> T firstNonNull(T first, T second)
+    {
+        if (first != null) {
+            return first;
+        }
+        return second;
+    }
+
+    private static <T> T firstNonNull(T first, T second, T third)
+    {
+        if (first != null) {
+            return first;
+        }
+        if (second != null) {
+            return second;
+        }
+        return third;
     }
 }

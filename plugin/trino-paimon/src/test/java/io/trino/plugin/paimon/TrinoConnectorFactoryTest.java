@@ -86,7 +86,10 @@ public class TrinoConnectorFactoryTest
                 Map.entry("client-pool-cache.eviction-interval-ms", "60000"),
                 Map.entry("hive.skip-update-stats", "true"),
                 Map.entry("client-pool-cache.keys", "user_name"),
-                Map.entry("alter-table-cascade", "false"));
+                Map.entry("alter-table-cascade", "false"),
+                Map.entry("s3.access.key", "access"),
+                Map.entry("s3.secret.key", "secret"),
+                Map.entry("s3.path.style.access", "true"));
         ConnectorFactory factory = new PaimonConnectorFactory();
 
         Connector connector = factory.create("paimon", config, new TestingConnectorContext());
@@ -266,6 +269,24 @@ public class TrinoConnectorFactoryTest
         PaimonConnectorFactory.addS3CredentialProperties(config);
 
         assertThat(config)
+                .containsEntry("s3.aws-access-key", "paimon-access")
+                .containsEntry("s3.aws-secret-key", "paimon-secret");
+    }
+
+    @Test
+    public void testPaimonFallbackObjectStoreCredentialsAreMappedToTrinoNativeCredentials()
+    {
+        Map<String, String> config = new HashMap<>();
+        config.put("s3.access.key", "paimon-access");
+        config.put("s3.secret.key", "paimon-secret");
+        config.put("s3.path.style.access", "true");
+
+        PaimonConnectorFactory.addS3CredentialProperties(config);
+
+        assertThat(config)
+                .containsEntry("s3.access-key", "paimon-access")
+                .containsEntry("s3.secret-key", "paimon-secret")
+                .containsEntry("s3.path-style-access", "true")
                 .containsEntry("s3.aws-access-key", "paimon-access")
                 .containsEntry("s3.aws-secret-key", "paimon-secret");
     }
