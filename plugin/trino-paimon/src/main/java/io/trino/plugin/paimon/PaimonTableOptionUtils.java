@@ -43,6 +43,7 @@ public class PaimonTableOptionUtils
     private static final Set<String> EXCLUDED_TABLE_PROPERTY_OPTION_KEYS = Set.of(
             CoreOptions.SCAN_MODE.key(),
             CoreOptions.STREAM_SCAN_MODE.key(),
+            CoreOptions.BATCH_SCAN_MODE.key(),
             CoreOptions.SCAN_TIMESTAMP.key(),
             CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
             CoreOptions.SCAN_WATERMARK.key(),
