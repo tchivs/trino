@@ -71,6 +71,7 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
+import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.testing.TestingPageSinkId.TESTING_PAGE_SINK_ID;
@@ -868,6 +869,24 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testPageSinkNormalizesBinaryDefaultValues()
+    {
+        AtomicReference<Object[]> writeArguments = new AtomicReference<>();
+        PaimonPageSink pageSink = new PaimonPageSink(
+                writer(List.of(), writeArguments),
+                List.of(VARBINARY),
+                List.of(DataTypes.BINARY(4)),
+                new int[] {-1},
+                new Object[] {new byte[] {'a', 'b'}},
+                null);
+
+        pageSink.appendPage(new io.trino.spi.Page(1));
+
+        InternalRow row = (InternalRow) writeArguments.get()[0];
+        assertThat(row.getBinary(0)).containsExactly((byte) 'a', (byte) 'b', (byte) 0, (byte) 0);
+    }
+
+    @Test
     public void testPageSinkRequiresRowKind()
     {
         PaimonPageSink pageSink = new PaimonPageSink(writer(), List.of(INTEGER), List.of(DataTypes.INT()));
@@ -1505,6 +1524,24 @@ public class PaimonPageSinkProviderTest
                             + "Paimon VARIANT requires Trino JSON type metadata");
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
                             .hasMessage("Paimon VARIANT requires Trino JSON type metadata");
+                });
+    }
+
+    @Test
+    public void testBinaryLengthWriteFailuresUseStableConnectorErrors()
+    {
+        PaimonPageSink pageSink = new PaimonPageSink(binaryReadingWriter(), List.of(VARBINARY),
+                List.of(DataTypes.VARBINARY(3)));
+
+        assertThatThrownBy(() -> pageSink.appendPage(new io.trino.spi.Page(1,
+                writeNativeValue(VARBINARY, Slices.utf8Slice("abcd")))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception)
+                            .hasMessage("Failed to write data to Paimon: Cannot write 4 bytes to Paimon VARBINARY(3); value would be truncated");
+                    assertThat(exception.getCause())
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("Cannot write 4 bytes to Paimon VARBINARY(3); value would be truncated");
                 });
     }
 
@@ -2277,6 +2314,23 @@ public class PaimonPageSinkProviderTest
                     case "prepareCommit" -> List.of();
                     case "close" -> null;
                     case "toString" -> "variant-validating-writer";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite binaryReadingWriter()
+    {
+        return (org.apache.paimon.table.sink.BatchTableWrite) Proxy.newProxyInstance(
+                PaimonPageSinkProviderTest.class.getClassLoader(),
+                new Class<?>[] {org.apache.paimon.table.sink.BatchTableWrite.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "write" -> {
+                        ((InternalRow) args[0]).getBinary(0);
+                        yield null;
+                    }
+                    case "prepareCommit" -> List.of();
+                    case "close" -> null;
+                    case "toString" -> "binary-reading-writer";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

@@ -187,6 +187,84 @@ public class TrinoRowTest
     }
 
     @Test
+    public void testBinaryConversionPadsFixedLengthValues()
+    {
+        Page singlePage = new Page(1, writeNativeValue(VARBINARY, Slices.utf8Slice("ab")));
+        PaimonRow trinoRow = new PaimonRow(singlePage, RowKind.INSERT, List.of(VARBINARY),
+                List.of(DataTypes.BINARY(4)));
+
+        assertThat(trinoRow.getBinary(0)).containsExactly((byte) 'a', (byte) 'b', (byte) 0, (byte) 0);
+    }
+
+    @Test
+    public void testBinaryConversionRejectsFixedLengthTruncation()
+    {
+        Page singlePage = new Page(1, writeNativeValue(VARBINARY, Slices.utf8Slice("abcd")));
+        PaimonRow trinoRow = new PaimonRow(singlePage, RowKind.INSERT, List.of(VARBINARY),
+                List.of(DataTypes.BINARY(3)));
+
+        assertThatThrownBy(() -> trinoRow.getBinary(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Cannot write 4 bytes to Paimon BINARY(3); value would be truncated");
+    }
+
+    @Test
+    public void testBinaryConversionRejectsVariableLengthTruncation()
+    {
+        Page singlePage = new Page(1, writeNativeValue(VARBINARY, Slices.utf8Slice("abcd")));
+        PaimonRow trinoRow = new PaimonRow(singlePage, RowKind.INSERT, List.of(VARBINARY),
+                List.of(DataTypes.VARBINARY(3)));
+
+        assertThatThrownBy(() -> trinoRow.getBinary(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Cannot write 4 bytes to Paimon VARBINARY(3); value would be truncated");
+    }
+
+    @Test
+    public void testNestedBinaryConversionRejectsTruncation()
+    {
+        ArrayType arrayType = new ArrayType(VARBINARY);
+        Block array = buildArrayValue(arrayType, 1,
+                elementBuilder -> writeNativeValue(VARBINARY, elementBuilder, Slices.utf8Slice("abcd")));
+        PaimonRow trinoRow = new PaimonRow(new Page(1, writeNativeValue(arrayType, array)), RowKind.INSERT,
+                List.of(arrayType), List.of(DataTypes.ARRAY(DataTypes.VARBINARY(3))));
+
+        assertThatThrownBy(() -> trinoRow.getArray(0).getBinary(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Cannot write 4 bytes to Paimon VARBINARY(3); value would be truncated");
+    }
+
+    @Test
+    public void testNestedMapBinaryConversionRejectsTruncation()
+    {
+        MapType mapType = new MapType(INTEGER, VARBINARY, new TypeOperators());
+        SqlMap map = buildMapValue(mapType, 1, (keyBuilder, valueBuilder) -> {
+            writeNativeValue(INTEGER, keyBuilder, 1L);
+            writeNativeValue(VARBINARY, valueBuilder, Slices.utf8Slice("abcd"));
+        });
+        PaimonRow trinoRow = new PaimonRow(new Page(1, writeNativeValue(mapType, map)), RowKind.INSERT,
+                List.of(mapType), List.of(DataTypes.MAP(DataTypes.INT(), DataTypes.VARBINARY(3))));
+
+        assertThatThrownBy(() -> trinoRow.getMap(0).valueArray().getBinary(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Cannot write 4 bytes to Paimon VARBINARY(3); value would be truncated");
+    }
+
+    @Test
+    public void testNestedRowBinaryConversionRejectsTruncation()
+    {
+        RowType rowType = RowType.anonymous(List.of(VARBINARY));
+        SqlRow row = buildRowValue(rowType,
+                fieldBuilders -> writeNativeValue(VARBINARY, fieldBuilders.get(0), Slices.utf8Slice("abcd")));
+        PaimonRow trinoRow = new PaimonRow(new Page(1, writeNativeValue(rowType, row)), RowKind.INSERT,
+                List.of(rowType), List.of(DataTypes.ROW(DataTypes.FIELD(0, "value", DataTypes.VARBINARY(3)))));
+
+        assertThatThrownBy(() -> trinoRow.getRow(0, 1).getBinary(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Cannot write 4 bytes to Paimon VARBINARY(3); value would be truncated");
+    }
+
+    @Test
     void testInvalidVariantJsonKeepsParseFailureContext()
     {
         Page singlePage = new Page(1, writeNativeValue(JSON_TYPE, Slices.utf8Slice("{broken")));

@@ -47,6 +47,7 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -184,6 +185,33 @@ public class PaimonRow
         return Timestamp.fromMicros(value);
     }
 
+    static byte[] normalizeBinaryValue(byte[] value, DataType logicalType)
+    {
+        requireNonNull(value, "value is null");
+        requireNonNull(logicalType, "logicalType is null");
+        return switch (logicalType.getTypeRoot()) {
+            case BINARY -> {
+                int length = DataTypeChecks.getLength(logicalType);
+                if (value.length > length) {
+                    throw new IllegalArgumentException(
+                            "Cannot write %s bytes to Paimon BINARY(%s); value would be truncated"
+                                    .formatted(value.length, length));
+                }
+                yield value.length == length ? value : Arrays.copyOf(value, length);
+            }
+            case VARBINARY -> {
+                int length = DataTypeChecks.getLength(logicalType);
+                if (value.length > length) {
+                    throw new IllegalArgumentException(
+                            "Cannot write %s bytes to Paimon VARBINARY(%s); value would be truncated"
+                                    .formatted(value.length, length));
+                }
+                yield value;
+            }
+            default -> value;
+        };
+    }
+
     @Override
     public int getFieldCount()
     {
@@ -288,7 +316,7 @@ public class PaimonRow
     public byte[] getBinary(int i)
     {
         Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, page.getBlock(i), position);
-        return slice.getBytes();
+        return normalizeBinaryValue(slice.getBytes(), logicalType(i));
     }
 
     @Override
@@ -467,7 +495,7 @@ public class PaimonRow
         public byte[] getBinary(int pos)
         {
             Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, block, getPosition(pos));
-            return slice.getBytes();
+            return normalizeBinaryValue(slice.getBytes(), logicalType);
         }
 
         @Override
@@ -1047,7 +1075,7 @@ public class PaimonRow
         {
             Block fieldBlock = sqlRow.getRawFieldBlock(pos);
             Slice slice = (Slice) TypeUtils.readNativeValue(VARBINARY, fieldBlock, sqlRow.getRawIndex());
-            return slice.getBytes();
+            return normalizeBinaryValue(slice.getBytes(), logicalType(pos));
         }
 
         @Override

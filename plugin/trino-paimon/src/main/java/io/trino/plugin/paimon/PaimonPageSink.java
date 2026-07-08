@@ -285,7 +285,7 @@ public class PaimonPageSink
             return PaimonRow.fromTrustedTypeLists(page, position, rowKind, columnTypes, logicalTypes);
         }
         return new MappedPaimonRow(page, position, rowKind, inputColumnTypes, inputLogicalTypes, inputChannels,
-                defaultValues);
+                defaultValues, logicalTypes);
     }
 
     private static boolean allColumnsPresent(int[] inputChannels)
@@ -546,6 +546,7 @@ public class PaimonPageSink
         private final PaimonRow inputRow;
         private final int[] inputChannels;
         private final Object[] defaultValues;
+        private final List<DataType> logicalTypes;
         private RowKind rowKind;
 
         MappedPaimonRow(
@@ -555,11 +556,13 @@ public class PaimonPageSink
                 List<Type> inputColumnTypes,
                 List<DataType> inputLogicalTypes,
                 int[] inputChannels,
-                Object[] defaultValues)
+                Object[] defaultValues,
+                List<DataType> logicalTypes)
         {
             this.inputRow = PaimonRow.fromTrustedTypeLists(page, position, rowKind, inputColumnTypes, inputLogicalTypes);
             this.inputChannels = inputChannels;
             this.defaultValues = defaultValues;
+            this.logicalTypes = logicalTypes;
             this.rowKind = rowKind;
         }
 
@@ -666,7 +669,8 @@ public class PaimonPageSink
         public byte[] getBinary(int pos)
         {
             int inputChannel = inputChannels[pos];
-            return inputChannel >= 0 ? inputRow.getBinary(inputChannel) : (byte[]) defaultValue(pos);
+            return inputChannel >= 0 ? inputRow.getBinary(inputChannel) :
+                    PaimonRow.normalizeBinaryValue((byte[]) defaultValue(pos), logicalTypes.get(pos));
         }
 
         @Override
