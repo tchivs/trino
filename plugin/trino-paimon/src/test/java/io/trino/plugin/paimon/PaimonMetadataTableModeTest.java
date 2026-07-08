@@ -6871,6 +6871,30 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testExternalPaimonTimestampPrecisionIsPreservedInMetadata()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "ts0", new org.apache.paimon.types.TimestampType(0)),
+                DataTypes.FIELD(1, "ts2", new org.apache.paimon.types.TimestampType(2)),
+                DataTypes.FIELD(2, "tz1", new org.apache.paimon.types.LocalZonedTimestampType(1)),
+                DataTypes.FIELD(3, "tz2", new org.apache.paimon.types.LocalZonedTimestampType(2)));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        ConnectorTableMetadata tableMetadata = metadata.getTableMetadata(SESSION, tableHandle);
+
+        assertThat(tableMetadata.getColumns())
+                .extracting(column -> column.getType().getDisplayName())
+                .containsExactly(
+                        "timestamp(0)",
+                        "timestamp(2)",
+                        "timestamp(1) with time zone",
+                        "timestamp(2) with time zone");
+    }
+
+    @Test
     public void testAddColumnRejectsNotNullBeforeCatalogAlter()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();

@@ -245,37 +245,13 @@ public class PaimonTypeUtils
         @Override
         public Type visit(TimestampType timestampType)
         {
-            int precision = timestampType.getPrecision();
-            if (precision <= 3) {
-                return io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
-            }
-            else if (precision <= 6) {
-                return io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
-            }
-            else if (precision <= 9) {
-                return io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
-            }
-            else {
-                return io.trino.spi.type.TimestampType.TIMESTAMP_PICOS;
-            }
+            return io.trino.spi.type.TimestampType.createTimestampType(timestampType.getPrecision());
         }
 
         @Override
         public Type visit(LocalZonedTimestampType localZonedTimestampType)
         {
-            int precision = localZonedTimestampType.getPrecision();
-            if (precision <= 3) {
-                return TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
-            }
-            else if (precision <= 6) {
-                return TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
-            }
-            else if (precision <= 9) {
-                return TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS;
-            }
-            else {
-                return TimestampWithTimeZoneType.TIMESTAMP_TZ_PICOS;
-            }
+            return TimestampWithTimeZoneType.createTimestampWithTimeZoneType(localZonedTimestampType.getPrecision());
         }
 
         @Override

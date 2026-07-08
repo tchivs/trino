@@ -116,14 +116,28 @@ public class PaimonTypeTest
         Type timestampType6 = PaimonTypeUtils.fromPaimonType(DataTypes.TIMESTAMP());
         assertThat(requireNonNull(timestampType6).getDisplayName()).isEqualTo("timestamp(6)");
 
-        Type timestampType0 = PaimonTypeUtils.fromPaimonType(new org.apache.paimon.types.TimestampType(3));
-        assertThat(requireNonNull(timestampType0).getDisplayName()).isEqualTo("timestamp(3)");
+        Type timestampType0 = PaimonTypeUtils.fromPaimonType(new org.apache.paimon.types.TimestampType(0));
+        assertThat(requireNonNull(timestampType0).getDisplayName()).isEqualTo("timestamp(0)");
+
+        Type timestampType2 = PaimonTypeUtils.fromPaimonType(new org.apache.paimon.types.TimestampType(2));
+        assertThat(requireNonNull(timestampType2).getDisplayName()).isEqualTo("timestamp(2)");
+
+        Type timestampType3 = PaimonTypeUtils.fromPaimonType(new org.apache.paimon.types.TimestampType(3));
+        assertThat(requireNonNull(timestampType3).getDisplayName()).isEqualTo("timestamp(3)");
 
         Type timestampType9 = PaimonTypeUtils.fromPaimonType(new org.apache.paimon.types.TimestampType(9));
         assertThat(requireNonNull(timestampType9).getDisplayName()).isEqualTo("timestamp(9)");
 
         Type localZonedTimestampType = PaimonTypeUtils.fromPaimonType(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE());
         assertThat(requireNonNull(localZonedTimestampType).getDisplayName()).isEqualTo("timestamp(6) with time zone");
+
+        Type localZonedTimestampType1 = PaimonTypeUtils.fromPaimonType(
+                DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(1));
+        assertThat(requireNonNull(localZonedTimestampType1).getDisplayName()).isEqualTo("timestamp(1) with time zone");
+
+        Type localZonedTimestampType2 = PaimonTypeUtils.fromPaimonType(
+                DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(2));
+        assertThat(requireNonNull(localZonedTimestampType2).getDisplayName()).isEqualTo("timestamp(2) with time zone");
 
         Type localZonedTimestampType9 = PaimonTypeUtils.fromPaimonType(
                 DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(9));
