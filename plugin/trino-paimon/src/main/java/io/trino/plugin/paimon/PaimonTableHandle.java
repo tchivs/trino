@@ -38,6 +38,7 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowType;
 
 import java.util.Collections;
@@ -579,7 +580,7 @@ public class PaimonTableHandle
             throw new TrinoException(COLUMN_NOT_FOUND,
                     String.format("Column '%s' does not exist in Paimon table '%s.%s'", field, schemaName, tableName));
         }
-        return PaimonColumnHandle.of(originFieldNames.get(index), readRowType.getTypeAt(index), typeManager);
+        return columnHandle(originFieldNames.get(index), readRowType.getTypeAt(index), typeManager);
     }
 
     private Table metadataTable(Catalog catalog, ConnectorSession session)
@@ -631,11 +632,31 @@ public class PaimonTableHandle
         requireNonNull(typeManager, "typeManager is null");
         return ColumnMetadata.builder()
                 .setName(column.name())
-                .setType(PaimonTypeUtils.fromPaimonType(column.type(), typeManager))
+                .setType(fromPaimonType(column.type(), typeManager))
                 .setNullable(column.type().isNullable())
                 .setComment(normalizeComment(column.description()))
                 .setHidden(isHiddenColumn(table, column.name()))
                 .build();
+    }
+
+    private static PaimonColumnHandle columnHandle(String columnName, DataType columnType, TypeManager typeManager)
+    {
+        try {
+            return PaimonColumnHandle.of(columnName, columnType, typeManager);
+        }
+        catch (UnsupportedOperationException e) {
+            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+        }
+    }
+
+    private static io.trino.spi.type.Type fromPaimonType(DataType type, TypeManager typeManager)
+    {
+        try {
+            return PaimonTypeUtils.fromPaimonType(type, typeManager);
+        }
+        catch (UnsupportedOperationException e) {
+            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+        }
     }
 
     private static boolean isHiddenColumn(Table table, String columnName)

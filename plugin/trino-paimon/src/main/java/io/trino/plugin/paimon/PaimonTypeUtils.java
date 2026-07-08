@@ -138,8 +138,13 @@ public class PaimonTypeUtils
         @Override
         public Type visit(CharType charType)
         {
-            return io.trino.spi.type.CharType
-                    .createCharType(Math.min(io.trino.spi.type.CharType.MAX_LENGTH, charType.getLength()));
+            int length = charType.getLength();
+            if (length > io.trino.spi.type.CharType.MAX_LENGTH) {
+                throw new UnsupportedOperationException(
+                        "Trino supports char length up to %s, got Paimon char(%s)"
+                                .formatted(io.trino.spi.type.CharType.MAX_LENGTH, length));
+            }
+            return io.trino.spi.type.CharType.createCharType(length);
         }
 
         @Override
@@ -325,14 +330,16 @@ public class PaimonTypeUtils
                 return DataTypes.VARIANT();
             }
             if (trinoType instanceof io.trino.spi.type.CharType) {
-                return DataTypes.CHAR(Math.min(io.trino.spi.type.CharType.MAX_LENGTH,
-                        ((io.trino.spi.type.CharType) trinoType).getLength()));
+                int length = ((io.trino.spi.type.CharType) trinoType).getLength();
+                checkPaimonStringLength("char", trinoType, length, CharType.MIN_LENGTH, CharType.MAX_LENGTH);
+                return DataTypes.CHAR(length);
             }
             else if (trinoType instanceof VarcharType) {
                 Optional<Integer> length = ((VarcharType) trinoType).getLength();
                 if (length.isPresent()) {
-                    return DataTypes.VARCHAR(Math.min(VarCharType.MAX_LENGTH,
-                            ((VarcharType) trinoType).getBoundedLength()));
+                    int boundedLength = ((VarcharType) trinoType).getBoundedLength();
+                    checkPaimonStringLength("varchar", trinoType, boundedLength, VarCharType.MIN_LENGTH, VarCharType.MAX_LENGTH);
+                    return DataTypes.VARCHAR(boundedLength);
                 }
                 return DataTypes.STRING();
             }
@@ -409,6 +416,15 @@ public class PaimonTypeUtils
                 throw new UnsupportedOperationException(
                         "Paimon supports %s precision up to %s, got %s"
                                 .formatted(typeName, maxPrecision, trinoType.getDisplayName()));
+            }
+        }
+
+        private static void checkPaimonStringLength(String typeName, Type trinoType, int length, int minLength, int maxLength)
+        {
+            if (length < minLength || length > maxLength) {
+                throw new UnsupportedOperationException(
+                        "Paimon supports %s length between %s and %s, got %s"
+                                .formatted(typeName, minLength, maxLength, trinoType.getDisplayName()));
             }
         }
     }

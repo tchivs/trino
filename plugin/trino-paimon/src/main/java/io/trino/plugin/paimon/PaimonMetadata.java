@@ -299,7 +299,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .map(column -> {
                     DataField field = createdTableField(createdFieldsByLowerName, column.getName(),
                             tableMetadata.getTable());
-                    return PaimonColumnHandle.of(field.name(), field.type(), typeManager);
+                    return toPaimonColumnHandle(field);
                 })
                 .collect(toList()))
                 .withCreateTableOperation(createTableOperation);
@@ -839,7 +839,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             throw e;
         }
         List<ColumnHandle> writeColumns = storeTable.rowType().getFields().stream()
-                .map(column -> PaimonColumnHandle.of(column.name(), column.type(), typeManager))
+                .map(this::toPaimonColumnHandle)
                 .collect(toList());
         return new PaimonMergeTableHandle(paimonTableHandle.withWriteColumns(writeColumns));
     }
@@ -1401,7 +1401,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
             if (columnStats != null) {
                 builder.setColumnStatistics(
-                        PaimonColumnHandle.of(field.name(), field.type(), typeManager),
+                        toPaimonColumnHandle(field),
                         toColumnStatistics(field.type(), columnStats, mergedRecordCount, typeManager));
             }
         }
@@ -1909,6 +1909,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
     private static DataType toPaimonType(ColumnMetadata column)
     {
         return toPaimonType(column.getType()).copy(column.isNullable());
+    }
+
+    private PaimonColumnHandle toPaimonColumnHandle(DataField field)
+    {
+        try {
+            return PaimonColumnHandle.of(field.name(), field.type(), typeManager);
+        }
+        catch (UnsupportedOperationException e) {
+            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+        }
     }
 
     private static DataType toPaimonType(Type type)

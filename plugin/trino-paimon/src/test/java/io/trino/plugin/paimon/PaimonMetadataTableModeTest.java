@@ -6831,6 +6831,46 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDdlRejectsStringLengthUnsupportedByPaimon()
+    {
+        ConnectorTableMetadata unsupportedCreateTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("code", io.trino.spi.type.CharType.createCharType(0))));
+        CapturingDdlCatalog createCatalog = new CapturingDdlCatalog();
+        PaimonMetadata createMetadata = new PaimonMetadata(createCatalog, TESTING_TYPE_MANAGER);
+
+        assertTrinoError(() -> createMetadata.createTable(SESSION, unsupportedCreateTable,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(), "Paimon supports char length between 1 and 2147483647, got char(0)");
+        assertThat(createCatalog.initialized).isFalse();
+        assertThat(createCatalog.createdSchema).isNull();
+
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        CapturingDdlCatalog addColumnCatalog = new CapturingDdlCatalog();
+        PaimonMetadata addColumnMetadata = new PaimonMetadata(addColumnCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> addColumnMetadata.addColumn(SESSION, tableHandle,
+                        new ColumnMetadata("code", io.trino.spi.type.VarcharType.createVarcharType(0))),
+                NOT_SUPPORTED.toErrorCode(), "Paimon supports varchar length between 1 and 2147483647, got varchar(0)");
+        assertThat(addColumnCatalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
+    public void testExternalPaimonCharLengthUnsupportedByTrinoFailsMetadataCleanly()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "too_long",
+                new org.apache.paimon.types.CharType(io.trino.spi.type.CharType.MAX_LENGTH + 1)));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.getTableMetadata(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(), "Trino supports char length up to 65536, got Paimon char(65537)");
+        assertTrinoError(() -> metadata.getColumnHandles(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(), "Trino supports char length up to 65536, got Paimon char(65537)");
+    }
+
+    @Test
     public void testAddColumnRejectsNotNullBeforeCatalogAlter()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();

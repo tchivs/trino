@@ -257,6 +257,30 @@ public class PaimonTypeTest
     }
 
     @Test
+    public void testToPaimonTypeRejectsUnsupportedStringLength()
+    {
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(CharType.createCharType(0)))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon supports char length between 1 and 2147483647, got char(0)");
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(VarcharType.createVarcharType(0)))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon supports varchar length between 1 and 2147483647, got varchar(0)");
+        assertThatThrownBy(() -> PaimonTypeUtils.toPaimonType(RowType.from(List.of(
+                RowType.field("code", CharType.createCharType(0))))))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Paimon supports char length between 1 and 2147483647, got char(0)");
+    }
+
+    @Test
+    public void testFromPaimonTypeRejectsCharLengthUnsupportedByTrino()
+    {
+        assertThatThrownBy(() -> PaimonTypeUtils.fromPaimonType(
+                new org.apache.paimon.types.CharType(CharType.MAX_LENGTH + 1)))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage("Trino supports char length up to 65536, got Paimon char(65537)");
+    }
+
+    @Test
     public void testNestedRowFieldIdsAreGloballyUnique()
     {
         Type rowType = RowType.from(List.of(
