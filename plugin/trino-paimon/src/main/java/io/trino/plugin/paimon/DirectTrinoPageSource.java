@@ -77,17 +77,17 @@ public class DirectTrinoPageSource
     @Override
     public long getCompletedBytes()
     {
-        return completedBytes + currentSource()
+        return saturatedAdd(completedBytes, currentSource()
                 .map(ConnectorPageSource::getCompletedBytes)
-                .orElse(0L);
+                .orElse(0L), "completed bytes");
     }
 
     @Override
     public long getReadTimeNanos()
     {
-        return completedReadTimeNanos + currentSource()
+        return saturatedAdd(completedReadTimeNanos, currentSource()
                 .map(ConnectorPageSource::getReadTimeNanos)
-                .orElse(0L);
+                .orElse(0L), "read time nanos");
     }
 
     @Override
@@ -220,7 +220,7 @@ public class DirectTrinoPageSource
     {
         long memoryUsage = memoryUsage(current);
         for (PageSourceHandle source : pageSourceQueue) {
-            memoryUsage += memoryUsage(source);
+            memoryUsage = saturatedAdd(memoryUsage, memoryUsage(source), "memory usage");
         }
         return memoryUsage;
     }
@@ -272,8 +272,8 @@ public class DirectTrinoPageSource
             return;
         }
         ConnectorPageSource pageSource = source.pageSource();
-        completedBytes += pageSource.getCompletedBytes();
-        completedReadTimeNanos += pageSource.getReadTimeNanos();
+        completedBytes = saturatedAdd(completedBytes, pageSource.getCompletedBytes(), "completed bytes");
+        completedReadTimeNanos = saturatedAdd(completedReadTimeNanos, pageSource.getReadTimeNanos(), "read time nanos");
         completedMetrics = completedMetrics.mergeWith(pageSource.getMetrics());
     }
 

@@ -2833,6 +2833,32 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectPageSourceCompletedBytesAndReadTimeSaturateAtLongMaxValue()
+    {
+        DelegatingStatePageSource first = new DelegatingStatePageSource(
+                new Page(1, bigintBlock(1)),
+                OptionalLong.of(0),
+                Long.MAX_VALUE - 1,
+                Long.MAX_VALUE - 2);
+        DelegatingStatePageSource second = new DelegatingStatePageSource(
+                new Page(1, bigintBlock(2)),
+                OptionalLong.of(0),
+                10L,
+                20L);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(first, second)),
+                OptionalLong.empty());
+
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(Long.MAX_VALUE - 1);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(Long.MAX_VALUE - 2);
+
+        assertThat(pageSource.getNextPage()).isNotNull();
+        assertThat(pageSource.getNextPage()).isNotNull();
+
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(Long.MAX_VALUE);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(Long.MAX_VALUE);
+    }
+
+    @Test
     void testDirectPageSourceReportsQueuedOpenedSourceMemoryUsage()
     {
         DelegatingStatePageSource first = new DelegatingStatePageSource(
@@ -2857,6 +2883,27 @@ public class PaimonPageSourceTest
 
         assertThat(pageSource.getNextPage()).isNotNull();
         assertThat(pageSource.getMemoryUsage()).isEqualTo(200L);
+    }
+
+    @Test
+    void testDirectPageSourceMemoryUsageSaturatesAtLongMaxValue()
+    {
+        DelegatingStatePageSource first = new DelegatingStatePageSource(
+                new Page(1, bigintBlock(1)),
+                OptionalLong.of(0),
+                10L,
+                20L,
+                Long.MAX_VALUE - 1);
+        DelegatingStatePageSource second = new DelegatingStatePageSource(
+                new Page(1, bigintBlock(2)),
+                OptionalLong.of(0),
+                30L,
+                40L,
+                100L);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(first, second)),
+                OptionalLong.empty());
+
+        assertThat(pageSource.getMemoryUsage()).isEqualTo(Long.MAX_VALUE);
     }
 
     @Test
