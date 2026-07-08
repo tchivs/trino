@@ -304,9 +304,6 @@ public class PaimonFileIO
             }
             return Optional.of(new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().getEpochSecond()));
         }
-        catch (IllegalArgumentException e) {
-            return Optional.empty();
-        }
         catch (IOException e) {
             if (isObjectNotFound(e)) {
                 return Optional.empty();
@@ -320,9 +317,6 @@ public class PaimonFileIO
     {
         try {
             return trinoFileSystem.newInputFile(location).exists();
-        }
-        catch (IllegalArgumentException e) {
-            return false;
         }
         catch (IOException e) {
             if (isObjectNotFound(e)) {

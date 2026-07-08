@@ -25,6 +25,7 @@ import io.trino.filesystem.memory.MemoryFileSystem;
 import io.trino.memory.context.AggregatedMemoryContext;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.TwoPhaseOutputStream;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -167,6 +168,26 @@ public class TestPaimonFileIO
         assertThatThrownBy(() -> fileIO.checkOrMkdirs(path))
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("simulated S3 HEAD outage");
+    }
+
+    @Test
+    public void testObjectStoreIllegalFileProbeFailurePropagates()
+            throws IOException
+    {
+        Path path = new Path("memory:///warehouse/minio_smoke.db/orders/schema-0");
+        InvalidProbeFileSystem fileSystem = new InvalidProbeFileSystem(path);
+        PaimonFileIO fileIO = objectStoreFileIO(fileSystem);
+        fileSystem.newOutputFile(Location.of(path.toString())).createOrOverwrite("schema".getBytes(StandardCharsets.UTF_8));
+
+        assertInvalidProbeFailure(() -> fileIO.exists(path), path);
+        assertInvalidProbeFailure(() -> fileIO.getFileStatus(path), path);
+        assertInvalidProbeFailure(() -> fileIO.listStatus(path), path);
+        assertInvalidProbeFailure(() -> fileIO.listDirectories(path), path);
+        assertInvalidProbeFailure(() -> fileIO.checkOrMkdirs(path), path);
+        assertInvalidProbeFailure(() -> fileIO.delete(path, false), path);
+        assertInvalidProbeFailure(() -> fileIO.rename(path, new Path("memory:///warehouse/minio_smoke.db/orders/schema-1")), path);
+        assertInvalidProbeFailure(() -> fileIO.newOutputStream(path, false), path);
+        assertInvalidProbeFailure(() -> fileIO.newTwoPhaseOutputStream(path, false), path);
     }
 
     @Test
@@ -733,6 +754,13 @@ public class TestPaimonFileIO
         return new PaimonFileIO(new LocalFileSystem(tempDirectory), new Path("local:///warehouse"));
     }
 
+    private static void assertInvalidProbeFailure(ThrowingCallable callable, Path path)
+    {
+        assertThatThrownBy(callable)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("invalid file probe for " + path);
+    }
+
     private static class NoRenameFileSystem
             implements TrinoFileSystem
     {
@@ -1115,6 +1143,78 @@ public class TestPaimonFileIO
         public TrinoInputFile newInputFile(Location location)
         {
             return new MissingObjectHeadInputFile(super.newInputFile(location));
+        }
+    }
+
+    private static class InvalidProbeFileSystem
+            extends NoRenameFileSystem
+    {
+        private final Path failedPath;
+
+        private InvalidProbeFileSystem(Path failedPath)
+        {
+            this.failedPath = failedPath;
+        }
+
+        @Override
+        public TrinoInputFile newInputFile(Location location)
+        {
+            TrinoInputFile delegate = super.newInputFile(location);
+            if (location.toString().equals(failedPath.toString())) {
+                return new InvalidProbeInputFile(delegate);
+            }
+            return delegate;
+        }
+    }
+
+    private static class InvalidProbeInputFile
+            implements TrinoInputFile
+    {
+        private final TrinoInputFile delegate;
+
+        private InvalidProbeInputFile(TrinoInputFile delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public TrinoInput newInput()
+                throws IOException
+        {
+            return delegate.newInput();
+        }
+
+        @Override
+        public TrinoInputStream newStream()
+                throws IOException
+        {
+            return delegate.newStream();
+        }
+
+        @Override
+        public long length()
+                throws IOException
+        {
+            return delegate.length();
+        }
+
+        @Override
+        public Instant lastModified()
+                throws IOException
+        {
+            return delegate.lastModified();
+        }
+
+        @Override
+        public boolean exists()
+        {
+            throw new IllegalArgumentException("invalid file probe for " + delegate.location());
+        }
+
+        @Override
+        public Location location()
+        {
+            return delegate.location();
         }
     }
 
