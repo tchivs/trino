@@ -1103,6 +1103,72 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testPageSinkRunsPaimonOperationsWithPluginClassLoader()
+            throws Exception
+    {
+        ClassLoader callerClassLoader = new ClassLoader(null) {};
+        ClassLoader previousClassLoader = Thread.currentThread().getContextClassLoader();
+        ClassLoader pluginClassLoader = PaimonPageSink.class.getClassLoader();
+        AtomicReference<ClassLoader> writeClassLoader = new AtomicReference<>();
+        AtomicReference<ClassLoader> prepareCommitClassLoader = new AtomicReference<>();
+        AtomicReference<ClassLoader> writerCloseClassLoader = new AtomicReference<>();
+        AtomicReference<ClassLoader> ioManagerCloseClassLoader = new AtomicReference<>();
+        TestingIoManager ioManager = classLoaderCheckingIoManager(ioManagerCloseClassLoader);
+        PaimonPageSink pageSink = new PaimonPageSink(
+                classLoaderCheckingWriter(writeClassLoader, prepareCommitClassLoader, writerCloseClassLoader),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()),
+                new int[] {0},
+                new Object[] {null},
+                null,
+                null,
+                ioManager);
+
+        try {
+            Thread.currentThread().setContextClassLoader(callerClassLoader);
+
+            pageSink.appendPage(new io.trino.spi.Page(1, writeNativeValue(INTEGER, 1L)));
+            assertThat(Thread.currentThread().getContextClassLoader()).isSameAs(callerClassLoader);
+
+            assertThat(pageSink.finish().join()).isEmpty();
+            assertThat(Thread.currentThread().getContextClassLoader()).isSameAs(callerClassLoader);
+        }
+        finally {
+            Thread.currentThread().setContextClassLoader(previousClassLoader);
+        }
+
+        assertThat(writeClassLoader.get()).isSameAs(pluginClassLoader);
+        assertThat(prepareCommitClassLoader.get()).isSameAs(pluginClassLoader);
+        assertThat(writerCloseClassLoader.get()).isSameAs(pluginClassLoader);
+        assertThat(ioManagerCloseClassLoader.get()).isSameAs(pluginClassLoader);
+
+        AtomicReference<ClassLoader> abortWriterCloseClassLoader = new AtomicReference<>();
+        AtomicReference<ClassLoader> abortIoManagerCloseClassLoader = new AtomicReference<>();
+        PaimonPageSink abortSink = new PaimonPageSink(
+                classLoaderCheckingWriter(new AtomicReference<>(), new AtomicReference<>(), abortWriterCloseClassLoader),
+                List.of(INTEGER),
+                List.of(DataTypes.INT()),
+                new int[] {0},
+                new Object[] {null},
+                null,
+                null,
+                classLoaderCheckingIoManager(abortIoManagerCloseClassLoader));
+
+        try {
+            Thread.currentThread().setContextClassLoader(callerClassLoader);
+
+            abortSink.abort();
+            assertThat(Thread.currentThread().getContextClassLoader()).isSameAs(callerClassLoader);
+        }
+        finally {
+            Thread.currentThread().setContextClassLoader(previousClassLoader);
+        }
+
+        assertThat(abortWriterCloseClassLoader.get()).isSameAs(pluginClassLoader);
+        assertThat(abortIoManagerCloseClassLoader.get()).isSameAs(pluginClassLoader);
+    }
+
+    @Test
     public void testPageSinkRejectsWritesAfterAbort()
     {
         PaimonPageSink pageSink = new PaimonPageSink(writer(), List.of(INTEGER), List.of(DataTypes.INT()));
@@ -1862,6 +1928,20 @@ public class PaimonPageSinkProviderTest
         }
     }
 
+    private static TestingIoManager classLoaderCheckingIoManager(AtomicReference<ClassLoader> closeClassLoader)
+    {
+        return new TestingIoManager()
+        {
+            @Override
+            public void close()
+                    throws Exception
+            {
+                closeClassLoader.set(Thread.currentThread().getContextClassLoader());
+                super.close();
+            }
+        };
+    }
+
     private static class TestingCatalog
             extends io.trino.plugin.paimon.catalog.PaimonCatalog
     {
@@ -1919,6 +1999,32 @@ public class PaimonPageSinkProviderTest
     private static org.apache.paimon.table.sink.BatchTableWrite writer()
     {
         return writer(List.of(), null, null, null);
+    }
+
+    private static org.apache.paimon.table.sink.BatchTableWrite classLoaderCheckingWriter(
+            AtomicReference<ClassLoader> writeClassLoader,
+            AtomicReference<ClassLoader> prepareCommitClassLoader,
+            AtomicReference<ClassLoader> closeClassLoader)
+    {
+        return (org.apache.paimon.table.sink.BatchTableWrite) Proxy.newProxyInstance(
+                PaimonPageSinkProviderTest.class.getClassLoader(),
+                new Class<?>[] {org.apache.paimon.table.sink.BatchTableWrite.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "write" -> {
+                        writeClassLoader.set(Thread.currentThread().getContextClassLoader());
+                        yield null;
+                    }
+                    case "prepareCommit" -> {
+                        prepareCommitClassLoader.set(Thread.currentThread().getContextClassLoader());
+                        yield List.of();
+                    }
+                    case "close" -> {
+                        closeClassLoader.set(Thread.currentThread().getContextClassLoader());
+                        yield null;
+                    }
+                    case "toString" -> "classloader-checking-writer";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
     }
 
     private static org.apache.paimon.table.sink.BatchTableWrite writer(AtomicReference<MemoryPoolFactory> writeBufferPool)

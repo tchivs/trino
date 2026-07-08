@@ -55,6 +55,7 @@ import java.util.function.Predicate;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_CLOSE_ERROR;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_DATA_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -241,6 +242,14 @@ public class PaimonPageSink
 
     public void writePage(Page page, RowKind rowKind)
     {
+        runWithContextClassLoader(() -> {
+            writePageInternal(page, rowKind);
+            return null;
+        }, PaimonPageSink.class.getClassLoader());
+    }
+
+    private void writePageInternal(Page page, RowKind rowKind)
+    {
         checkState(!closed.get(), "Paimon page sink is already closed");
         requireNonNull(page, "page is null");
         requireNonNull(rowKind, "rowKind is null");
@@ -292,6 +301,11 @@ public class PaimonPageSink
     @Override
     public CompletableFuture<Collection<Slice>> finish()
     {
+        return runWithContextClassLoader(this::finishInternal, PaimonPageSink.class.getClassLoader());
+    }
+
+    private CompletableFuture<Collection<Slice>> finishInternal()
+    {
         checkState(!closed.get(), "Paimon page sink is already closed");
         Collection<Slice> commitTasks = new ArrayList<>();
         RuntimeException failure = null;
@@ -318,6 +332,14 @@ public class PaimonPageSink
 
     @Override
     public void abort()
+    {
+        runWithContextClassLoader(() -> {
+            abortInternal();
+            return null;
+        }, PaimonPageSink.class.getClassLoader());
+    }
+
+    private void abortInternal()
     {
         RuntimeException failure = close(null);
         if (failure != null) {
