@@ -1674,7 +1674,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
             SchemaManager.checkAlterTableOption(existingOptions, key, existingOptions.get(key), value);
         }
         catch (UnsupportedOperationException e) {
-            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+            throw new TrinoException(NOT_SUPPORTED,
+                    unsupportedOperationMessageOrFallback(
+                            "Paimon table option '%s' update is not supported".formatted(key), e),
+                    e);
         }
     }
 
@@ -1684,7 +1687,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
             SchemaManager.checkResetTableOption(existingOptions, key);
         }
         catch (UnsupportedOperationException e) {
-            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+            throw new TrinoException(NOT_SUPPORTED,
+                    unsupportedOperationMessageOrFallback(
+                            "Paimon table option '%s' reset is not supported".formatted(key), e),
+                    e);
         }
     }
 
@@ -1862,7 +1868,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         catch (UnsupportedOperationException e) {
             throw new TrinoException(NOT_SUPPORTED,
-                    format("Paimon create or replace table '%s' is not supported: %s", table, e.getMessage()), e);
+                    unsupportedOperationMessageWithDetail(
+                            format("Paimon create or replace table '%s' is not supported", table), e),
+                    e);
         }
         catch (Exception e) {
             throw paimonMetadataException(format("Failed to create Paimon table '%s'", table), e);
@@ -1977,7 +1985,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return PaimonColumnHandle.of(field.name(), field.type(), typeManager);
         }
         catch (UnsupportedOperationException e) {
-            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+            throw new TrinoException(NOT_SUPPORTED,
+                    unsupportedOperationMessageOrFallback(
+                            "Unsupported Paimon column '%s' with type %s: %s"
+                                    .formatted(field.name(), paimonDataTypeName(field.type()), unsupportedOperationMessage(e)),
+                            e),
+                    e);
         }
     }
 
@@ -1987,8 +2000,81 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return PaimonTypeUtils.toPaimonType(requireNonNull(type, "type is null"));
         }
         catch (UnsupportedOperationException e) {
-            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+            throw new TrinoException(NOT_SUPPORTED,
+                    unsupportedOperationMessageOrFallback(
+                            "Unsupported Trino type %s: %s".formatted(trinoTypeName(type), unsupportedOperationMessage(e)),
+                            e),
+                    e);
         }
+    }
+
+    private static String unsupportedOperationMessageWithDetail(String prefix, UnsupportedOperationException exception)
+    {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            return prefix;
+        }
+        return prefix + ": " + message;
+    }
+
+    private static String unsupportedOperationMessageOrFallback(String fallback, UnsupportedOperationException exception)
+    {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            return fallback;
+        }
+        return message;
+    }
+
+    private static String unsupportedOperationMessage(UnsupportedOperationException exception)
+    {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            return exception.getClass().getSimpleName();
+        }
+        return message;
+    }
+
+    private static String trinoTypeName(Type type)
+    {
+        try {
+            String displayName = type.getDisplayName();
+            if (displayName != null && !displayName.isBlank()) {
+                return displayName;
+            }
+        }
+        catch (RuntimeException ignored) {
+            // Fall through to toString/class name while formatting an unsupported type failure.
+        }
+        return objectName(type);
+    }
+
+    private static String paimonDataTypeName(DataType type)
+    {
+        try {
+            String name = type.toString();
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+        }
+        catch (RuntimeException ignored) {
+            // Fall through to the implementation class while formatting an unsupported type failure.
+        }
+        return type.getClass().getName();
+    }
+
+    private static String objectName(Object value)
+    {
+        try {
+            String name = value.toString();
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+        }
+        catch (RuntimeException ignored) {
+            // Fall through to the implementation class while formatting an unsupported value.
+        }
+        return value.getClass().getName();
     }
 
     private static RuntimeException paimonAlterTableException(SchemaTableName tableName, Exception exception)

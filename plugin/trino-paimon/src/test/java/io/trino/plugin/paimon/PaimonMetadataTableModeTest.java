@@ -6934,6 +6934,67 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDdlUnsupportedTrinoTypeWithoutMessageReportsStableNotSupported()
+    {
+        ConnectorTableMetadata unsupportedCreateTable = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("payload", unsupportedTrinoTypeWithoutMessage())));
+
+        CapturingDdlCatalog createCatalog = new CapturingDdlCatalog();
+        PaimonMetadata createMetadata = new PaimonMetadata(createCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> createMetadata.createTable(SESSION, unsupportedCreateTable,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(), "Unsupported Trino type UNSUPPORTED_TEST_TYPE: UnsupportedOperationException");
+        assertThat(createCatalog.initialized).isFalse();
+        assertThat(createCatalog.createdSchema).isNull();
+
+        CapturingDdlCatalog beginCreateCatalog = new CapturingDdlCatalog();
+        PaimonMetadata beginCreateMetadata = new PaimonMetadata(beginCreateCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> beginCreateMetadata.beginCreateTable(SESSION, unsupportedCreateTable,
+                        Optional.empty(), RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(), "Unsupported Trino type UNSUPPORTED_TEST_TYPE: UnsupportedOperationException");
+        assertThat(beginCreateCatalog.initialized).isFalse();
+        assertThat(beginCreateCatalog.createdSchema).isNull();
+
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        CapturingDdlCatalog addColumnCatalog = new CapturingDdlCatalog();
+        PaimonMetadata addColumnMetadata = new PaimonMetadata(addColumnCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> addColumnMetadata.addColumn(SESSION, tableHandle,
+                        new ColumnMetadata("payload", unsupportedTrinoTypeWithoutMessage())),
+                NOT_SUPPORTED.toErrorCode(), "Unsupported Trino type UNSUPPORTED_TEST_TYPE: UnsupportedOperationException");
+        assertThat(addColumnCatalog.alterCalls).isEqualTo(0);
+
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
+        CapturingDdlCatalog setColumnCatalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata setColumnMetadata = new PaimonMetadata(setColumnCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> setColumnMetadata.setColumnType(SESSION, tableHandle,
+                        PaimonColumnHandle.of("id", DataTypes.INT()),
+                        unsupportedTrinoTypeWithoutMessage()),
+                NOT_SUPPORTED.toErrorCode(), "Unsupported Trino type UNSUPPORTED_TEST_TYPE: UnsupportedOperationException");
+        assertThat(setColumnCatalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
+    public void testExternalPaimonUnsupportedTypeWithoutMessageFailsMetadataCleanly()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "payload", unsupportedPaimonDataTypeWithoutMessage()));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of("id"), List.of("id"), "id"));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.getTableMetadata(SESSION, tableHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported Paimon type UNSUPPORTED_TEST_TYPE: UnsupportedOperationException");
+        assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported Paimon column 'payload' with type UNSUPPORTED_TEST_TYPE: UnsupportedOperationException");
+    }
+
+    @Test
     public void testExternalPaimonCharLengthUnsupportedByTrinoFailsMetadataCleanly()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "too_long",
@@ -7287,6 +7348,50 @@ public class PaimonMetadataTableModeTest
                     assertThat(exception.getErrorCode()).isEqualTo(errorCode);
                     assertThat(exception).hasMessage(message);
                 });
+    }
+
+    private static Type unsupportedTrinoTypeWithoutMessage()
+    {
+        return (Type) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {Type.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getBaseName", "getDisplayName" -> throw new UnsupportedOperationException();
+                    case "toString" -> "UNSUPPORTED_TEST_TYPE";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> throw new UnsupportedOperationException("Unexpected Type method: " + method.getName());
+                });
+    }
+
+    private static org.apache.paimon.types.DataType unsupportedPaimonDataTypeWithoutMessage()
+    {
+        return new org.apache.paimon.types.DataType(true, DataTypeRoot.VARIANT)
+        {
+            @Override
+            public int defaultSize()
+            {
+                return 0;
+            }
+
+            @Override
+            public org.apache.paimon.types.DataType copy(boolean isNullable)
+            {
+                return this;
+            }
+
+            @Override
+            public String asSQLString()
+            {
+                return "UNSUPPORTED_TEST_TYPE";
+            }
+
+            @Override
+            public <R> R accept(org.apache.paimon.types.DataTypeVisitor<R> visitor)
+            {
+                throw new UnsupportedOperationException();
+            }
+        };
     }
 
     private static void assertSystemTableWriteRejected(TestingPaimonCatalog catalog, Runnable call, String operation)

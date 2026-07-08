@@ -88,7 +88,16 @@ public final class PaimonTableSupport
         }
         catch (UnsupportedOperationException e) {
             throw new TrinoException(NOT_SUPPORTED,
-                    "Paimon " + operation + " is not supported for this table: " + e.getMessage(), e);
+                    unsupportedOperationMessageWithDetail("Paimon " + operation + " is not supported for this table", e), e);
         }
+    }
+
+    private static String unsupportedOperationMessageWithDetail(String prefix, UnsupportedOperationException exception)
+    {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            return prefix;
+        }
+        return prefix + ": " + message;
     }
 }
