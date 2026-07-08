@@ -441,7 +441,8 @@ public class TrinoSplitTest
                 Constraint.alwaysTrue()))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon table read uses features which are not supported by the Trino connector");
+                    assertThat(exception).hasMessage(
+                            "Paimon table read uses features which are not supported by the Trino connector: unsupported scan mode");
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
                             .hasMessage("unsupported scan mode");
                 });
@@ -464,7 +465,8 @@ public class TrinoSplitTest
         assertThatThrownBy(() -> splitManager.getSplits(null, SESSION, tableChangesHandle))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon system.table_changes uses features which are not supported by the Trino connector");
+                    assertThat(exception).hasMessage(
+                            "Paimon system.table_changes uses features which are not supported by the Trino connector: unsupported scan mode");
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
                             .hasMessage("unsupported scan mode");
                 });
@@ -487,7 +489,8 @@ public class TrinoSplitTest
         assertThatThrownBy(() -> splitManager.getSplits(null, SESSION, tableChangesHandle))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon system.table_changes uses features which are not supported by the Trino connector");
+                    assertThat(exception).hasMessage(
+                            "Paimon system.table_changes uses features which are not supported by the Trino connector: unsupported scan mode");
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
                             .hasMessage("unsupported scan mode");
                 });
@@ -507,7 +510,7 @@ public class TrinoSplitTest
                 Constraint.alwaysTrue()))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to plan Paimon splits");
+                    assertThat(exception).hasMessage("Failed to plan Paimon splits: split planning failed");
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("split planning failed");
                 });
@@ -530,7 +533,7 @@ public class TrinoSplitTest
         assertThatThrownBy(() -> splitManager.getSplits(null, SESSION, tableChangesHandle))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits");
+                    assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits: table_changes planning failed");
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("table_changes planning failed");
                 });
@@ -553,7 +556,8 @@ public class TrinoSplitTest
         assertThatThrownBy(() -> splitManager.getSplits(null, SESSION, tableChangesHandle))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits");
+                    assertThat(exception).hasMessage(
+                            "Failed to plan Paimon table_changes splits: auto-tag table_changes planning failed");
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("auto-tag table_changes planning failed");
                 });

@@ -358,7 +358,8 @@ public class PaimonSplitManagerTest
         TrinoException exception = PaimonSplitManager.unsupportedReadOperation(handle, cause);
 
         assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-        assertThat(exception).hasMessageContaining("Paimon table read uses features which are not supported by the Trino connector");
+        assertThat(exception).hasMessage(
+                "Paimon table read uses features which are not supported by the Trino connector: unsupported");
     }
 
     @Test
@@ -371,7 +372,21 @@ public class PaimonSplitManagerTest
         TrinoException exception = PaimonSplitManager.unsupportedReadOperation(handle, cause);
 
         assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-        assertThat(exception).hasMessageContaining("Paimon system.table_changes uses features which are not supported by the Trino connector");
+        assertThat(exception).hasMessage(
+                "Paimon system.table_changes uses features which are not supported by the Trino connector: unsupported");
+    }
+
+    @Test
+    public void testUnsupportedReadOperationUsesExceptionTypeWhenMessageIsMissing()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("schema", "table", Collections.emptyMap());
+        UnsupportedOperationException cause = new UnsupportedOperationException();
+
+        TrinoException exception = PaimonSplitManager.unsupportedReadOperation(handle, cause);
+
+        assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+        assertThat(exception).hasMessage(
+                "Paimon table read uses features which are not supported by the Trino connector: UnsupportedOperationException");
     }
 
     @Test
@@ -385,7 +400,7 @@ public class PaimonSplitManagerTest
 
         assertThat(exception).isInstanceOf(TrinoException.class);
         assertThat(((TrinoException) exception).getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-        assertThat(exception).hasMessageContaining("Failed to plan Paimon splits");
+        assertThat(exception).hasMessage("Failed to plan Paimon splits: planning failed");
         assertThat(exception.getCause()).isSameAs(cause);
     }
 
@@ -401,7 +416,7 @@ public class PaimonSplitManagerTest
 
         assertThat(exception).isInstanceOf(TrinoException.class);
         assertThat(((TrinoException) exception).getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-        assertThat(exception).hasMessageContaining("Failed to plan Paimon table_changes splits");
+        assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits: planning failed");
         assertThat(exception.getCause()).isSameAs(cause);
     }
 
@@ -415,7 +430,7 @@ public class PaimonSplitManagerTest
 
         assertThat(exception).isInstanceOfSatisfying(TrinoException.class, trinoException -> {
             assertThat(trinoException.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-            assertThat(trinoException).hasMessage("Failed to plan Paimon splits");
+            assertThat(trinoException).hasMessage("Failed to plan Paimon splits: Index 1 out of bounds for length 1");
             assertThat(trinoException.getCause()).isSameAs(cause);
         });
     }
@@ -432,7 +447,7 @@ public class PaimonSplitManagerTest
 
         assertThat(exception).isInstanceOfSatisfying(TrinoException.class, trinoException -> {
             assertThat(trinoException.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-            assertThat(trinoException).hasMessage("Failed to plan Paimon splits");
+            assertThat(trinoException).hasMessage("Failed to plan Paimon splits: manifest read failed");
             assertThat(trinoException.getCause()).isSameAs(ioException);
         });
     }
@@ -448,7 +463,8 @@ public class PaimonSplitManagerTest
 
         assertThat(exception).isInstanceOfSatisfying(TrinoException.class, trinoException -> {
             assertThat(trinoException.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-            assertThat(trinoException).hasMessage("Paimon table read uses features which are not supported by the Trino connector");
+            assertThat(trinoException).hasMessage(
+                    "Paimon table read uses features which are not supported by the Trino connector: unsupported scan");
             assertThat(trinoException.getCause()).isSameAs(unsupported);
         });
     }

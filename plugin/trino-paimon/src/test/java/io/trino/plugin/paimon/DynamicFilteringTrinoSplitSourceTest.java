@@ -277,7 +277,8 @@ public class DynamicFilteringTrinoSplitSourceTest
         assertThatThrownBy(() -> splitSource.getNextBatch(100))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon table read uses features which are not supported by the Trino connector");
+                    assertThat(exception).hasMessage(
+                            "Paimon table read uses features which are not supported by the Trino connector: unsupported scan mode");
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
                             .hasMessage("unsupported scan mode");
                 });
@@ -306,7 +307,8 @@ public class DynamicFilteringTrinoSplitSourceTest
         assertThatThrownBy(() -> splitSource.getNextBatch(100))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon system.table_changes uses features which are not supported by the Trino connector");
+                    assertThat(exception).hasMessage(
+                            "Paimon system.table_changes uses features which are not supported by the Trino connector: unsupported scan mode");
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
                             .hasMessage("unsupported scan mode");
                 });
@@ -335,7 +337,8 @@ public class DynamicFilteringTrinoSplitSourceTest
         assertThatThrownBy(() -> splitSource.getNextBatch(100))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessage("Paimon system.table_changes uses features which are not supported by the Trino connector");
+                    assertThat(exception).hasMessage(
+                            "Paimon system.table_changes uses features which are not supported by the Trino connector: unsupported scan mode");
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
                             .hasMessage("unsupported scan mode");
                 });
@@ -364,7 +367,7 @@ public class DynamicFilteringTrinoSplitSourceTest
         assertThatThrownBy(() -> splitSource.getNextBatch(100))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to plan Paimon splits");
+                    assertThat(exception).hasMessage("Failed to plan Paimon splits: dynamic split planning failed");
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("dynamic split planning failed");
                 });
@@ -393,7 +396,7 @@ public class DynamicFilteringTrinoSplitSourceTest
         assertThatThrownBy(() -> splitSource.getNextBatch(100))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to plan Paimon splits");
+                    assertThat(exception).hasMessage("Failed to plan Paimon splits: Index 1 out of bounds for length 1");
                     assertThat(exception.getCause()).isInstanceOf(IndexOutOfBoundsException.class)
                             .hasMessage("Index 1 out of bounds for length 1");
                 });
@@ -422,7 +425,8 @@ public class DynamicFilteringTrinoSplitSourceTest
         assertThatThrownBy(() -> splitSource.getNextBatch(100))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits");
+                    assertThat(exception).hasMessage(
+                            "Failed to plan Paimon table_changes splits: dynamic table_changes planning failed");
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("dynamic table_changes planning failed");
                 });
@@ -451,7 +455,8 @@ public class DynamicFilteringTrinoSplitSourceTest
         assertThatThrownBy(() -> splitSource.getNextBatch(100))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
-                    assertThat(exception).hasMessage("Failed to plan Paimon table_changes splits");
+                    assertThat(exception).hasMessage(
+                            "Failed to plan Paimon table_changes splits: dynamic auto-tag table_changes planning failed");
                     assertThat(exception.getCause()).isInstanceOf(IOException.class)
                             .hasMessage("dynamic auto-tag table_changes planning failed");
                 });

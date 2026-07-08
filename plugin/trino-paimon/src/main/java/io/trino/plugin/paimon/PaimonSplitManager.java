@@ -195,7 +195,7 @@ public class PaimonSplitManager
         String message = tableHandle.hasIncrementalReadMode()
                 ? "Paimon system.table_changes uses features which are not supported by the Trino connector"
                 : "Paimon table read uses features which are not supported by the Trino connector";
-        return new TrinoException(NOT_SUPPORTED, message, cause);
+        return new TrinoException(NOT_SUPPORTED, messageWithCauseDetail(message, cause), cause);
     }
 
     static RuntimeException splitPlanningException(PaimonTableHandle tableHandle, Exception cause)
@@ -215,12 +215,25 @@ public class PaimonSplitManager
             return unsupportedReadOperation(tableHandle, unsupportedOperationException);
         }
         if (planningFailure instanceof UncheckedIOException uncheckedIOException) {
-            return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, uncheckedIOException.getCause());
+            IOException ioException = uncheckedIOException.getCause();
+            return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, messageWithCauseDetail(message, ioException), ioException);
         }
         if (planningFailure instanceof IOException ioException) {
-            return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, ioException);
+            return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, messageWithCauseDetail(message, ioException), ioException);
         }
-        return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, message, cause);
+        return new TrinoException(PAIMON_CANNOT_OPEN_SPLIT, messageWithCauseDetail(message, cause), cause);
+    }
+
+    private static String messageWithCauseDetail(String message, Throwable cause)
+    {
+        requireNonNull(message, "message is null");
+        requireNonNull(cause, "cause is null");
+
+        String detail = cause.getMessage();
+        if (detail == null || detail.isBlank()) {
+            detail = cause.getClass().getSimpleName();
+        }
+        return message + ": " + detail;
     }
 
     private static Throwable firstRecognizedSplitPlanningFailure(Throwable cause)
