@@ -896,6 +896,28 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectReaderDomainsReusePrecomputedDomains()
+    {
+        Domain idDomain = Domain.singleValue(BIGINT, 2L);
+        List<Domain> orderedFilterDomains = Arrays.asList(idDomain, null);
+        List<Domain> noPredicateDomains = Arrays.asList(null, null);
+
+        assertThat(PaimonPageSourceProvider.directReaderDomains(orderedFilterDomains, noPredicateDomains, false))
+                .isSameAs(orderedFilterDomains);
+        assertThat(PaimonPageSourceProvider.directReaderDomains(orderedFilterDomains, noPredicateDomains, true))
+                .isSameAs(noPredicateDomains);
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderDomains(orderedFilterDomains, List.of(), true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("noPredicateDomains count (0) must match orderedFilterDomains count (2)");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderDomains(null, noPredicateDomains, true))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("orderedFilterDomains is null");
+        assertThatThrownBy(() -> PaimonPageSourceProvider.directReaderDomains(orderedFilterDomains, null, true))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("noPredicateDomains is null");
+    }
+
+    @Test
     void testDeletionVectorFiltersRequirePaimonReaderFallback()
     {
         PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());

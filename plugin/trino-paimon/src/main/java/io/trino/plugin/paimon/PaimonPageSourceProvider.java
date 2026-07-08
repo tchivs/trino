@@ -365,6 +365,7 @@ public class PaimonPageSourceProvider
                 RowType rowType = directReadTableContext.rowType();
                 boolean readIndex = fileStoreTable.coreOptions().fileIndexReadEnabled();
                 List<Domain> filterDomains = orderDomains(projectedFields, filter);
+                List<Domain> noPredicateDomains = Collections.nCopies(projectedFields.size(), null);
 
                 Optional<List<DeletionFile>> deletionFiles = paimonSplit.deletionFiles();
                 Optional<List<IndexFile>> indexFiles = readIndex ? paimonSplit.indexFiles() : Optional.empty();
@@ -426,8 +427,8 @@ public class PaimonPageSourceProvider
                         Supplier<ConnectorPageSource> sourceSupplier = () -> {
                             ConnectorPageSource source = createDataPageSource(rawFile.format(),
                                     rawFileInputFile(fileSystem, rawFile),
-                                    fileSchemaPlan.dataFileColumns(), type, directReaderDomains(projectedFields, filter,
-                                            deletionFile.isPresent()));
+                                    fileSchemaPlan.dataFileColumns(), type,
+                                    directReaderDomains(filterDomains, noPredicateDomains, deletionFile.isPresent()));
 
                             return wrapWithDeletionVector(source, fileStoreTable, deletionFile);
                         };
@@ -1056,10 +1057,21 @@ public class PaimonPageSourceProvider
         if (filter.isNone()) {
             throw new IllegalStateException("Direct raw-file reads must not receive TupleDomain.none()");
         }
-        if (hasDeletionVectors) {
-            return projectedFields.stream().map(field -> (Domain) null).collect(Collectors.toList());
+        List<Domain> orderedFilterDomains = orderDomains(projectedFields, filter);
+        return directReaderDomains(orderedFilterDomains, Collections.nCopies(orderedFilterDomains.size(), null),
+                hasDeletionVectors);
+    }
+
+    static List<Domain> directReaderDomains(List<Domain> orderedFilterDomains, List<Domain> noPredicateDomains,
+            boolean hasDeletionVectors)
+    {
+        requireNonNull(orderedFilterDomains, "orderedFilterDomains is null");
+        requireNonNull(noPredicateDomains, "noPredicateDomains is null");
+        if (orderedFilterDomains.size() != noPredicateDomains.size()) {
+            throw new IllegalArgumentException("noPredicateDomains count (%s) must match orderedFilterDomains count (%s)"
+                    .formatted(noPredicateDomains.size(), orderedFilterDomains.size()));
         }
-        return orderDomains(projectedFields, filter);
+        return hasDeletionVectors ? noPredicateDomains : orderedFilterDomains;
     }
 
     static Optional<DeletionFile> deletionFileAt(Optional<List<DeletionFile>> deletionFiles, int fileIndex)
