@@ -44,27 +44,32 @@ public class PaimonMetadataDeleteMergeSink
     public void storeMergedRows(Page page)
     {
         requireNonNull(page, "page is null");
-        validateInputPage(page);
-        if (page.getPositionCount() == 0) {
-            return;
-        }
+        try {
+            validateInputPage(page);
+            if (page.getPositionCount() == 0) {
+                return;
+            }
 
-        int operationChannel = page.getChannelCount() - 2;
-        for (int position = 0; position < page.getPositionCount(); position++) {
-            byte operation = TINYINT.getByte(page.getBlock(operationChannel), position);
-            if (operation != DELETE_OPERATION_NUMBER) {
-                throw new TrinoException(NOT_SUPPORTED,
-                        "Paimon metadata-delete merge sink only supports DELETE rows, got merge operation: "
-                                + operation);
+            int operationChannel = page.getChannelCount() - 2;
+            for (int position = 0; position < page.getPositionCount(); position++) {
+                byte operation = TINYINT.getByte(page.getBlock(operationChannel), position);
+                if (operation != DELETE_OPERATION_NUMBER) {
+                    throw new TrinoException(NOT_SUPPORTED,
+                            "Paimon metadata-delete merge sink only supports DELETE rows, got merge operation: "
+                                    + operation);
+                }
+            }
+            try {
+                deletedRowCount = addExact(deletedRowCount, page.getPositionCount());
+            }
+            catch (ArithmeticException e) {
+                throw new TrinoException(PAIMON_COMMIT_ERROR,
+                        "Paimon metadata-delete merge row count exceeds the supported range",
+                        e);
             }
         }
-        try {
-            deletedRowCount = addExact(deletedRowCount, page.getPositionCount());
-        }
-        catch (ArithmeticException e) {
-            throw new TrinoException(PAIMON_COMMIT_ERROR,
-                    "Paimon metadata-delete merge row count exceeds the supported range",
-                    e);
+        catch (Exception e) {
+            throw PaimonPageSink.wrapWriteException(e);
         }
     }
 

@@ -203,8 +203,13 @@ public class PaimonMergeSinkTest
         PaimonMetadataDeleteMergeSink mergeSink = new PaimonMetadataDeleteMergeSink();
 
         assertThatThrownBy(() -> mergeSink.storeMergedRows(new Page(1, integerBlock(1))))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("inputPage channelCount (1) must include operation and rowId channels");
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception.getCause())
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("inputPage channelCount (1) must include operation and rowId channels");
+                })
+                .hasMessage("Failed to write data to Paimon: inputPage channelCount (1) must include operation and rowId channels");
     }
 
     @Test
