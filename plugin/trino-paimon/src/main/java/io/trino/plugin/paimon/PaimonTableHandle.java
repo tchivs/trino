@@ -682,7 +682,8 @@ public class PaimonTableHandle
             return PaimonColumnHandle.of(columnName, columnType, typeManager);
         }
         catch (UnsupportedOperationException e) {
-            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+            throw new TrinoException(NOT_SUPPORTED,
+                    unsupportedColumnConversionMessage(columnName, columnType, e), e);
         }
     }
 
@@ -692,8 +693,41 @@ public class PaimonTableHandle
             return PaimonTypeUtils.fromPaimonType(type, typeManager);
         }
         catch (UnsupportedOperationException e) {
-            throw new TrinoException(NOT_SUPPORTED, e.getMessage(), e);
+            throw new TrinoException(NOT_SUPPORTED,
+                    unsupportedPaimonTypeMessage(type, e), e);
         }
+    }
+
+    private static String unsupportedColumnConversionMessage(String columnName, DataType columnType, UnsupportedOperationException cause)
+    {
+        if (hasMessage(cause)) {
+            return cause.getMessage();
+        }
+        return "Unsupported Paimon column '%s' with type %s: %s"
+                .formatted(columnName, columnType, unsupportedOperationMessage(cause));
+    }
+
+    private static String unsupportedPaimonTypeMessage(DataType type, UnsupportedOperationException cause)
+    {
+        if (hasMessage(cause)) {
+            return cause.getMessage();
+        }
+        return "Unsupported Paimon type %s: %s".formatted(type, unsupportedOperationMessage(cause));
+    }
+
+    private static boolean hasMessage(UnsupportedOperationException cause)
+    {
+        String message = cause.getMessage();
+        return message != null && !message.isBlank();
+    }
+
+    private static String unsupportedOperationMessage(UnsupportedOperationException cause)
+    {
+        String message = cause.getMessage();
+        if (message == null || message.isBlank()) {
+            return cause.getClass().getSimpleName();
+        }
+        return message;
     }
 
     private static boolean isHiddenColumn(Table table, String columnName)

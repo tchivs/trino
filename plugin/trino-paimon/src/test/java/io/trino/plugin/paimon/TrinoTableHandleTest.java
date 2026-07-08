@@ -39,6 +39,9 @@ import org.apache.paimon.table.FullTextSearchTable;
 import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.VectorSearchTable;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeRoot;
+import org.apache.paimon.types.DataTypeVisitor;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
@@ -669,6 +672,23 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testColumnHandleUnsupportedTypeWithoutMessageReportsStableNotSupported()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, tableWithRowType(DataTypes.ROW(
+                DataTypes.FIELD(0, "id", unsupportedDataTypeWithoutMessage()))));
+
+        assertThatThrownBy(() -> handle.columnHandle(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION, "id"))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception)
+                            .hasMessage("Unsupported Paimon column 'id' with type UNSUPPORTED_TEST_TYPE: UnsupportedOperationException");
+                });
+    }
+
+    @Test
     public void testTableMetadataIncludesPaimonTableComment()
             throws Exception
     {
@@ -745,6 +765,23 @@ public class TrinoTableHandleTest
                 .containsEntry("bucket_key", "id")
                 .containsEntry("vector_file_format", "lance")
                 .doesNotContainKey("scan_version");
+    }
+
+    @Test
+    public void testTableMetadataUnsupportedTypeWithoutMessageReportsStableNotSupported()
+            throws Exception
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        setCachedTable(handle, TESTING_CATALOG, tableWithRowType(DataTypes.ROW(
+                DataTypes.FIELD(0, "id", unsupportedDataTypeWithoutMessage()))));
+
+        assertThatThrownBy(() -> handle.tableMetadata(TESTING_CATALOG, TESTING_TYPE_MANAGER, SESSION))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception)
+                            .hasMessage("Unsupported Paimon type UNSUPPORTED_TEST_TYPE: UnsupportedOperationException");
+                });
     }
 
     @Test
@@ -1649,6 +1686,42 @@ public class TrinoTableHandleTest
                     case "toString" -> "tableWithColumns";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    private static DataType unsupportedDataTypeWithoutMessage()
+    {
+        return new DataType(true, DataTypeRoot.BOOLEAN)
+        {
+            @Override
+            public DataTypeRoot getTypeRoot()
+            {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public int defaultSize()
+            {
+                return 1;
+            }
+
+            @Override
+            public DataType copy(boolean isNullable)
+            {
+                return this;
+            }
+
+            @Override
+            public String asSQLString()
+            {
+                return "UNSUPPORTED_TEST_TYPE";
+            }
+
+            @Override
+            public <R> R accept(DataTypeVisitor<R> visitor)
+            {
+                throw new UnsupportedOperationException();
+            }
+        };
     }
 
     private static PaimonCatalog testingCatalog()
