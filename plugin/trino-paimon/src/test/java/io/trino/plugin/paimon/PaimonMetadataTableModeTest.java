@@ -140,6 +140,7 @@ import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.TABLE_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.trino.spi.connector.RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
 import static io.trino.spi.expression.Constant.TRUE;
 import static io.trino.spi.expression.StandardFunctions.ADD_FUNCTION_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -709,8 +710,7 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
-        assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
-                NOT_SUPPORTED.toErrorCode(), "Paimon row-level change requires primary keys");
+        assertThat(metadata.getRowChangeParadigm(SESSION, tableHandle)).isEqualTo(DELETE_ROW_AND_INSERT_ROW);
         assertMetadataDeleteRowId(metadata.getMergeRowIdColumnHandle(SESSION, tableHandle));
         assertThat(metadata.getUpdateLayout(SESSION, tableHandle)).isEmpty();
         assertMetadataDeleteFallback(metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES));
@@ -733,9 +733,7 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
-        assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
-                NOT_SUPPORTED.toErrorCode(),
-                "Paimon row-level change is not supported for this table: Merge engine first-row can not support batch delete.");
+        assertThat(metadata.getRowChangeParadigm(SESSION, tableHandle)).isEqualTo(DELETE_ROW_AND_INSERT_ROW);
         assertMetadataDeleteRowId(metadata.getMergeRowIdColumnHandle(SESSION, tableHandle));
         assertThat(metadata.getUpdateLayout(SESSION, tableHandle)).isEmpty();
         assertMetadataDeleteFallback(metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES));
@@ -1520,6 +1518,9 @@ public class PaimonMetadataTableModeTest
                 TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
+        assertThat(metadata.getRowChangeParadigm(SESSION, tableHandle)).isEqualTo(DELETE_ROW_AND_INSERT_ROW);
+        assertMetadataDeleteRowId(metadata.getMergeRowIdColumnHandle(SESSION, tableHandle));
+        assertThat(metadata.getUpdateLayout(SESSION, tableHandle)).isEmpty();
         assertMetadataDeleteFallback(metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES));
     }
 

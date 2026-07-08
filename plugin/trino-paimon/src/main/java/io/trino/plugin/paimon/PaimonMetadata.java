@@ -662,7 +662,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
         PaimonTableHandle paimonTableHandle = getTableHandle("row change paradigm", tableHandle);
         rejectSystemTableWrite(paimonTableHandle, "row change paradigm");
         Catalog sessionCatalog = catalog.forSession(session);
-        rowLevelChangeFileStoreTable(paimonTableHandle, sessionCatalog, "row-level change");
+        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "row-level change");
+        try {
+            rowLevelChangeFileStoreTable(storeTable, "row-level change");
+        }
+        catch (TrinoException e) {
+            if (canUseMetadataDeleteFallback(storeTable)) {
+                return DELETE_ROW_AND_INSERT_ROW;
+            }
+            throw e;
+        }
         return DELETE_ROW_AND_INSERT_ROW;
     }
 

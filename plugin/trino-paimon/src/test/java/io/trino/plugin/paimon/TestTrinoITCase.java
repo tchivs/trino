@@ -129,6 +129,7 @@ public class TestTrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.truncate_values");
             sql("DROP TABLE IF EXISTS paimon.default.delete_all_bucket_unaware_values");
             sql("DROP TABLE IF EXISTS paimon.default.filtered_delete_bucket_unaware_values");
+            sql("DROP TABLE IF EXISTS paimon.default.merge_delete_bucket_unaware_values");
             sql("DROP TABLE IF EXISTS paimon.default.merge_update_bucket_unaware_values");
             sql("DROP TABLE IF EXISTS paimon.default.hash_fixed_mutations");
             sql("DROP TABLE IF EXISTS paimon.default.drop_nn_values");
@@ -1033,10 +1034,24 @@ public class TestTrinoITCase
                         + "USING (VALUES (1, 'updated')) s(id, name) "
                         + "ON t.id = s.id "
                         + "WHEN MATCHED THEN UPDATE SET name = s.name",
-                ".*Unsupported table bucket mode: BUCKET_UNAWARE for Paimon row-level change.*");
+                ".*Paimon metadata-delete merge sink only supports DELETE rows.*");
 
         assertThat(sql("SELECT * FROM paimon.default.merge_update_bucket_unaware_values ORDER BY id"))
                 .isEqualTo("[[1, one], [2, two]]");
+    }
+
+    @Test
+    public void testMergeDeleteAllRowsUsesMetadataDeleteFallbackForBucketUnawareTable()
+    {
+        sql("CREATE TABLE paimon.default.merge_delete_bucket_unaware_values (id integer, name varchar)");
+        sql("INSERT INTO paimon.default.merge_delete_bucket_unaware_values VALUES (1, 'one'), (2, 'two')");
+
+        sql("MERGE INTO paimon.default.merge_delete_bucket_unaware_values t "
+                + "USING (VALUES 1) s(marker) "
+                + "ON true "
+                + "WHEN MATCHED THEN DELETE");
+
+        assertThat(sql("SELECT count(*) FROM paimon.default.merge_delete_bucket_unaware_values")).isEqualTo("[[0]]");
     }
 
     @Test
