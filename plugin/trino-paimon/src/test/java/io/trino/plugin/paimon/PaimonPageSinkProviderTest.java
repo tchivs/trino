@@ -646,6 +646,23 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
+    public void testWriteLayoutWrapsInvalidPaimonDefaultValue()
+    {
+        DataField badDefaultField = new DataField(1, "retry_count", DataTypes.INT()).newDefaultValue("'not-an-int'");
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                badDefaultField));
+        List<PaimonColumnHandle> writeColumns = List.of(PaimonColumnHandle.of("id", DataTypes.INT()));
+
+        assertThatThrownBy(() -> PaimonPageSinkProvider.writeLayout(table, writeColumns, TESTING_TYPE_MANAGER))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to convert Paimon default value for column 'retry_count' with Paimon type INT");
+                    assertThat(exception.getCause()).isInstanceOf(RuntimeException.class);
+                });
+    }
+
+    @Test
     public void testWriteColumnsMatchLatestTableSchemaCaseInsensitively()
     {
         FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, DataTypes.ROW(

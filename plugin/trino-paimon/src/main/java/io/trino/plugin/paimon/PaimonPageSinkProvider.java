@@ -17,6 +17,7 @@ import com.google.inject.Inject;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.plugin.paimon.format.TrinoPaimonFileFormat;
 import io.trino.spi.NodeManager;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeSink;
@@ -63,6 +64,7 @@ import java.util.stream.Collectors;
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketNumAssigners;
+import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_DATA_ERROR;
 import static java.util.Arrays.fill;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.utils.DefaultValueUtils.convertDefaultValue;
@@ -316,7 +318,15 @@ public class PaimonPageSinkProvider
         if (defaultValue == null) {
             return null;
         }
-        return convertDefaultValue(field.type(), defaultValue);
+        try {
+            return convertDefaultValue(field.type(), defaultValue);
+        }
+        catch (RuntimeException e) {
+            throw new TrinoException(PAIMON_WRITER_DATA_ERROR,
+                    "Failed to convert Paimon default value for column '%s' with Paimon type %s"
+                            .formatted(field.name(), field.type().asSQLString()),
+                    e);
+        }
     }
 
     record WriteLayout(List<Type> columnTypes, List<DataType> logicalTypes, int[] inputChannels, Object[] defaultValues)
