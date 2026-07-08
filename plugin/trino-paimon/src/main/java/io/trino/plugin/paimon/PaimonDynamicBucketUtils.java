@@ -15,6 +15,7 @@ package io.trino.plugin.paimon;
 
 import io.trino.spi.Node;
 import io.trino.spi.NodeManager;
+import io.trino.spi.TrinoException;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.schema.TableSchema;
 
@@ -23,6 +24,7 @@ import java.util.Comparator;
 import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.spi.StandardErrorCode.NO_NODES_AVAILABLE;
 import static java.util.Objects.requireNonNull;
 
 final class PaimonDynamicBucketUtils
@@ -70,6 +72,28 @@ final class PaimonDynamicBucketUtils
                         .thenComparing(Node::getNodeIdentifier))
                 .toList();
         int assignerParallelism = dynamicBucketAssignerParallelism(coreOptions, workers.size());
+        return dynamicBucketAssignerNodes(workers, assignerParallelism);
+    }
+
+    static List<Node> dynamicBucketAssignerNodes(NodeManager nodeManager, int assignerParallelism)
+    {
+        requireNonNull(nodeManager, "nodeManager is null");
+        List<Node> workers = nodeManager.getRequiredWorkerNodes().stream()
+                .sorted(Comparator.comparing((Node node) -> node.getHostAndPort().toString())
+                        .thenComparing(Node::getNodeIdentifier))
+                .toList();
+        return dynamicBucketAssignerNodes(workers, assignerParallelism);
+    }
+
+    private static List<Node> dynamicBucketAssignerNodes(List<Node> workers, int assignerParallelism)
+    {
+        requireNonNull(workers, "workers is null");
+        checkArgument(assignerParallelism > 0, "assignerParallelism must be positive: %s", assignerParallelism);
+        if (workers.size() < assignerParallelism) {
+            throw new TrinoException(NO_NODES_AVAILABLE,
+                    "Paimon HASH_DYNAMIC planned assigner parallelism %s exceeds available worker nodes %s"
+                            .formatted(assignerParallelism, workers.size()));
+        }
         return List.copyOf(workers.subList(0, assignerParallelism));
     }
 }

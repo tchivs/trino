@@ -117,6 +117,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -1446,14 +1447,24 @@ public class PaimonMetadataTableModeTest
                 List.of(),
                 List.of("id"),
                 "id",
-                Map.of(CoreOptions.BUCKET.key(), "-1"))),
-                TESTING_TYPE_MANAGER);
+                Map.of(
+                        CoreOptions.BUCKET.key(), "-1",
+                        CoreOptions.DYNAMIC_BUCKET_ASSIGNER_PARALLELISM.key(), "3"))),
+                TESTING_TYPE_MANAGER,
+                () -> 5);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
         ConnectorTableLayout insertLayout = metadata.getInsertLayout(SESSION, tableHandle).orElseThrow();
         assertThat(insertLayout.getPartitionColumns()).containsExactly("id");
         assertThat(insertLayout.getPartitioning().orElseThrow())
-                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> assertThat(handle.isSingleNode()).isFalse());
+                .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> {
+                    assertThat(handle.isSingleNode()).isFalse();
+                    assertThat(handle.dynamicBucketAssignerParallelism()).hasValue(3);
+                });
+        PaimonTableHandle insertHandle = (PaimonTableHandle) metadata.beginInsert(SESSION, tableHandle,
+                List.of(PaimonColumnHandle.of("id", DataTypes.INT())),
+                RetryMode.NO_RETRIES);
+        assertThat(insertHandle.getDynamicBucketAssignerParallelism()).hasValue(3);
 
         assertThatThrownBy(() -> metadata.getRowChangeParadigm(SESSION, tableHandle))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
@@ -2737,6 +2748,25 @@ public class PaimonMetadataTableModeTest
                         "region", "7")));
         assertThat(roundTripped.getDeletePartitionSpecs().orElseThrow().get(0).keySet())
                 .containsExactly("dt", "region");
+    }
+
+    @Test
+    public void testDynamicBucketAssignerParallelismHandleJsonRoundTrip()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle(
+                "schema",
+                "table",
+                Map.of(),
+                TupleDomain.all(),
+                Optional.empty(),
+                Optional.empty(),
+                OptionalLong.empty())
+                .withDynamicBucketAssignerParallelism(OptionalInt.of(4));
+
+        PaimonTableHandle roundTripped = TABLE_HANDLE_CODEC.fromJson(TABLE_HANDLE_CODEC.toJson(handle));
+
+        assertThat(roundTripped).isEqualTo(handle);
+        assertThat(roundTripped.getDynamicBucketAssignerParallelism()).hasValue(4);
     }
 
     @Test

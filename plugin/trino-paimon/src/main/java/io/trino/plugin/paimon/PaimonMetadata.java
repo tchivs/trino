@@ -112,8 +112,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.function.IntSupplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -148,7 +150,8 @@ import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 public record PaimonMetadata(PaimonCatalog catalog,
-                             io.trino.spi.type.TypeManager typeManager) implements ConnectorMetadata
+                             TypeManager typeManager,
+                             IntSupplier dynamicBucketWorkerCountSupplier) implements ConnectorMetadata
 {
     private static final int MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE = 1000;
     private static final int MAX_PARTITION_DELETE_SPECS = 1024;
@@ -169,6 +172,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         catalog = requireNonNull(catalog, "catalog is null");
         typeManager = requireNonNull(typeManager, "typeManager is null");
+        dynamicBucketWorkerCountSupplier = requireNonNull(dynamicBucketWorkerCountSupplier,
+                "dynamicBucketWorkerCountSupplier is null");
+    }
+
+    public PaimonMetadata(PaimonCatalog catalog, TypeManager typeManager)
+    {
+        this(catalog, typeManager, () -> 1);
     }
 
     @Override
@@ -198,12 +208,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 schemaTableName(paimonTableHandle).toString());
     }
 
-    private static Optional<ConnectorTableLayout> writeLayout(TableSchema tableSchema, String operation, String tableName)
+    private Optional<ConnectorTableLayout> writeLayout(TableSchema tableSchema, String operation, String tableName)
     {
         return writeLayout(tableSchema, bucketMode(tableSchema), operation, tableName);
     }
 
-    private static Optional<ConnectorTableLayout> writeLayout(
+    private Optional<ConnectorTableLayout> writeLayout(
             TableSchema tableSchema,
             BucketMode bucketMode,
             String operation,
@@ -228,7 +238,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
             case HASH_DYNAMIC :
                 try {
                     return Optional.of(new ConnectorTableLayout(
-                            new PaimonPartitioningHandle(InstantiationUtil.serializeObject(tableSchema)),
+                            new PaimonPartitioningHandle(
+                                    InstantiationUtil.serializeObject(tableSchema),
+                                    false,
+                                    dynamicBucketAssignerParallelism(tableSchema)),
                             dynamicBucketWritePartitionColumns(tableSchema), false));
                 }
                 catch (IOException e) {
@@ -264,6 +277,43 @@ public record PaimonMetadata(PaimonCatalog catalog,
             return BucketMode.BUCKET_UNAWARE;
         }
         return schema.crossPartitionUpdate() ? BucketMode.KEY_DYNAMIC : BucketMode.HASH_DYNAMIC;
+    }
+
+    private OptionalInt dynamicBucketAssignerParallelism(TableSchema tableSchema)
+    {
+        requireNonNull(tableSchema, "tableSchema is null");
+        if (bucketMode(tableSchema) != BucketMode.HASH_DYNAMIC) {
+            return OptionalInt.empty();
+        }
+        return OptionalInt.of(PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism(
+                new CoreOptions(tableSchema.options()),
+                dynamicBucketWorkerCountSupplier.getAsInt()));
+    }
+
+    private OptionalInt dynamicBucketAssignerParallelism(FileStoreTable storeTable)
+    {
+        requireNonNull(storeTable, "storeTable is null");
+        if (storeTable.bucketMode() != BucketMode.HASH_DYNAMIC) {
+            return OptionalInt.empty();
+        }
+        return dynamicBucketAssignerParallelism(storeTable.schema());
+    }
+
+    private static OptionalInt dynamicBucketAssignerParallelism(Optional<ConnectorTableLayout> layout)
+    {
+        requireNonNull(layout, "layout is null");
+        if (layout.isEmpty()) {
+            return OptionalInt.empty();
+        }
+        Optional<ConnectorPartitioningHandle> partitioning = layout.get().getPartitioning();
+        if (partitioning.isEmpty()) {
+            return OptionalInt.empty();
+        }
+        ConnectorPartitioningHandle partitioningHandle = partitioning.get();
+        if (!(partitioningHandle instanceof PaimonPartitioningHandle paimonPartitioningHandle)) {
+            return OptionalInt.empty();
+        }
+        return paimonPartitioningHandle.dynamicBucketAssignerParallelism();
     }
 
     @Override
@@ -302,7 +352,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     return toPaimonColumnHandle(field);
                 })
                 .collect(toList()))
-                .withCreateTableOperation(createTableOperation);
+                .withCreateTableOperation(createTableOperation)
+                .withDynamicBucketAssignerParallelism(dynamicBucketAssignerParallelism(layout));
     }
 
     static Map<String, DataField> createdTableFieldsByLowerName(List<DataField> fields, SchemaTableName tableName)
@@ -419,7 +470,10 @@ public record PaimonMetadata(PaimonCatalog catalog,
         validateNoQueryRetries(retryMode);
         PaimonTableHandle paimonTableHandle = getTableHandle("begin insert", tableHandle);
         rejectSystemTableWrite(paimonTableHandle, "begin insert");
-        return paimonTableHandle.withWriteColumns(columns);
+        Catalog sessionCatalog = catalog.forSession(session);
+        FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "begin insert");
+        return paimonTableHandle.withWriteColumns(columns)
+                .withDynamicBucketAssignerParallelism(dynamicBucketAssignerParallelism(storeTable));
     }
 
     @Override

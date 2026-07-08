@@ -59,6 +59,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -997,6 +998,28 @@ public class PaimonPageSinkProviderTest
         assertThatThrownBy(() -> PaimonPageSinkProvider.dynamicBucketWriter(table, true, pageSinkId(2), 2))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("Paimon HASH_DYNAMIC writer task partition 2 is outside assigner parallelism 2");
+    }
+
+    @Test
+    public void testDynamicBucketWriterUsesPlannedAssignerParallelism()
+    {
+        FileStoreTable table = writeReadyFileStoreTable(
+                new AtomicBoolean(),
+                new AtomicReference<>(),
+                new AtomicBoolean(),
+                List.of(),
+                Map.of(CoreOptions.BUCKET.key(), "-1"),
+                List.of("id"),
+                BucketMode.HASH_DYNAMIC);
+
+        assertThatThrownBy(() -> PaimonPageSinkProvider.dynamicBucketWriter(table, true, pageSinkId(4),
+                OptionalInt.of(4), 8))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Paimon HASH_DYNAMIC writer task partition 4 is outside assigner parallelism 4");
+
+        assertThatCode(() -> PaimonPageSinkProvider.dynamicBucketWriter(table, true, pageSinkId(4),
+                OptionalInt.empty(), 8))
+                .doesNotThrowAnyException();
     }
 
     @Test

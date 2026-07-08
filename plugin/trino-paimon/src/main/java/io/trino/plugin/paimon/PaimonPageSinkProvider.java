@@ -54,6 +54,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
@@ -173,7 +174,8 @@ public class PaimonPageSinkProvider
                     "writes");
             validateWriteBucketMode(table);
             validateWriteColumns(table, writeColumns);
-            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), pageSinkId);
+            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), pageSinkId,
+                    tableHandle.getDynamicBucketAssignerParallelism());
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -192,7 +194,8 @@ public class PaimonPageSinkProvider
             if (overwrite) {
                 PaimonTableSupport.validateInsertOverwrite(table);
             }
-            return createPageSink(table, overwrite, writeLayout(table, writeColumns, typeManager), pageSinkId);
+            return createPageSink(table, overwrite, writeLayout(table, writeColumns, typeManager), pageSinkId,
+                    tableHandle.getDynamicBucketAssignerParallelism());
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -208,7 +211,8 @@ public class PaimonPageSinkProvider
             validateMergeBucketMode(table);
             PaimonTableSupport.validateRowLevelDelete(table, "merge writes");
             validateMergeWriteColumns(table, writeColumns);
-            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), pageSinkId);
+            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), pageSinkId,
+                    tableHandle.getDynamicBucketAssignerParallelism());
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -398,7 +402,7 @@ public class PaimonPageSinkProvider
     }
 
     private PaimonPageSink createPageSink(FileStoreTable table, boolean overwrite, WriteLayout writeLayout,
-            ConnectorPageSinkId pageSinkId)
+            ConnectorPageSinkId pageSinkId, OptionalInt dynamicBucketAssignerParallelism)
     {
         BatchTableWrite write = null;
         IOManager ioManager = null;
@@ -416,7 +420,8 @@ public class PaimonPageSinkProvider
             if (table.bucketMode() == BucketMode.HASH_DYNAMIC) {
                 return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
                         writeLayout.inputChannels(), writeLayout.defaultValues(),
-                        dynamicBucketWriter(table, overwrite, pageSinkId, dynamicBucketWorkerCountSupplier.getAsInt()),
+                        dynamicBucketWriter(table, overwrite, pageSinkId, dynamicBucketAssignerParallelism,
+                                dynamicBucketWorkerCountSupplier.getAsInt()),
                         memoryPoolFactory, ioManager);
             }
             return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
@@ -460,8 +465,15 @@ public class PaimonPageSinkProvider
     static PaimonPageSink.DynamicBucketWriter dynamicBucketWriter(FileStoreTable table, boolean overwrite,
             ConnectorPageSinkId pageSinkId, int workerCount)
     {
+        return dynamicBucketWriter(table, overwrite, pageSinkId, OptionalInt.empty(), workerCount);
+    }
+
+    static PaimonPageSink.DynamicBucketWriter dynamicBucketWriter(FileStoreTable table, boolean overwrite,
+            ConnectorPageSinkId pageSinkId, OptionalInt plannedAssignerParallelism, int workerCount)
+    {
         CoreOptions coreOptions = table.coreOptions();
-        int assignerParallelism = dynamicBucketAssignerParallelism(coreOptions, workerCount);
+        int assignerParallelism = requireNonNull(plannedAssignerParallelism, "plannedAssignerParallelism is null")
+                .orElseGet(() -> dynamicBucketAssignerParallelism(coreOptions, workerCount));
         int numAssigners = dynamicBucketNumAssigners(coreOptions, assignerParallelism);
         int assignId = pageSinkTaskPartitionId(pageSinkId);
         if (assignId >= assignerParallelism) {

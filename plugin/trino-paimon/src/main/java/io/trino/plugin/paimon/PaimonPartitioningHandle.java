@@ -16,6 +16,7 @@ package io.trino.plugin.paimon;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ConnectorPartitioningHandle;
 import org.apache.paimon.schema.TableSchema;
@@ -23,16 +24,19 @@ import org.apache.paimon.utils.InstantiationUtil;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.OptionalInt;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
-public record PaimonPartitioningHandle(byte[] schema, boolean singleNode) implements ConnectorPartitioningHandle
+public record PaimonPartitioningHandle(byte[] schema, boolean singleNode, OptionalInt dynamicBucketAssignerParallelism)
+        implements ConnectorPartitioningHandle
 {
     @JsonCreator
     public PaimonPartitioningHandle(
             @JsonProperty(value = "schema", required = true) byte[] schema,
-            @JsonProperty("singleNode") boolean singleNode)
+            @JsonProperty("singleNode") boolean singleNode,
+            @JsonProperty("dynamicBucketAssignerParallelism") OptionalInt dynamicBucketAssignerParallelism)
     {
         requireNonNull(schema, "schema is null");
         checkArgument(schema.length > 0, "schema is empty");
@@ -40,6 +44,17 @@ public record PaimonPartitioningHandle(byte[] schema, boolean singleNode) implem
         deserializeTableSchema(schemaCopy);
         this.schema = schemaCopy;
         this.singleNode = singleNode;
+        OptionalInt assignerParallelism = dynamicBucketAssignerParallelism == null
+                ? OptionalInt.empty()
+                : dynamicBucketAssignerParallelism;
+        assignerParallelism.ifPresent(value ->
+                checkArgument(value > 0, "dynamicBucketAssignerParallelism must be positive: %s", value));
+        this.dynamicBucketAssignerParallelism = assignerParallelism;
+    }
+
+    public PaimonPartitioningHandle(byte[] schema, boolean singleNode)
+    {
+        this(schema, singleNode, OptionalInt.empty());
     }
 
     public PaimonPartitioningHandle(byte[] schema)
@@ -65,6 +80,13 @@ public record PaimonPartitioningHandle(byte[] schema, boolean singleNode) implem
     public boolean singleNode()
     {
         return singleNode;
+    }
+
+    @JsonProperty
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    public OptionalInt dynamicBucketAssignerParallelism()
+    {
+        return dynamicBucketAssignerParallelism;
     }
 
     @JsonIgnore
@@ -109,7 +131,9 @@ public record PaimonPartitioningHandle(byte[] schema, boolean singleNode) implem
             return false;
         }
         PaimonPartitioningHandle that = (PaimonPartitioningHandle) o;
-        return singleNode == that.singleNode && Arrays.equals(schema, that.schema);
+        return singleNode == that.singleNode
+                && Arrays.equals(schema, that.schema)
+                && dynamicBucketAssignerParallelism.equals(that.dynamicBucketAssignerParallelism);
     }
 
     @Override
@@ -117,6 +141,7 @@ public record PaimonPartitioningHandle(byte[] schema, boolean singleNode) implem
     {
         int result = Arrays.hashCode(schema);
         result = 31 * result + Boolean.hashCode(singleNode);
+        result = 31 * result + dynamicBucketAssignerParallelism.hashCode();
         return result;
     }
 }

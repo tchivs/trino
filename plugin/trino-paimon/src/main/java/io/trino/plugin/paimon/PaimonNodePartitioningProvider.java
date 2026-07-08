@@ -56,6 +56,11 @@ public class PaimonNodePartitioningProvider
         }
         TableSchema schema = paimonPartitioningHandle.getOriginalSchema();
         if (bucketMode(schema) == BucketMode.HASH_DYNAMIC) {
+            if (paimonPartitioningHandle.dynamicBucketAssignerParallelism().isPresent()) {
+                return Optional.of(createBucketNodeMap(dynamicBucketAssignerNodes(
+                        nodeManager,
+                        paimonPartitioningHandle.dynamicBucketAssignerParallelism().getAsInt())));
+            }
             return Optional.of(createBucketNodeMap(dynamicBucketAssignerNodes(
                     nodeManager,
                     new CoreOptions(schema.options()))));

@@ -39,6 +39,7 @@ import org.junit.jupiter.api.Test;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
@@ -56,9 +57,10 @@ public class TrinoPartitioningHandleTest
             throws Exception
     {
         byte[] schemaData = serializedTestSchema();
-        PaimonPartitioningHandle expected = new PaimonPartitioningHandle(schemaData);
+        PaimonPartitioningHandle expected = new PaimonPartitioningHandle(schemaData, false, OptionalInt.of(3));
         testRoundTrip(expected);
         assertThat(expected.isSingleNode()).isFalse();
+        assertThat(expected.dynamicBucketAssignerParallelism()).hasValue(3);
     }
 
     @Test
@@ -88,6 +90,20 @@ public class TrinoPartitioningHandleTest
 
         assertThatThrownBy(() -> codec.fromJson("{\"schema\":\"\"}"))
                 .hasRootCauseMessage("schema is empty");
+    }
+
+    @Test
+    public void testPartitioningHandleRejectsInvalidDynamicBucketAssignerParallelism()
+            throws Exception
+    {
+        byte[] schemaData = serializedTestSchema();
+
+        assertThatThrownBy(() -> new PaimonPartitioningHandle(schemaData, false, OptionalInt.of(0)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("dynamicBucketAssignerParallelism must be positive: 0");
+        assertThatThrownBy(() -> codec.fromJson("{\"schema\":\"%s\",\"dynamicBucketAssignerParallelism\":0}"
+                .formatted(java.util.Base64.getEncoder().encodeToString(schemaData))))
+                .hasRootCauseMessage("dynamicBucketAssignerParallelism must be positive: 0");
     }
 
     @Test
@@ -254,6 +270,46 @@ public class TrinoPartitioningHandleTest
                             .extracting(Node::getNodeIdentifier)
                             .containsExactly("node-a", "node-b");
                 });
+    }
+
+    @Test
+    public void testDynamicBucketPartitioningProviderUsesPlannedAssignerMapping()
+            throws Exception
+    {
+        Node nodeB = node("node-b", "127.0.0.2");
+        Node nodeA = node("node-a", "127.0.0.1");
+        Node nodeC = node("node-c", "127.0.0.3");
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(
+                new TestingNodeManager(List.of(nodeB, nodeA, nodeC)));
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(
+                InstantiationUtil.serializeObject(dynamicBucketSchema(Map.of())),
+                false,
+                OptionalInt.of(2));
+
+        assertThat(provider.getBucketNodeMapping(null, null, handle))
+                .get()
+                .satisfies(mapping -> {
+                    assertThat(mapping.getBucketCount()).isEqualTo(2);
+                    assertThat(mapping.hasFixedMapping()).isTrue();
+                    assertThat(mapping.getFixedMapping())
+                            .extracting(Node::getNodeIdentifier)
+                            .containsExactly("node-a", "node-b");
+                });
+    }
+
+    @Test
+    public void testDynamicBucketPartitioningProviderRejectsPlannedAssignerMappingWithoutEnoughWorkers()
+            throws Exception
+    {
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(
+                new TestingNodeManager(List.of(node("node-a", "127.0.0.1"))));
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(
+                InstantiationUtil.serializeObject(dynamicBucketSchema(Map.of())),
+                false,
+                OptionalInt.of(2));
+
+        assertThatThrownBy(() -> provider.getBucketNodeMapping(null, null, handle))
+                .hasMessage("Paimon HASH_DYNAMIC planned assigner parallelism 2 exceeds available worker nodes 1");
     }
 
     @Test
