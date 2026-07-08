@@ -48,6 +48,9 @@ import org.apache.paimon.table.Table;
 import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeRoot;
+import org.apache.paimon.types.DataTypeVisitor;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
@@ -658,6 +661,26 @@ public class PaimonPageSinkProviderTest
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
                     assertThat(exception).hasMessage("Failed to convert Paimon default value for column 'retry_count' with Paimon type INT");
+                    assertThat(exception.getCause()).isInstanceOf(RuntimeException.class);
+                });
+    }
+
+    @Test
+    public void testWriteLayoutWrapsInvalidPaimonDefaultValueWhenTypeFormattingFails()
+    {
+        DataType unstableIntType = unstableSqlFormattingIntType();
+        DataField badDefaultField = new DataField(1, "retry_count", unstableIntType).newDefaultValue("'not-an-int'");
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                badDefaultField));
+        List<PaimonColumnHandle> writeColumns = List.of(PaimonColumnHandle.of("id", DataTypes.INT()));
+
+        assertThatThrownBy(() -> PaimonPageSinkProvider.writeLayout(table, writeColumns, TESTING_TYPE_MANAGER))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception)
+                            .hasMessage("Failed to convert Paimon default value for column 'retry_count' with Paimon type %s"
+                                    .formatted(unstableIntType.getClass().getName()));
                     assertThat(exception.getCause()).isInstanceOf(RuntimeException.class);
                 });
     }
@@ -2351,6 +2374,42 @@ public class PaimonPageSinkProviderTest
                     case "toString" -> "variant-validating-writer";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    private static DataType unstableSqlFormattingIntType()
+    {
+        return new DataType(true, DataTypeRoot.INTEGER)
+        {
+            @Override
+            public int defaultSize()
+            {
+                return DataTypes.INT().defaultSize();
+            }
+
+            @Override
+            public DataType copy(boolean isNullable)
+            {
+                return this;
+            }
+
+            @Override
+            public String asSQLString()
+            {
+                throw new IllegalStateException("type SQL rendering failed");
+            }
+
+            @Override
+            public String toString()
+            {
+                throw new IllegalStateException("type string rendering failed");
+            }
+
+            @Override
+            public <R> R accept(DataTypeVisitor<R> visitor)
+            {
+                return DataTypes.INT().accept(visitor);
+            }
+        };
     }
 
     private static org.apache.paimon.table.sink.BatchTableWrite binaryReadingWriter()

@@ -324,9 +324,32 @@ public class PaimonPageSinkProvider
         catch (RuntimeException e) {
             throw new TrinoException(PAIMON_WRITER_DATA_ERROR,
                     "Failed to convert Paimon default value for column '%s' with Paimon type %s"
-                            .formatted(field.name(), field.type().asSQLString()),
+                            .formatted(field.name(), paimonTypeName(field.type())),
                     e);
         }
+    }
+
+    private static String paimonTypeName(DataType type)
+    {
+        try {
+            String name = type.asSQLString();
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+        }
+        catch (RuntimeException ignored) {
+            // Fall through to toString/class name while already formatting a default-value conversion failure.
+        }
+        try {
+            String name = type.toString();
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+        }
+        catch (RuntimeException ignored) {
+            // Fall through to implementation class name.
+        }
+        return type.getClass().getName();
     }
 
     record WriteLayout(List<Type> columnTypes, List<DataType> logicalTypes, int[] inputChannels, Object[] defaultValues)
