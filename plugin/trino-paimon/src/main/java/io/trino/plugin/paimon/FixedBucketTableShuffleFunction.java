@@ -14,8 +14,6 @@
 package io.trino.plugin.paimon;
 
 import io.trino.spi.Page;
-import io.trino.spi.block.Block;
-import io.trino.spi.block.RowBlock;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import org.apache.paimon.CoreOptions;
@@ -25,17 +23,18 @@ import org.apache.paimon.codegen.Projection;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.sink.ChannelComputer;
-import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
+import static io.trino.plugin.paimon.PaimonShuffleUtils.projectedTypes;
+import static io.trino.plugin.paimon.PaimonShuffleUtils.projection;
+import static io.trino.plugin.paimon.PaimonShuffleUtils.rowIdFieldPage;
+import static io.trino.plugin.paimon.PaimonShuffleUtils.validateRowIdType;
 import static java.util.Objects.requireNonNull;
 
 public class FixedBucketTableShuffleFunction
@@ -82,8 +81,7 @@ public class FixedBucketTableShuffleFunction
     public int getBucket(Page page, int position)
     {
         if (isRowId) {
-            RowBlock rowBlock = (RowBlock) page.getBlock(0);
-            page = new Page(rowBlock.getPositionCount(), rowBlock.getFieldBlocks().toArray(Block[]::new));
+            page = rowIdFieldPage(page);
         }
 
         PaimonRow paimonRow = new PaimonRow(page, position, RowKind.INSERT, paimonRowTypes,
@@ -94,69 +92,10 @@ public class FixedBucketTableShuffleFunction
         return ChannelComputer.select(partition, bucket, workerCount);
     }
 
-    private static void validateRowIdType(RowType rowIdType, TableSchema schema)
-    {
-        List<DataField> primaryKeyFields = primaryKeyFields(schema);
-        verify(rowIdType.getFields().size() == schema.primaryKeys().size(),
-                "Paimon row id field count (%s) must match primary key count (%s)",
-                rowIdType.getFields().size(), schema.primaryKeys().size());
-        for (int index = 0; index < schema.primaryKeys().size(); index++) {
-            String primaryKey = schema.primaryKeys().get(index);
-            RowType.Field field = rowIdType.getFields().get(index);
-            verify(field.getName().isPresent(),
-                    "Paimon row id field at index %s must be named", index);
-            verify(field.getName().get().equals(primaryKey),
-                    "Paimon row id field at index %s must be primary key '%s', got '%s'",
-                    index, primaryKey, field.getName().get());
-            DataType expectedType = primaryKeyFields.get(index).type();
-            verify(PaimonColumnHandle.matchesTrinoType(expectedType, field.getType()),
-                    "Paimon row id field '%s' type must match Paimon primary key type %s, got %s",
-                    primaryKey, expectedType.asSQLString(), field.getType());
-        }
-    }
-
-    private static List<DataField> primaryKeyFields(TableSchema schema)
-    {
-        return schema.primaryKeys().stream()
-                .map(primaryKey -> {
-                    verify(schema.logicalRowType().containsField(primaryKey),
-                            "Paimon primary key '%s' is not present in table schema", primaryKey);
-                    return schema.logicalRowType().getField(primaryKey);
-                })
-                .toList();
-    }
-
     private static List<String> fixedBucketWritePartitionColumns(TableSchema schema)
     {
         List<String> partitionColumns = new ArrayList<>(schema.partitionKeys());
         partitionColumns.addAll(schema.bucketKeys());
         return List.copyOf(partitionColumns);
-    }
-
-    private static List<DataType> projectedTypes(TableSchema schema, List<String> fieldNames)
-    {
-        return fieldNames.stream()
-                .map(fieldName -> {
-                    verify(schema.logicalRowType().containsField(fieldName),
-                            "Paimon field '%s' is not present in table schema", fieldName);
-                    return schema.logicalRowType().getField(fieldName).type();
-                })
-                .toList();
-    }
-
-    private static int[] projection(List<String> inputFields, List<String> projectedFields, String fieldDescription)
-    {
-        Map<String, Integer> inputFieldIndexes = new HashMap<>();
-        for (int index = 0; index < inputFields.size(); index++) {
-            inputFieldIndexes.putIfAbsent(inputFields.get(index), index);
-        }
-        return projectedFields.stream()
-                .mapToInt(projectedField -> {
-                    Integer index = inputFieldIndexes.get(projectedField);
-                    verify(index != null, "Paimon %s '%s' is not present in shuffle input fields %s",
-                            fieldDescription, projectedField, inputFields);
-                    return index;
-                })
-                .toArray();
     }
 }

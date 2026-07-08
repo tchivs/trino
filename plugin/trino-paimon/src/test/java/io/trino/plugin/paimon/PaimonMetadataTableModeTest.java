@@ -1435,7 +1435,7 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
-    public void testDynamicBucketWritePlanningUsesAssignerLayoutAndRejectsRowLevelChanges()
+    public void testDynamicBucketWritePlanningUsesAssignerLayoutAndSupportsRowLevelChanges()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
         PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(fileStoreTable(
@@ -1444,7 +1444,9 @@ public class PaimonMetadataTableModeTest
                 rowType,
                 rowType,
                 List.of(),
-                List.of("id"))),
+                List.of("id"),
+                "id",
+                Map.of(CoreOptions.BUCKET.key(), "-1"))),
                 TESTING_TYPE_MANAGER);
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
 
@@ -1453,18 +1455,23 @@ public class PaimonMetadataTableModeTest
         assertThat(insertLayout.getPartitioning().orElseThrow())
                 .isInstanceOfSatisfying(PaimonPartitioningHandle.class, handle -> assertThat(handle.isSingleNode()).isFalse());
 
-        assertTrinoError(() -> metadata.getRowChangeParadigm(SESSION, tableHandle),
-                NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon row-level change. Dynamic-bucket row-level writes require Flink-style two-stage bucket assignment and dynamic bucket index coordination; this Trino connector currently supports HASH_DYNAMIC INSERT only");
-        assertTrinoError(() -> metadata.getMergeRowIdColumnHandle(SESSION, tableHandle),
-                NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon merge row id. Dynamic-bucket row-level writes require Flink-style two-stage bucket assignment and dynamic bucket index coordination; this Trino connector currently supports HASH_DYNAMIC INSERT only");
-        assertTrinoError(() -> metadata.getUpdateLayout(SESSION, tableHandle),
-                NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon update layout. Dynamic-bucket row-level writes require Flink-style two-stage bucket assignment and dynamic bucket index coordination; this Trino connector currently supports HASH_DYNAMIC INSERT only");
-        assertTrinoError(() -> metadata.beginMerge(SESSION, tableHandle, RetryMode.NO_RETRIES),
-                NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: HASH_DYNAMIC for Paimon merge. Dynamic-bucket row-level writes require Flink-style two-stage bucket assignment and dynamic bucket index coordination; this Trino connector currently supports HASH_DYNAMIC INSERT only");
+        assertThat(metadata.getRowChangeParadigm(SESSION, tableHandle)).isEqualTo(DELETE_ROW_AND_INSERT_ROW);
+        PaimonColumnHandle rowId = (PaimonColumnHandle) metadata.getMergeRowIdColumnHandle(SESSION, tableHandle);
+        assertThat(rowId.getColumnName()).isEqualTo(PaimonColumnHandle.TRINO_ROW_ID_NAME);
+        assertThat(((org.apache.paimon.types.RowType) rowId.logicalType()).getFieldNames())
+                .containsExactly("id");
+
+        PaimonPartitioningHandle updateLayout = (PaimonPartitioningHandle) metadata.getUpdateLayout(SESSION, tableHandle)
+                .orElseThrow();
+        assertThat(updateLayout.isSingleNode()).isFalse();
+        assertThat(new CoreOptions(new Options(updateLayout.getOriginalSchema().options())).bucket()).isEqualTo(-1);
+
+        PaimonMergeTableHandle mergeHandle = (PaimonMergeTableHandle) metadata.beginMerge(SESSION, tableHandle,
+                RetryMode.NO_RETRIES);
+        assertThat(mergeHandle.isMetadataDeleteFallback()).isFalse();
+        assertThat(mergeHandle.paimonTableHandle().getWriteColumns().orElseThrow())
+                .extracting(column -> ((PaimonColumnHandle) column).getColumnName())
+                .containsExactly("id");
     }
 
     @Test
@@ -7193,9 +7200,9 @@ public class PaimonMetadataTableModeTest
                             rowType.getFields(),
                             partitionKeys,
                             primaryKeys,
-                            mergeOptions(options, Map.of(
+                            mergeOptions(Map.of(
                                     CoreOptions.BUCKET.key(), "7",
-                                    CoreOptions.BUCKET_KEY.key(), bucketKey)),
+                                    CoreOptions.BUCKET_KEY.key(), bucketKey), options),
                             ""));
                     case "copyWithLatestSchema" -> {
                         copiedWithLatestSchema.set(true);

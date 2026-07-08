@@ -128,8 +128,12 @@ public class PaimonPageSinkProvider
     static void validateMergeBucketMode(Table table)
     {
         BucketMode mode = requireFileStoreTable(table, "merge writes").bucketMode();
-        if (mode != BucketMode.HASH_FIXED) {
-            throw PaimonTableSupport.unsupportedBucketMode("merge writes", mode);
+        switch (mode) {
+            case HASH_FIXED :
+            case HASH_DYNAMIC :
+                break;
+            default :
+                throw PaimonTableSupport.unsupportedBucketMode("merge writes", mode);
         }
     }
 
@@ -193,7 +197,8 @@ public class PaimonPageSinkProvider
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
-    private ConnectorPageSink createMergePageSink(PaimonTableHandle tableHandle, ConnectorSession session)
+    private ConnectorPageSink createMergePageSink(PaimonTableHandle tableHandle, ConnectorSession session,
+            ConnectorPageSinkId pageSinkId)
     {
         requireNonNull(session, "session is null");
         List<PaimonColumnHandle> writeColumns = getWriteColumns(tableHandle);
@@ -204,7 +209,7 @@ public class PaimonPageSinkProvider
             validateMergeBucketMode(table);
             PaimonTableSupport.validateRowLevelDelete(table, "merge writes");
             validateMergeWriteColumns(table, writeColumns);
-            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), null);
+            return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), pageSinkId);
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -506,7 +511,7 @@ public class PaimonPageSinkProvider
         PaimonTableHandle paimonTableHandle = paimonMergeTableHandle.paimonTableHandle();
         int dataColumnCount = getWriteColumns(paimonTableHandle).size();
         return runWithContextClassLoader(() -> new PaimonMergeSink(
-                createMergePageSink(paimonTableHandle, session),
+                createMergePageSink(paimonTableHandle, session, pageSinkId),
                 dataColumnCount), PaimonPageSinkProvider.class.getClassLoader());
     }
 

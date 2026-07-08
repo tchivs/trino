@@ -18,8 +18,13 @@ import io.trino.client.NodeVersion;
 import io.trino.metadata.InternalNode;
 import io.trino.spi.Node;
 import io.trino.spi.Page;
+import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.DictionaryBlock;
+import io.trino.spi.block.RowBlock;
 import io.trino.spi.connector.BucketFunction;
 import io.trino.spi.connector.ConnectorPartitioningHandle;
+import io.trino.spi.type.RowType;
 import io.trino.testing.TestingNodeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.index.BucketAssigner;
@@ -276,6 +281,71 @@ public class TrinoPartitioningHandleTest
     }
 
     @Test
+    public void testDynamicBucketShuffleFunctionUsesRowIdPrimaryKeyFields()
+            throws Exception
+    {
+        TableSchema schema = dynamicBucketSchema(Map.of());
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(InstantiationUtil.serializeObject(schema));
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(new TestingNodeManager());
+        RowType rowIdType = RowType.from(List.of(
+                RowType.field("dt", BIGINT),
+                RowType.field("id", BIGINT)));
+        BucketFunction bucketFunction = provider.getBucketFunction(null, null, handle, List.of(rowIdType), 3);
+        Page primaryKeyPage = new Page(
+                2,
+                bigintBlock(20260708L, 20260709L),
+                bigintBlock(11L, 12L));
+        RowBlock rowIdBlock = RowBlock.fromFieldBlocks(2, new Block[] {
+                primaryKeyPage.getBlock(0),
+                primaryKeyPage.getBlock(1)});
+        Page rowIdPage = new Page(rowIdBlock);
+        PaimonRow row = new PaimonRow(primaryKeyPage, 0, RowKind.INSERT, List.of(BIGINT, BIGINT),
+                List.of(DataTypes.BIGINT(), DataTypes.BIGINT()));
+        RowPartitionKeyExtractor extractor = new RowPartitionKeyExtractor(schema);
+        int expected = BucketAssigner.computeAssigner(
+                extractor.partition(row).hashCode(),
+                extractor.trimmedPrimaryKey(row).hashCode(),
+                3,
+                3);
+
+        assertThat(bucketFunction.getBucket(rowIdPage, 0)).isEqualTo(expected);
+
+        Block dictionaryRowIdBlock = DictionaryBlock.create(2, rowIdBlock, new int[] {1, 0});
+        Page dictionaryRowIdPage = new Page(dictionaryRowIdBlock);
+        PaimonRow remappedRow = new PaimonRow(primaryKeyPage, 1, RowKind.INSERT, List.of(BIGINT, BIGINT),
+                List.of(DataTypes.BIGINT(), DataTypes.BIGINT()));
+        int remappedExpected = BucketAssigner.computeAssigner(
+                extractor.partition(remappedRow).hashCode(),
+                extractor.trimmedPrimaryKey(remappedRow).hashCode(),
+                3,
+                3);
+
+        assertThat(bucketFunction.getBucket(dictionaryRowIdPage, 0)).isEqualTo(remappedExpected);
+    }
+
+    @Test
+    public void testDynamicBucketShuffleFunctionRejectsMalformedRowIdType()
+            throws Exception
+    {
+        TableSchema schema = dynamicBucketSchema(Map.of());
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(InstantiationUtil.serializeObject(schema));
+
+        assertThatThrownBy(() -> new DynamicBucketTableShuffleFunction(
+                List.of(RowType.anonymous(List.of(BIGINT, BIGINT))),
+                handle,
+                3))
+                .hasMessage("Paimon row id field at index 0 must be named");
+
+        assertThatThrownBy(() -> new DynamicBucketTableShuffleFunction(
+                List.of(RowType.from(List.of(
+                        RowType.field("id", BIGINT),
+                        RowType.field("dt", BIGINT)))),
+                handle,
+                3))
+                .hasMessage("Paimon row id field at index 0 must be primary key 'dt', got 'id'");
+    }
+
+    @Test
     public void testDynamicBucketShuffleFunctionUsesInitialBucketsAsNumAssigners()
             throws Exception
     {
@@ -328,6 +398,15 @@ public class TrinoPartitioningHandleTest
     private static String typedHandleId(Class<?> handleClass)
     {
         return "paimon:" + handleClass.getName();
+    }
+
+    private static Block bigintBlock(long... values)
+    {
+        BlockBuilder builder = BIGINT.createFixedSizeBlockBuilder(values.length);
+        for (long value : values) {
+            BIGINT.writeLong(builder, value);
+        }
+        return builder.build();
     }
 
     private static byte[] serializedTestSchema()

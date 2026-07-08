@@ -15,6 +15,7 @@ package io.trino.plugin.paimon;
 
 import io.trino.spi.Page;
 import io.trino.spi.connector.BucketFunction;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.codegen.CodeGenUtils;
@@ -25,14 +26,16 @@ import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketNumAssigners;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketWritePartitionColumns;
+import static io.trino.plugin.paimon.PaimonShuffleUtils.projectedTypes;
+import static io.trino.plugin.paimon.PaimonShuffleUtils.projection;
+import static io.trino.plugin.paimon.PaimonShuffleUtils.rowIdFieldPage;
+import static io.trino.plugin.paimon.PaimonShuffleUtils.validateRowIdType;
 import static java.util.Objects.requireNonNull;
 
 public class DynamicBucketTableShuffleFunction
@@ -40,6 +43,7 @@ public class DynamicBucketTableShuffleFunction
 {
     private final int assignerChannelCount;
     private final int numAssigners;
+    private final boolean isRowId;
     private final ThreadLocal<Projection> partitionProjectionContext;
     private final ThreadLocal<Projection> trimmedPrimaryKeyProjectionContext;
     private final List<Type> paimonRowTypes;
@@ -53,11 +57,18 @@ public class DynamicBucketTableShuffleFunction
         requireNonNull(partitioningHandle, "partitioningHandle is null");
         checkArgument(assignerCount > 0, "assignerCount must be positive: %s", assignerCount);
         TableSchema schema = partitioningHandle.getOriginalSchema();
-        List<String> inputFields = dynamicBucketWritePartitionColumns(schema);
-        checkArgument(partitionChannelTypes.size() == inputFields.size(),
-                "partitionChannelTypes size (%s) must match dynamic bucket input field count (%s)",
-                partitionChannelTypes.size(), inputFields.size());
-        this.paimonRowTypes = List.copyOf(partitionChannelTypes);
+        this.isRowId = partitionChannelTypes.size() == 1 && partitionChannelTypes.get(0) instanceof RowType;
+        if (isRowId) {
+            validateRowIdType((RowType) partitionChannelTypes.get(0), schema);
+        }
+        List<String> inputFields = isRowId ? schema.primaryKeys() : dynamicBucketWritePartitionColumns(schema);
+        if (!isRowId) {
+            checkArgument(partitionChannelTypes.size() == inputFields.size(),
+                    "partitionChannelTypes size (%s) must match dynamic bucket input field count (%s)",
+                    partitionChannelTypes.size(), inputFields.size());
+        }
+        this.paimonRowTypes = isRowId ? partitionChannelTypes.get(0).getTypeParameters()
+                : List.copyOf(partitionChannelTypes);
         this.paimonLogicalTypes = projectedTypes(schema, inputFields);
         verify(paimonLogicalTypes.size() == paimonRowTypes.size(), "Paimon row type metadata size mismatch");
         org.apache.paimon.types.RowType inputType = schema.projectedLogicalRowType(inputFields);
@@ -73,6 +84,10 @@ public class DynamicBucketTableShuffleFunction
     @Override
     public int getBucket(Page page, int position)
     {
+        if (isRowId) {
+            page = rowIdFieldPage(page);
+        }
+
         PaimonRow paimonRow = new PaimonRow(page, position, RowKind.INSERT, paimonRowTypes, paimonLogicalTypes);
         BinaryRow partition = partitionProjectionContext.get().apply(paimonRow);
         BinaryRow trimmedPrimaryKey = trimmedPrimaryKeyProjectionContext.get().apply(paimonRow);
@@ -81,32 +96,5 @@ public class DynamicBucketTableShuffleFunction
                 trimmedPrimaryKey.hashCode(),
                 assignerChannelCount,
                 numAssigners);
-    }
-
-    private static List<DataType> projectedTypes(TableSchema schema, List<String> fieldNames)
-    {
-        return fieldNames.stream()
-                .map(fieldName -> {
-                    verify(schema.logicalRowType().containsField(fieldName),
-                            "Paimon field '%s' is not present in table schema", fieldName);
-                    return schema.logicalRowType().getField(fieldName).type();
-                })
-                .toList();
-    }
-
-    private static int[] projection(List<String> inputFields, List<String> projectedFields, String fieldDescription)
-    {
-        Map<String, Integer> inputFieldIndexes = new HashMap<>();
-        for (int index = 0; index < inputFields.size(); index++) {
-            inputFieldIndexes.putIfAbsent(inputFields.get(index), index);
-        }
-        return projectedFields.stream()
-                .mapToInt(projectedField -> {
-                    Integer index = inputFieldIndexes.get(projectedField);
-                    verify(index != null, "Paimon %s '%s' is not present in shuffle input fields %s",
-                            fieldDescription, projectedField, inputFields);
-                    return index;
-                })
-                .toArray();
     }
 }

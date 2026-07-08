@@ -27,6 +27,7 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.FileStore;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
@@ -103,13 +104,14 @@ public class PaimonPageSinkProviderTest
     }
 
     @Test
-    public void testMergeRequiresFixedBucketMode()
+    public void testMergeSupportsFixedAndDynamicBucketModes()
     {
         assertThatCode(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(BucketMode.HASH_FIXED)))
                 .doesNotThrowAnyException();
+        assertThatCode(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(BucketMode.HASH_DYNAMIC)))
+                .doesNotThrowAnyException();
 
         assertUnsupportedMergeBucketMode(BucketMode.BUCKET_UNAWARE);
-        assertUnsupportedMergeBucketMode(BucketMode.HASH_DYNAMIC);
         assertUnsupportedMergeBucketMode(BucketMode.KEY_DYNAMIC);
         assertUnsupportedMergeBucketMode(BucketMode.POSTPONE_MODE);
     }
@@ -369,6 +371,35 @@ public class PaimonPageSinkProviderTest
 
         assertThat(pageSink).isNotNull();
         assertThat(overwriteEnabled).isFalse();
+    }
+
+    @Test
+    public void testDynamicBucketMergePageSinkUsesPageSinkTaskPartitionAsAssigner()
+    {
+        AtomicBoolean overwriteEnabled = new AtomicBoolean();
+        PaimonPageSinkProvider provider = new PaimonPageSinkProvider(metadataFactory(
+                writeReadyFileStoreTable(new AtomicBoolean(), new AtomicReference<>(), overwriteEnabled,
+                        List.of(),
+                        Map.of(
+                                CoreOptions.BUCKET.key(), "-1",
+                                CoreOptions.DYNAMIC_BUCKET_ASSIGNER_PARALLELISM.key(), "4"),
+                        List.of("id"),
+                        BucketMode.HASH_DYNAMIC)), TestingIoManager::new, () -> 4);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
+                .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())));
+
+        ConnectorMergeSink sink = provider.createMergeSink(null, SESSION, new PaimonMergeTableHandle(tableHandle),
+                pageSinkId(2));
+
+        assertThat(sink).isNotNull();
+        assertThat(overwriteEnabled).isFalse();
+        assertThatThrownBy(() -> provider.createMergeSink(null, SESSION, new PaimonMergeTableHandle(tableHandle),
+                pageSinkId(4)))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage(
+                            "Failed to write data to Paimon: Paimon HASH_DYNAMIC writer task partition 4 is outside assigner parallelism 4");
+                });
     }
 
     @Test
@@ -1521,9 +1552,18 @@ public class PaimonPageSinkProviderTest
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessageContaining(
                             "Unsupported table bucket mode: " + bucketMode + " for Paimon merge writes");
-                    if (bucketMode == BucketMode.HASH_DYNAMIC) {
-                        assertThat(exception).hasMessageContaining("HASH_DYNAMIC INSERT only");
-                    }
+                });
+    }
+
+    private static FileStore<?> fileStore()
+    {
+        return (FileStore<?>) Proxy.newProxyInstance(
+                PaimonPageSinkProviderTest.class.getClassLoader(),
+                new Class<?>[] {FileStore.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "snapshotManager", "newIndexFileHandler" -> null;
+                    case "toString" -> "testing-file-store";
+                    default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
 
@@ -1566,7 +1606,7 @@ public class PaimonPageSinkProviderTest
                             rowType.getFields(),
                             List.of(),
                             primaryKeys,
-                            mergeOptions(options, Map.of(CoreOptions.BUCKET.key(), "7")),
+                            mergeOptions(Map.of(CoreOptions.BUCKET.key(), "7"), options),
                             ""));
                     case "copyWithLatestSchema" -> {
                         copiedWithLatestSchema.set(true);
@@ -1836,8 +1876,9 @@ public class PaimonPageSinkProviderTest
                             rowType.getFields(),
                             partitionKeys,
                             primaryKeys,
-                            mergeOptions(options, Map.of(CoreOptions.BUCKET.key(), "7")),
+                            mergeOptions(Map.of(CoreOptions.BUCKET.key(), "7"), options),
                             ""));
+                    case "store" -> fileStore();
                     case "newBatchWriteBuilder" -> batchWriteBuilder;
                     case "copyWithLatestSchema" -> {
                         copiedWithLatestSchema.set(true);
@@ -1866,8 +1907,9 @@ public class PaimonPageSinkProviderTest
                             rowType.getFields(),
                             partitionKeys,
                             primaryKeys,
-                            mergeOptions(options, Map.of(CoreOptions.BUCKET.key(), "7")),
+                            mergeOptions(Map.of(CoreOptions.BUCKET.key(), "7"), options),
                             ""));
+                    case "store" -> fileStore();
                     case "copyWithoutTimeTravel" -> {
                         copyWithoutTimeTravelOptions.set(Map.copyOf((Map<String, String>) args[0]));
                         yield latestTableRef.get();

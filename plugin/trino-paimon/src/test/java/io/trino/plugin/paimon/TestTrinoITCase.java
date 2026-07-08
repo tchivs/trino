@@ -132,6 +132,9 @@ public class TestTrinoITCase
             sql("DROP TABLE IF EXISTS paimon.default.merge_delete_bucket_unaware_values");
             sql("DROP TABLE IF EXISTS paimon.default.merge_update_bucket_unaware_values");
             sql("DROP TABLE IF EXISTS paimon.default.hash_fixed_mutations");
+            sql("DROP TABLE IF EXISTS paimon.default.hash_dynamic_writes");
+            sql("DROP TABLE IF EXISTS paimon.default.hash_dynamic_overwrite");
+            sql("DROP TABLE IF EXISTS paimon.default.hash_dynamic_mutations");
             sql("DROP TABLE IF EXISTS paimon.default.drop_nn_values");
             sql("DROP TABLE IF EXISTS paimon.default.nested_field_values");
             sql("DROP TABLE IF EXISTS paimon.default.not_null_values");
@@ -1192,7 +1195,7 @@ public class TestTrinoITCase
     }
 
     @Test
-    public void testHashDynamicRowLevelChangesFailFast()
+    public void testHashDynamicDeleteUpdateAndMerge()
     {
         sql("CREATE TABLE paimon.default.hash_dynamic_mutations ("
                 + "id integer, "
@@ -1203,20 +1206,23 @@ public class TestTrinoITCase
         sql("INSERT INTO paimon.default.hash_dynamic_mutations VALUES "
                 + "(1, 'one', 10), (2, 'two', 20), (3, 'three', 30)");
 
-        assertThatExceptionOfType(QueryFailedException.class)
-                .isThrownBy(() -> sql("UPDATE paimon.default.hash_dynamic_mutations SET name = 'two-updated', score = 22 WHERE id = 2"))
-                .withMessageContaining("HASH_DYNAMIC INSERT only");
-        assertThatExceptionOfType(QueryFailedException.class)
-                .isThrownBy(() -> sql("DELETE FROM paimon.default.hash_dynamic_mutations WHERE id = 3"))
-                .withMessageContaining("HASH_DYNAMIC INSERT only");
-        assertThatExceptionOfType(QueryFailedException.class)
-                .isThrownBy(() -> sql("MERGE INTO paimon.default.hash_dynamic_mutations t "
-                        + "USING (VALUES (1, 'one-updated', 11), (4, 'four', 40)) "
-                        + "AS s(id, name, score) "
-                        + "ON (t.id = s.id) "
-                        + "WHEN MATCHED THEN UPDATE SET name = s.name, score = s.score "
-                        + "WHEN NOT MATCHED THEN INSERT (id, name, score) VALUES (s.id, s.name, s.score)"))
-                .withMessageContaining("HASH_DYNAMIC INSERT only");
+        sql("DELETE FROM paimon.default.hash_dynamic_mutations WHERE id = 3");
+        assertThat(sql("SELECT * FROM paimon.default.hash_dynamic_mutations ORDER BY id"))
+                .isEqualTo("[[1, one, 10], [2, two, 20]]");
+
+        sql("UPDATE paimon.default.hash_dynamic_mutations SET name = 'two-updated', score = 22 WHERE id = 2");
+        assertThat(sql("SELECT * FROM paimon.default.hash_dynamic_mutations ORDER BY id"))
+                .isEqualTo("[[1, one, 10], [2, two-updated, 22]]");
+
+        sql("MERGE INTO paimon.default.hash_dynamic_mutations t "
+                + "USING (VALUES (1, 'one-updated', 11), (2, 'two-deleted', -1), (4, 'four', 40)) "
+                + "AS s(id, name, score) "
+                + "ON (t.id = s.id) "
+                + "WHEN MATCHED AND s.score < 0 THEN DELETE "
+                + "WHEN MATCHED THEN UPDATE SET name = s.name, score = s.score "
+                + "WHEN NOT MATCHED THEN INSERT (id, name, score) VALUES (s.id, s.name, s.score)");
+        assertThat(sql("SELECT * FROM paimon.default.hash_dynamic_mutations ORDER BY id"))
+                .isEqualTo("[[1, one-updated, 11], [4, four, 40]]");
     }
 
     @Test
