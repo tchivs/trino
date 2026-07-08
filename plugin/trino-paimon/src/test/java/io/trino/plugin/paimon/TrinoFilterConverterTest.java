@@ -392,8 +392,12 @@ public class TrinoFilterConverterTest
         assertThat(fileIndexPredicate).isInstanceOf(LeafPredicate.class);
         LeafPredicate leafPredicate = (LeafPredicate) fileIndexPredicate;
         assertThat(leafPredicate.fieldNames()).containsExactly(toMapKey("properties", "region"));
-        assertThat(leafPredicate.fieldRefOptional().orElseThrow().type()).isEqualTo(mapElement.logicalType());
+        org.apache.paimon.types.DataType fieldRefType = leafPredicate.fieldRefOptional().orElseThrow().type();
+        assertThat(fieldRefType).isEqualTo(mapType.getValueType());
         assertThat(leafPredicate.literals()).containsExactly(BinaryString.fromString("ap-south"));
+        assertThat(org.apache.paimon.fileindex.bitmap.BitmapFileIndex.getValueMapper(fieldRefType)
+                .apply(leafPredicate.literals().get(0)))
+                .isEqualTo(BinaryString.fromString("ap-south"));
     }
 
     @Test

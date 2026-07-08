@@ -2635,7 +2635,9 @@ public class PaimonPageSourceTest
         assertThat(context.rowType()).isSameAs(latestRowType);
         assertThat(context.fileIndexFilter()).hasValueSatisfying(predicate -> {
             assertThat(predicate).isInstanceOf(LeafPredicate.class);
-            assertThat(((LeafPredicate) predicate).fieldNames()).containsExactly(toMapKey("properties", "region"));
+            LeafPredicate leafPredicate = (LeafPredicate) predicate;
+            assertThat(leafPredicate.fieldNames()).containsExactly(toMapKey("properties", "region"));
+            assertThat(leafPredicate.fieldRefOptional().orElseThrow().type()).isEqualTo(latestMapType.getValueType());
         });
     }
 

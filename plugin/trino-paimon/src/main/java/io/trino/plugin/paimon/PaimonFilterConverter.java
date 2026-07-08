@@ -217,9 +217,10 @@ public class PaimonFilterConverter
         if (!(type instanceof MapType mapType)) {
             throw new UnsupportedOperationException("File-index nested predicates require a map column: " + field);
         }
-        if (logicalType.getTypeRoot() != DataTypeRoot.MAP) {
+        if (!(logicalType instanceof org.apache.paimon.types.MapType paimonMapType)) {
             throw new UnsupportedOperationException("File-index nested predicates require a Paimon MAP column: " + field);
         }
+        DataType valueLogicalType = paimonMapType.getValueType();
 
         if (domain.isAll()) {
             throw new UnsupportedOperationException("Domain is ALL, no predicate needed for file-index column: " + field);
@@ -244,7 +245,7 @@ public class PaimonFilterConverter
         if (values.isEmpty()) {
             return PredicateBuilder.alwaysFalse();
         }
-        return new LeafPredicate(In.INSTANCE, logicalType, columnIndex, field, values);
+        return new LeafPredicate(In.INSTANCE, valueLogicalType, columnIndex, field, values);
     }
 
     private Predicate toPredicate(int columnIndex, Range range)
