@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -159,7 +160,6 @@ public class DirectTrinoPageSource
             throw new RuntimeException("Current is null, should not invoke advance");
         }
         PageSourceHandle exhausted = current;
-        current = null;
         try {
             closePageSource(exhausted);
         }
@@ -175,7 +175,6 @@ public class DirectTrinoPageSource
         if (closed) {
             return;
         }
-        closed = true;
         IOException exception = null;
         if (current != null) {
             try {
@@ -184,10 +183,14 @@ public class DirectTrinoPageSource
             catch (IOException e) {
                 exception = e;
             }
-            current = null;
+            if (current.isFullyClosed()) {
+                current = null;
+            }
         }
         try {
-            for (PageSourceHandle source : pageSourceQueue) {
+            Iterator<PageSourceHandle> sources = pageSourceQueue.iterator();
+            while (sources.hasNext()) {
+                PageSourceHandle source = sources.next();
                 try {
                     closePageSource(source);
                 }
@@ -199,13 +202,16 @@ public class DirectTrinoPageSource
                         exception.addSuppressed(e);
                     }
                 }
+                if (source.isFullyClosed()) {
+                    sources.remove();
+                }
             }
-            pageSourceQueue.clear();
         }
         finally {
             if (exception != null) {
                 throw new UncheckedIOException(exception);
             }
+            closed = true;
         }
     }
 
@@ -252,7 +258,7 @@ public class DirectTrinoPageSource
 
     private Optional<ConnectorPageSource> currentSource()
     {
-        if (current == null || !current.isOpened()) {
+        if (current == null || !current.isOpened() || current.isCompletedStateAccumulated()) {
             return Optional.empty();
         }
         return Optional.of(current.pageSource());
@@ -268,13 +274,19 @@ public class DirectTrinoPageSource
 
     private void accumulateCompletedState(PageSourceHandle source)
     {
-        if (!source.isOpened()) {
+        if (source.isCompletedStateAccumulated()) {
             return;
         }
-        ConnectorPageSource pageSource = source.pageSource();
-        completedBytes = saturatedAdd(completedBytes, pageSource.getCompletedBytes(), "completed bytes");
-        completedReadTimeNanos = saturatedAdd(completedReadTimeNanos, pageSource.getReadTimeNanos(), "read time nanos");
-        completedMetrics = completedMetrics.mergeWith(pageSource.getMetrics());
+        if (source.isOpened()) {
+            ConnectorPageSource pageSource = source.pageSource();
+            long newCompletedBytes = saturatedAdd(completedBytes, pageSource.getCompletedBytes(), "completed bytes");
+            long newCompletedReadTimeNanos = saturatedAdd(completedReadTimeNanos, pageSource.getReadTimeNanos(), "read time nanos");
+            Metrics newCompletedMetrics = completedMetrics.mergeWith(pageSource.getMetrics());
+            completedBytes = newCompletedBytes;
+            completedReadTimeNanos = newCompletedReadTimeNanos;
+            completedMetrics = newCompletedMetrics;
+        }
+        source.markCompletedStateAccumulated();
     }
 
     private void closePageSource(PageSourceHandle source)
@@ -327,6 +339,8 @@ public class DirectTrinoPageSource
     {
         private final Supplier<ConnectorPageSource> supplier;
         private ConnectorPageSource pageSource;
+        private boolean completedStateAccumulated;
+        private boolean closed;
 
         private PageSourceHandle(Supplier<ConnectorPageSource> supplier, ConnectorPageSource pageSource)
         {
@@ -349,6 +363,21 @@ public class DirectTrinoPageSource
             return pageSource != null;
         }
 
+        boolean isCompletedStateAccumulated()
+        {
+            return completedStateAccumulated;
+        }
+
+        void markCompletedStateAccumulated()
+        {
+            completedStateAccumulated = true;
+        }
+
+        boolean isFullyClosed()
+        {
+            return completedStateAccumulated && closed;
+        }
+
         ConnectorPageSource pageSource()
         {
             if (pageSource == null) {
@@ -360,9 +389,13 @@ public class DirectTrinoPageSource
         void close()
                 throws IOException
         {
+            if (closed) {
+                return;
+            }
             if (pageSource != null) {
                 pageSource.close();
             }
+            closed = true;
         }
     }
 }

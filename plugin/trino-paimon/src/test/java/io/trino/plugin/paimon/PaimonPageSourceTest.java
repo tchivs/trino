@@ -3056,6 +3056,23 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectPageSourceCloseDoesNotOpenLazySources()
+    {
+        AtomicInteger firstOpens = new AtomicInteger();
+        AtomicInteger secondOpens = new AtomicInteger();
+        LinkedList<Supplier<ConnectorPageSource>> suppliers = new LinkedList<>(List.of(
+                countingPageSourceSupplier(firstOpens, new TestingPageSource(new Page(1, bigintBlock(1)))),
+                countingPageSourceSupplier(secondOpens, new TestingPageSource(new Page(1, bigintBlock(2))))));
+
+        DirectTrinoPageSource pageSource = DirectTrinoPageSource.lazyPageSources(suppliers, OptionalLong.empty());
+
+        pageSource.close();
+
+        assertThat(firstOpens).hasValue(0);
+        assertThat(secondOpens).hasValue(0);
+    }
+
+    @Test
     void testDirectPageSourceLimitDoesNotOpenUnusedQueuedSources()
     {
         AtomicInteger firstOpens = new AtomicInteger();
@@ -3072,6 +3089,7 @@ public class PaimonPageSourceTest
         assertThat(firstOpens).hasValue(1);
         assertThat(secondOpens).hasValue(0);
         assertThat(pageSource.getNextPage()).isNull();
+        assertThat(secondOpens).hasValue(0);
     }
 
     @Test
@@ -3113,6 +3131,32 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDirectPageSourceAdvanceCloseFailureRetriesDuringSuppressionClose()
+    {
+        IOException failure = new IOException("transient exhausted close failed");
+        RetryableClosePageSource first = new RetryableClosePageSource(
+                failure,
+                new Page(1, bigintBlock(1)),
+                10L,
+                20L);
+        AtomicBoolean secondClosed = new AtomicBoolean();
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(
+                first,
+                new FailingClosePageSource(new Page(1, bigintBlock(2)), secondClosed, null))),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::getNextPage)
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to open or read Paimon split");
+                    assertThat(exception.getCause()).isSameAs(failure);
+                });
+
+        assertThat(first.closeCalls()).isEqualTo(2);
+        assertThat(secondClosed).isTrue();
+    }
+
+    @Test
     void testDirectPageSourceCloseStillClosesSourcesWhenCompletedStateFails()
     {
         RuntimeException metricsFailure = new RuntimeException("completed state unavailable");
@@ -3150,6 +3194,128 @@ public class PaimonPageSourceTest
                 });
         assertThat(firstClosed).isTrue();
         assertThat(secondClosed).isTrue();
+    }
+
+    @Test
+    void testDirectPageSourceCloseRetriesCurrentSourceAfterCloseFailure()
+    {
+        IOException closeFailure = new IOException("transient close failed");
+        RetryableClosePageSource source = new RetryableClosePageSource(
+                closeFailure,
+                new Page(1, bigintBlock(1)),
+                10L,
+                20L);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(source)),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::close)
+                .isInstanceOfSatisfying(UncheckedIOException.class, exception ->
+                        assertThat(exception.getCause()).isSameAs(closeFailure));
+        assertThat(source.closeCalls()).isEqualTo(1);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(10L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(20L);
+
+        pageSource.close();
+
+        assertThat(source.closeCalls()).isEqualTo(2);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(10L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(20L);
+        assertThat(pageSource.getMetrics()).isEqualTo(new Metrics(Map.of("merge-wrapper", new LongCount(11))));
+
+        pageSource.close();
+
+        assertThat(source.closeCalls()).isEqualTo(2);
+    }
+
+    @Test
+    void testDirectPageSourceCloseRetriesQueuedSourceAfterCloseFailure()
+    {
+        IOException closeFailure = new IOException("queued close failed");
+        AtomicBoolean firstClosed = new AtomicBoolean();
+        RetryableClosePageSource second = new RetryableClosePageSource(
+                closeFailure,
+                new Page(1, bigintBlock(2)),
+                30L,
+                40L);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(
+                new FailingClosePageSource(new Page(1, bigintBlock(1)), firstClosed, null),
+                second)),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::close)
+                .isInstanceOfSatisfying(UncheckedIOException.class, exception ->
+                        assertThat(exception.getCause()).isSameAs(closeFailure));
+        assertThat(firstClosed).isTrue();
+        assertThat(second.closeCalls()).isEqualTo(1);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(30L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(40L);
+
+        pageSource.close();
+
+        assertThat(second.closeCalls()).isEqualTo(2);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(30L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(40L);
+    }
+
+    @Test
+    void testDirectPageSourceCloseRetriesCompletedStateWithoutClosingAgain()
+    {
+        RuntimeException stateFailure = new RuntimeException("state unavailable");
+        RetryableCompletedStatePageSource source = new RetryableCompletedStatePageSource(
+                stateFailure,
+                new Page(1, bigintBlock(1)),
+                50L,
+                60L);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(source)),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::close)
+                .isInstanceOfSatisfying(UncheckedIOException.class, exception -> {
+                    assertThat(exception.getCause()).hasMessage("Failed to accumulate completed state before closing Paimon direct page source");
+                    assertThat(exception.getCause().getCause()).isSameAs(stateFailure);
+                });
+        assertThat(source.closeCalls()).isEqualTo(1);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(50L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(60L);
+
+        pageSource.close();
+
+        assertThat(source.closeCalls()).isEqualTo(1);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(50L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(60L);
+
+        pageSource.close();
+
+        assertThat(source.closeCalls()).isEqualTo(1);
+    }
+
+    @Test
+    void testDirectPageSourceCloseRetriesPartiallyReadCompletedStateWithoutDoubleCounting()
+    {
+        RuntimeException metricsFailure = new RuntimeException("metrics unavailable");
+        RetryableMetricsStatePageSource source = new RetryableMetricsStatePageSource(
+                metricsFailure,
+                new Page(1, bigintBlock(1)),
+                70L,
+                80L);
+        DirectTrinoPageSource pageSource = new DirectTrinoPageSource(new LinkedList<>(List.of(source)),
+                OptionalLong.empty());
+
+        assertThatThrownBy(pageSource::close)
+                .isInstanceOfSatisfying(UncheckedIOException.class, exception -> {
+                    assertThat(exception.getCause()).hasMessage("Failed to accumulate completed state before closing Paimon direct page source");
+                    assertThat(exception.getCause().getCause()).isSameAs(metricsFailure);
+                });
+        assertThat(source.closeCalls()).isEqualTo(1);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(70L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(80L);
+
+        pageSource.close();
+
+        assertThat(source.closeCalls()).isEqualTo(1);
+        assertThat(pageSource.getCompletedBytes()).isEqualTo(70L);
+        assertThat(pageSource.getReadTimeNanos()).isEqualTo(80L);
+        assertThat(pageSource.getMetrics()).isEqualTo(new Metrics(Map.of("merge-wrapper", new LongCount(11))));
     }
 
     @Test
@@ -4633,6 +4799,149 @@ public class PaimonPageSourceTest
         {
             closed.set(true);
             throw closeFailure;
+        }
+    }
+
+    private static class RetryableClosePageSource
+            implements ConnectorPageSource
+    {
+        private final IOException firstCloseFailure;
+        private final Page page;
+        private final long completedBytes;
+        private final long readTimeNanos;
+        private final Metrics metrics = new Metrics(Map.of("merge-wrapper", new LongCount(11)));
+        private final AtomicInteger closeCalls = new AtomicInteger();
+
+        private RetryableClosePageSource(IOException firstCloseFailure, Page page, long completedBytes, long readTimeNanos)
+        {
+            this.firstCloseFailure = requireNonNull(firstCloseFailure, "firstCloseFailure is null");
+            this.page = requireNonNull(page, "page is null");
+            this.completedBytes = completedBytes;
+            this.readTimeNanos = readTimeNanos;
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return completedBytes;
+        }
+
+        @Override
+        public OptionalLong getCompletedPositions()
+        {
+            return OptionalLong.of(page.getPositionCount());
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return readTimeNanos;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return true;
+        }
+
+        @Override
+        public Page getNextPage()
+        {
+            return null;
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return 0;
+        }
+
+        @Override
+        public Metrics getMetrics()
+        {
+            return metrics;
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            if (closeCalls.incrementAndGet() == 1) {
+                throw firstCloseFailure;
+            }
+        }
+
+        private int closeCalls()
+        {
+            return closeCalls.get();
+        }
+    }
+
+    private static class RetryableCompletedStatePageSource
+            extends DelegatingStatePageSource
+    {
+        private final RuntimeException firstStateFailure;
+        private final AtomicInteger completedBytesCalls = new AtomicInteger();
+        private final AtomicInteger closeCalls = new AtomicInteger();
+
+        private RetryableCompletedStatePageSource(RuntimeException firstStateFailure, Page page, long completedBytes, long readTimeNanos)
+        {
+            super(page, OptionalLong.of(0), completedBytes, readTimeNanos);
+            this.firstStateFailure = requireNonNull(firstStateFailure, "firstStateFailure is null");
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            if (completedBytesCalls.incrementAndGet() == 1) {
+                throw firstStateFailure;
+            }
+            return super.getCompletedBytes();
+        }
+
+        @Override
+        public void close()
+        {
+            closeCalls.incrementAndGet();
+        }
+
+        private int closeCalls()
+        {
+            return closeCalls.get();
+        }
+    }
+
+    private static class RetryableMetricsStatePageSource
+            extends DelegatingStatePageSource
+    {
+        private final RuntimeException firstMetricsFailure;
+        private final AtomicInteger metricsCalls = new AtomicInteger();
+        private final AtomicInteger closeCalls = new AtomicInteger();
+
+        private RetryableMetricsStatePageSource(RuntimeException firstMetricsFailure, Page page, long completedBytes, long readTimeNanos)
+        {
+            super(page, OptionalLong.of(0), completedBytes, readTimeNanos);
+            this.firstMetricsFailure = requireNonNull(firstMetricsFailure, "firstMetricsFailure is null");
+        }
+
+        @Override
+        public Metrics getMetrics()
+        {
+            if (metricsCalls.incrementAndGet() == 1) {
+                throw firstMetricsFailure;
+            }
+            return super.getMetrics();
+        }
+
+        @Override
+        public void close()
+        {
+            closeCalls.incrementAndGet();
+        }
+
+        private int closeCalls()
+        {
+            return closeCalls.get();
         }
     }
 
