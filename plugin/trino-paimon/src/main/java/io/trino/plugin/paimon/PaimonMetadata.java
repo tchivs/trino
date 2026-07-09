@@ -88,6 +88,7 @@ import org.apache.paimon.table.system.SystemTableLoader;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.RowType;
@@ -2337,10 +2338,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
         rejectPaimonSystemColumnName("rename column", target);
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "rename column");
-        String sourceColumnName = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle).name();
+        DataField sourceField = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle);
+        String sourceColumnName = sourceField.name();
         PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(table);
         rejectPartitionKeyChange("rename column", "rename", paimonColumnHandle, schemaEvolutionKeys);
         rejectPrimaryKeyChange("rename column", "rename", paimonColumnHandle, schemaEvolutionKeys);
+        rejectBlobColumnRename(sourceField);
         validateNoCaseInsensitiveDuplicateColumnName(table, schemaTableName(paimonTableHandle), target,
                 Optional.of(sourceColumnName));
         List<SchemaChange> changes = new ArrayList<>();
@@ -2442,6 +2445,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         DataType paimonType = toPaimonType(type)
                 .copy(field.type().isNullable());
+        rejectBlobColumnTypeChange(field, paimonType);
 
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.updateColumnType(columnName, paimonType, true));
@@ -2623,6 +2627,28 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
         catch (Exception e) {
             throw paimonAlterTableException(schemaTableName(paimonTableHandle), e);
+        }
+    }
+
+    private static void rejectBlobColumnRename(DataField field)
+    {
+        requireNonNull(field, "field is null");
+        if (field.type().is(DataTypeRoot.BLOB)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon rename column is not supported: Cannot rename BLOB column: [" + field.name() + "]");
+        }
+    }
+
+    private static void rejectBlobColumnTypeChange(DataField field, DataType newType)
+    {
+        requireNonNull(field, "field is null");
+        requireNonNull(newType, "newType is null");
+        if (field.type().is(DataTypeRoot.BLOB) || newType.is(DataTypeRoot.BLOB)) {
+            throw new TrinoException(NOT_SUPPORTED, format(
+                    "Paimon set column type is not supported: Cannot change column type involving BLOB: [%s] %s -> %s",
+                    field.name(),
+                    field.type(),
+                    newType));
         }
     }
 

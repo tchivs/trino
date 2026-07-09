@@ -5136,6 +5136,28 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testBlobColumnRenameAndTypeChangeAreRejectedBeforeCatalogAlter()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "picture", DataTypes.BLOB()),
+                DataTypes.FIELD(1, "payload", DataTypes.STRING()));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle blobColumn = PaimonColumnHandle.of("picture", DataTypes.BLOB());
+
+        assertTrinoError(() -> metadata.renameColumn(SESSION, tableHandle, blobColumn, "renamed_picture"),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon rename column is not supported: Cannot rename BLOB column: [picture]");
+        assertTrinoError(() -> metadata.setColumnType(SESSION, tableHandle, blobColumn, BIGINT),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon set column type is not supported: Cannot change column type involving BLOB: [picture] BLOB -> BIGINT");
+
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testSetColumnCommentUsesPaimonCommentSchemaChange()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "payload", DataTypes.BYTES()));
