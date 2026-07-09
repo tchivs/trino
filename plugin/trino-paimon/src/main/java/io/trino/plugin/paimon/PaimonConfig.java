@@ -770,7 +770,7 @@ public class PaimonConfig
         }
         putIfPresentTrimmed(options, "metastore", metastore);
         putIfPresent(options, "uri", uri);
-        putIfPresent(options, "table.type", tableType);
+        putIfPresentTrimmed(options, "table.type", tableType);
         putIfPresent(options, "lock.enabled", lockEnabled);
         putIfPresent(options, "lock.type", lockType);
         putIfPresent(options, "lock-check-max-sleep", lockCheckMaxSleep);
