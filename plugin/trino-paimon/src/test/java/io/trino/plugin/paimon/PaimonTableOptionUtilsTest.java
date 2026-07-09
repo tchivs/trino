@@ -260,6 +260,64 @@ public class PaimonTableOptionUtilsTest
     }
 
     @Test
+    public void testTypedAndIdentifierLikeTableOptionValuesAreTrimmed()
+    {
+        Schema.Builder builder = Schema.newBuilder()
+                .column("id", DataTypes.INT())
+                .column("embedding", DataTypes.ARRAY(DataTypes.FLOAT()));
+
+        PaimonTableOptionUtils.buildOptions(builder, Map.ofEntries(
+                entry("bucket", " 7 "),
+                entry("bucket_append_ordered", " false "),
+                entry("merge_engine", " partial-update "),
+                entry("sequence_field_sort_order", " descending "),
+                entry("target_file_size", " 64 MB "),
+                entry("file_format", " parquet "),
+                entry("vector_file_format", " lance "),
+                entry("file_compression", " zstd "),
+                entry("metadata_stats_mode", " truncate(16) "),
+                entry("partition_mark_done_action", " done-file ")));
+
+        assertThat(builder.build().options())
+                .containsEntry(CoreOptions.BUCKET.key(), "7")
+                .containsEntry(CoreOptions.BUCKET_APPEND_ORDERED.key(), "false")
+                .containsEntry(CoreOptions.MERGE_ENGINE.key(), "partial-update")
+                .containsEntry(CoreOptions.SEQUENCE_FIELD_SORT_ORDER.key(), "descending")
+                .containsEntry(CoreOptions.TARGET_FILE_SIZE.key(), "64 MB")
+                .containsEntry(CoreOptions.FILE_FORMAT.key(), "parquet")
+                .containsEntry(CoreOptions.VECTOR_FILE_FORMAT.key(), "lance")
+                .containsEntry(CoreOptions.FILE_COMPRESSION.key(), "zstd")
+                .containsEntry(CoreOptions.METADATA_STATS_MODE.key(), "truncate(16)")
+                .containsEntry(CoreOptions.PARTITION_MARK_DONE_ACTION.key(), "done-file");
+    }
+
+    @Test
+    public void testFreeFormStringTableOptionValuesArePreserved()
+    {
+        Schema.Builder builder = Schema.newBuilder()
+                .column("id", DataTypes.INT())
+                .column("payload", DataTypes.BYTES());
+
+        PaimonTableOptionUtils.buildOptions(builder, Map.ofEntries(
+                entry("variant_shredding_schema", " {\"type\":\"object\"} "),
+                entry("blob_external_storage_path", " s3://bucket/path "),
+                entry("partition_timestamp_pattern", " yyyy-MM-dd HH:mm:ss ")));
+
+        assertThat(builder.build().options())
+                .containsEntry(CoreOptions.VARIANT_SHREDDING_SCHEMA.key(), " {\"type\":\"object\"} ")
+                .containsEntry(CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(), " s3://bucket/path ")
+                .containsEntry(CoreOptions.PARTITION_TIMESTAMP_PATTERN.key(), " yyyy-MM-dd HH:mm:ss ");
+    }
+
+    @Test
+    public void testNativePaimonOptionKeysCanNormalizeValuesForAlterTable()
+    {
+        assertThat(PaimonTableOptionUtils.normalizeOptionValue(
+                CoreOptions.FILE_FORMAT.key(), CoreOptions.FILE_FORMAT.key(), " avro "))
+                .isEqualTo("avro");
+    }
+
+    @Test
     public void testBuildOptionsRejectsNonStringOptionValues()
     {
         Schema.Builder builder = Schema.newBuilder()

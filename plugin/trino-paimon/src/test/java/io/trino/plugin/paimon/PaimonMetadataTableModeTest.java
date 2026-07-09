@@ -5861,6 +5861,34 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetTablePropertiesNormalizesPaimonOptionValues()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        metadata.setTableProperties(SESSION, tableHandle, Map.of(
+                "variant_shredding_max_schema_width", Optional.of(" 64 "),
+                "vector_file_format", Optional.of(" lance ")));
+
+        assertThat(catalog.alterCalls).isEqualTo(1);
+        assertThat(catalog.lastAlterChanges).hasSize(2);
+        assertThat(catalog.lastAlterChanges)
+                .anySatisfy(change -> {
+                    assertThat(change).isInstanceOf(SchemaChange.SetOption.class);
+                    SchemaChange.SetOption setOption = (SchemaChange.SetOption) change;
+                    assertThat(setOption.key()).isEqualTo(CoreOptions.VARIANT_SHREDDING_MAX_SCHEMA_WIDTH.key());
+                    assertThat(setOption.value()).isEqualTo("64");
+                })
+                .anySatisfy(change -> {
+                    assertThat(change).isInstanceOf(SchemaChange.SetOption.class);
+                    SchemaChange.SetOption setOption = (SchemaChange.SetOption) change;
+                    assertThat(setOption.key()).isEqualTo(CoreOptions.VECTOR_FILE_FORMAT.key());
+                    assertThat(setOption.value()).isEqualTo("lance");
+                });
+    }
+
+    @Test
     public void testSetTablePropertiesRejectsDuplicatePaimonOptionKeys()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog();

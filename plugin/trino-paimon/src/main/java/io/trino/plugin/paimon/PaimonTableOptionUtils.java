@@ -25,10 +25,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -86,6 +88,7 @@ public class PaimonTableOptionUtils
             .collect(toUnmodifiableSet());
     private static final List<OptionInfo> OPTION_INFOS = buildOptionInfos();
     private static final Map<String, OptionInfo> OPTION_INFO_BY_TRINO_KEY = indexOptionInfosByTrinoKey(OPTION_INFOS);
+    private static final Map<String, OptionInfo> OPTION_INFO_BY_PAIMON_KEY = indexOptionInfosByPaimonKey(OPTION_INFOS);
 
     private PaimonTableOptionUtils()
     {
@@ -100,10 +103,29 @@ public class PaimonTableOptionUtils
             validatePropertyKey(propertyName);
             OptionInfo optionInfo = OPTION_INFO_BY_TRINO_KEY.get(propertyName);
             if (optionInfo != null && entry.getValue() != null) {
-                builder.option(optionInfo.paimonOptionKey,
-                        requireNonBlankStringOptionValue(optionInfo.trinoOptionKey, entry.getValue()));
+                builder.option(optionInfo.paimonOptionKey, normalizeOptionValue(optionInfo, entry.getValue()));
             }
         }
+    }
+
+    static String normalizeOptionValue(String trinoOptionKey, String paimonOptionKey, Object rawValue)
+    {
+        requireNonNull(trinoOptionKey, "trinoOptionKey is null");
+        requireNonNull(paimonOptionKey, "paimonOptionKey is null");
+        OptionInfo optionInfo = OPTION_INFO_BY_TRINO_KEY.get(trinoOptionKey);
+        if (optionInfo == null) {
+            optionInfo = OPTION_INFO_BY_PAIMON_KEY.get(paimonOptionKey);
+        }
+        if (optionInfo == null) {
+            return requireNonBlankStringOptionValue(trinoOptionKey, rawValue);
+        }
+        return normalizeOptionValue(optionInfo, rawValue);
+    }
+
+    private static String normalizeOptionValue(OptionInfo optionInfo, Object rawValue)
+    {
+        String optionValue = requireNonBlankStringOptionValue(optionInfo.trinoOptionKey, rawValue);
+        return optionInfo.valueRequiresTrim ? optionValue.trim() : optionValue;
     }
 
     static String requireNonBlankStringOptionValue(String propertyName, Object rawValue)
@@ -216,9 +238,11 @@ public class PaimonTableOptionUtils
                 continue;
             }
 
+            Optional<Class<?>> valueClass = optionValueClass(optionWithMetaInfo.field);
             String className = optionValueClassName(optionWithMetaInfo.field);
             optionInfos.add(new OptionInfo(convertOptionKey(optionWithMetaInfo.option.key()),
-                    optionWithMetaInfo.option.key(), className));
+                    optionWithMetaInfo.option.key(), className,
+                    shouldTrimOptionValue(optionWithMetaInfo.option.key(), valueClass)));
         }
         validateOptionInfos(optionInfos);
         return List.copyOf(optionInfos);
@@ -230,6 +254,16 @@ public class PaimonTableOptionUtils
         Map<String, OptionInfo> indexedOptionInfos = new LinkedHashMap<>();
         for (OptionInfo optionInfo : optionInfos) {
             indexedOptionInfos.put(optionInfo.trinoOptionKey, optionInfo);
+        }
+        return Map.copyOf(indexedOptionInfos);
+    }
+
+    private static Map<String, OptionInfo> indexOptionInfosByPaimonKey(List<OptionInfo> optionInfos)
+    {
+        requireNonNull(optionInfos, "optionInfos is null");
+        Map<String, OptionInfo> indexedOptionInfos = new LinkedHashMap<>();
+        for (OptionInfo optionInfo : optionInfos) {
+            indexedOptionInfos.put(optionInfo.paimonOptionKey, optionInfo);
         }
         return Map.copyOf(indexedOptionInfos);
     }
@@ -265,19 +299,75 @@ public class PaimonTableOptionUtils
         }
     }
 
-    private static String optionValueClassName(Field field)
+    private static Optional<Class<?>> optionValueClass(Field field)
     {
-        String className = "";
         Type genericType = field.getGenericType();
         if (genericType instanceof ParameterizedType parameterizedType) {
             Type[] actualTypeArguments = parameterizedType.getActualTypeArguments();
-            for (Type actualTypeArgument : actualTypeArguments) {
-                if (actualTypeArgument instanceof Class<?>) {
-                    className = ((Class<?>) actualTypeArgument).getSimpleName();
+            if (actualTypeArguments.length == 1) {
+                Type actualTypeArgument = actualTypeArguments[0];
+                if (actualTypeArgument instanceof Class<?> clazz) {
+                    return Optional.of(clazz);
+                }
+                if (actualTypeArgument instanceof ParameterizedType actualParameterizedType
+                        && actualParameterizedType.getRawType() instanceof Class<?> rawClass) {
+                    return Optional.of(rawClass);
                 }
             }
         }
-        return className;
+        return Optional.empty();
+    }
+
+    private static String optionValueClassName(Field field)
+    {
+        Type genericType = field.getGenericType();
+        if (genericType instanceof ParameterizedType parameterizedType) {
+            Type[] actualTypeArguments = parameterizedType.getActualTypeArguments();
+            if (actualTypeArguments.length == 1 && actualTypeArguments[0] instanceof Class<?> clazz) {
+                return clazz.getSimpleName();
+            }
+        }
+        return "";
+    }
+
+    private static boolean shouldTrimOptionValue(String paimonOptionKey, Optional<Class<?>> valueClass)
+    {
+        return valueClass
+                .map(clazz -> shouldTrimOptionValue(paimonOptionKey, clazz))
+                .orElse(false);
+    }
+
+    private static boolean shouldTrimOptionValue(String paimonOptionKey, Class<?> valueClass)
+    {
+        if (valueClass == String.class) {
+            return isIdentifierLikeStringOption(paimonOptionKey);
+        }
+        return !Map.class.isAssignableFrom(valueClass)
+                && !Collection.class.isAssignableFrom(valueClass);
+    }
+
+    private static boolean isIdentifierLikeStringOption(String paimonOptionKey)
+    {
+        return paimonOptionKey.equals(CoreOptions.FILE_FORMAT.key())
+                || paimonOptionKey.equals(CoreOptions.CHANGELOG_FILE_FORMAT.key())
+                || paimonOptionKey.equals(CoreOptions.MANIFEST_FORMAT.key())
+                || paimonOptionKey.equals(CoreOptions.VECTOR_FILE_FORMAT.key())
+                || paimonOptionKey.equals(CoreOptions.FILE_COMPRESSION.key())
+                || paimonOptionKey.equals(CoreOptions.CHANGELOG_FILE_COMPRESSION.key())
+                || paimonOptionKey.equals(CoreOptions.MANIFEST_COMPRESSION.key())
+                || paimonOptionKey.equals(CoreOptions.SPILL_COMPRESSION.key())
+                || paimonOptionKey.equals(CoreOptions.LOOKUP_CACHE_SPILL_COMPRESSION.key())
+                || paimonOptionKey.equals(CoreOptions.FORMAT_TABLE_FILE_COMPRESSION.key())
+                || paimonOptionKey.endsWith(".class")
+                || paimonOptionKey.endsWith("-class")
+                || paimonOptionKey.endsWith(".mode")
+                || paimonOptionKey.endsWith("-mode")
+                || paimonOptionKey.endsWith(".strategy")
+                || paimonOptionKey.endsWith("-strategy")
+                || paimonOptionKey.endsWith(".action")
+                || paimonOptionKey.endsWith("-action")
+                || paimonOptionKey.endsWith(".stats-mode")
+                || paimonOptionKey.endsWith("-stats-mode");
     }
 
     private static boolean shouldSkip(ConfigOption<?> option, Field field)
@@ -356,12 +446,19 @@ public class PaimonTableOptionUtils
         final String trinoOptionKey;
         final String paimonOptionKey;
         final String type;
+        final boolean valueRequiresTrim;
 
         public OptionInfo(String trinoOptionKey, String paimonOptionKey, String type)
+        {
+            this(trinoOptionKey, paimonOptionKey, type, false);
+        }
+
+        public OptionInfo(String trinoOptionKey, String paimonOptionKey, String type, boolean valueRequiresTrim)
         {
             this.trinoOptionKey = trinoOptionKey;
             this.paimonOptionKey = paimonOptionKey;
             this.type = type;
+            this.valueRequiresTrim = valueRequiresTrim;
         }
     }
 }

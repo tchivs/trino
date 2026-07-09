@@ -1616,8 +1616,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
             if (value.isPresent()) {
                 // Set the property to the specified value
-                String optionValue = PaimonTableOptionUtils.requireNonBlankStringOptionValue(propertyName,
-                        value.get());
+                String optionValue = PaimonTableOptionUtils.normalizeOptionValue(propertyName, key, value.get());
                 if (requiresExistingOptionsForPaimonOptionUpdate(key)) {
                     existingOptions = existingOptions.or(() ->
                             getPaimonTableOptionsIfAvailable(sessionCatalog, paimonTableHandle));
