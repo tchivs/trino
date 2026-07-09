@@ -139,6 +139,7 @@ import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
+import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.fileindex.FileIndexCommon.toMapKey;
@@ -3566,8 +3567,11 @@ public class PaimonPageSourceTest
                 List.of("row_id"),
                 Map.of("row_id", 1));
 
-        assertThatThrownBy(wrapper::getNextPage)
-                .isInstanceOf(IllegalStateException.class)
+        assertTrinoExceptionThrownBy(wrapper::getNextPage)
+                .hasErrorCode(PAIMON_CANNOT_OPEN_SPLIT)
+                .hasMessage("Failed to open or read Paimon split")
+                .hasCauseInstanceOf(IllegalStateException.class)
+                .cause()
                 .hasMessage("Row id field 'row_id' maps to channel 1, but page has 1 channels");
         assertThat(closed).isTrue();
     }
@@ -3591,8 +3595,11 @@ public class PaimonPageSourceTest
                 new TestingPageSource(new Page(1, bigintBlock(10))),
                 Optional.of(emptyDeletionVector()));
 
-        assertThatThrownBy(wrapper::getNextPage)
-                .isInstanceOf(IllegalStateException.class)
+        assertTrinoExceptionThrownBy(wrapper::getNextPage)
+                .hasErrorCode(PAIMON_CANNOT_OPEN_SPLIT)
+                .hasMessage("Failed to open or read Paimon split")
+                .hasCauseInstanceOf(IllegalStateException.class)
+                .cause()
                 .hasMessage("Deletion-vector page source requires completed positions");
     }
 
@@ -3659,8 +3666,11 @@ public class PaimonPageSourceTest
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(source,
                 Optional.of(emptyDeletionVector()));
 
-        assertThatThrownBy(wrapper::getNextPage)
-                .isInstanceOf(IllegalStateException.class)
+        assertTrinoExceptionThrownBy(wrapper::getNextPage)
+                .hasErrorCode(PAIMON_CANNOT_OPEN_SPLIT)
+                .hasMessage("Failed to open or read Paimon split")
+                .hasCauseInstanceOf(IllegalStateException.class)
+                .cause()
                 .hasMessage("Deletion-vector row position overflow for start position %s and page position 2",
                         Long.MAX_VALUE - 1);
         assertThat(source.closed()).isTrue();
@@ -3690,8 +3700,11 @@ public class PaimonPageSourceTest
                 new FailingClosePageSource(new Page(1, bigintBlock(10)), closed, null),
                 Optional.of(deletionVectorDeleting(0)));
 
-        assertThatThrownBy(wrapper::getNextPage)
-                .isInstanceOf(IllegalStateException.class)
+        assertTrinoExceptionThrownBy(wrapper::getNextPage)
+                .hasErrorCode(PAIMON_CANNOT_OPEN_SPLIT)
+                .hasMessage("Failed to open or read Paimon split")
+                .hasCauseInstanceOf(IllegalStateException.class)
+                .cause()
                 .hasMessage("Deletion-vector page source requires completed positions");
         assertThat(closed).isTrue();
     }
@@ -3740,8 +3753,11 @@ public class PaimonPageSourceTest
         PaimonMergePageSourceWrapper wrapper = PaimonMergePageSourceWrapper.wrap(source, List.of("a"),
                 Map.of("a", 1));
 
-        assertThatThrownBy(wrapper::getNextPage)
-                .isInstanceOf(IllegalStateException.class)
+        assertTrinoExceptionThrownBy(wrapper::getNextPage)
+                .hasErrorCode(PAIMON_CANNOT_OPEN_SPLIT)
+                .hasMessage("Failed to open or read Paimon split")
+                .hasCauseInstanceOf(IllegalStateException.class)
+                .cause()
                 .hasMessage("Row id field 'a' maps to channel 1, but page has 1 channels");
     }
 

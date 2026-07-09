@@ -210,7 +210,7 @@ public class PaimonMergePageSourceWrapper
         }
         catch (RuntimeException e) {
             closeAllSuppress(e, this);
-            throw e;
+            throw PaimonPageSourceProvider.wrapPaimonReadException(e);
         }
     }
 
