@@ -1349,6 +1349,44 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testNewTableLayoutAppliesPaimonColumnCommentDirectives()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "directive_layout"),
+                List.of(
+                        new ColumnMetadata("id", INTEGER),
+                        ColumnMetadata.builder()
+                                .setName("embedding")
+                                .setType(new ArrayType(REAL))
+                                .setComment(Optional.of("__VECTOR_FIELD;3; embedding"))
+                                .build(),
+                        ColumnMetadata.builder()
+                                .setName("picture")
+                                .setType(VarbinaryType.VARBINARY)
+                                .setComment(Optional.of("__BLOB_FIELD; profile picture"))
+                                .build()),
+                Map.of(
+                        PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, List.of("id"),
+                        "bucket", "-1"));
+
+        ConnectorTableLayout layout = metadata.getNewTableLayout(SESSION, tableMetadata).orElseThrow();
+
+        TableSchema schema = partitioningSchema(layout.getPartitioning().orElseThrow());
+        assertThat(layout.getPartitionColumns()).containsExactly("id");
+        assertThat(schema.fields()).extracting(field -> field.type().getTypeRoot())
+                .containsExactly(DataTypeRoot.INTEGER, DataTypeRoot.VECTOR, DataTypeRoot.BLOB);
+        assertThat(schema.fields()).extracting(DataField::description)
+                .containsExactly(null, "embedding", "profile picture");
+        assertThat(schema.options())
+                .containsEntry(CoreOptions.BUCKET.key(), "-1")
+                .containsEntry(CoreOptions.VECTOR_FIELD.key(), "embedding")
+                .containsEntry(CoreOptions.BLOB_FIELD.key(), "picture");
+        assertThat(catalog.initialized).isFalse();
+    }
+
+    @Test
     public void testNewTableLayoutRejectsUnsupportedBucketModes()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(table());
@@ -6983,8 +7021,12 @@ public class PaimonMetadataTableModeTest
                     .containsExactly(DataTypeRoot.VECTOR, DataTypeRoot.BLOB);
         });
         assertThat(copyWithoutTimeTravelOptions.get()).isNull();
+        assertThat(catalog.createdSchema.fields()).extracting(field -> field.type().getTypeRoot())
+                .containsExactly(DataTypeRoot.ARRAY, DataTypeRoot.VARBINARY);
         assertThat(catalog.createdSchema.fields()).extracting(field -> field.description())
                 .containsExactly("__VECTOR_FIELD;3; embedding", "__BLOB_FIELD; profile picture");
+        assertThat(catalog.createdSchema.options())
+                .doesNotContainKeys(CoreOptions.VECTOR_FIELD.key(), CoreOptions.BLOB_FIELD.key());
     }
 
     @Test
@@ -7138,7 +7180,12 @@ public class PaimonMetadataTableModeTest
 
         PaimonTableHandle handle = (PaimonTableHandle) outputHandle;
         assertThat(catalog.createdSchema.options())
-                .containsEntry(CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(), "file:/tmp/blob-external");
+                .containsEntry(CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(), "file:/tmp/blob-external")
+                .doesNotContainKeys(
+                        CoreOptions.BLOB_EXTERNAL_STORAGE_FIELD.key(),
+                        CoreOptions.BLOB_DESCRIPTOR_FIELD.key());
+        assertThat(catalog.createdSchema.fields()).extracting(field -> field.type().getTypeRoot())
+                .containsExactly(DataTypeRoot.VARBINARY);
         assertThat(catalog.createdSchema.fields()).extracting(field -> field.description())
                 .containsExactly("__BLOB_EXTERNAL_STORAGE_FIELD; external picture");
         assertThat(handle.getWriteColumns()).hasValueSatisfying(writeColumns -> {

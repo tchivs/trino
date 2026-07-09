@@ -99,15 +99,22 @@ public class PaimonTableOptionUtils
     public static void buildOptions(Schema.Builder builder, Map<String, Object> properties)
     {
         requireNonNull(builder, "builder is null");
+        buildOptionMap(properties).forEach(builder::option);
+    }
+
+    static Map<String, String> buildOptionMap(Map<String, Object> properties)
+    {
         requireNonNull(properties, "properties is null");
+        Map<String, String> options = new LinkedHashMap<>();
         for (Map.Entry<String, Object> entry : properties.entrySet()) {
             String propertyName = entry.getKey();
             validatePropertyKey(propertyName);
             OptionInfo optionInfo = OPTION_INFO_BY_TRINO_KEY.get(propertyName);
             if (optionInfo != null && entry.getValue() != null) {
-                builder.option(optionInfo.paimonOptionKey, normalizeOptionValue(optionInfo, entry.getValue()));
+                options.put(optionInfo.paimonOptionKey, normalizeOptionValue(optionInfo, entry.getValue()));
             }
         }
+        return options;
     }
 
     static String normalizeOptionValue(String trinoOptionKey, String paimonOptionKey, Object rawValue)

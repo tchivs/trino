@@ -69,6 +69,7 @@ import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.partition.Partition;
 import org.apache.paimon.partition.PartitionPredicate;
+import org.apache.paimon.schema.ColumnDirectiveUtils.ConvertedColumn;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
@@ -198,7 +199,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
     private TableSchema newTableSchema(ConnectorTableMetadata tableMetadata)
     {
-        return TableSchema.create(0, prepareSchema(tableMetadata));
+        return TableSchema.create(0, prepareSchema(tableMetadata, true));
     }
 
     @Override
@@ -1896,7 +1897,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         SchemaTableName table = tableMetadata.getTable();
         rejectSystemTableWrite(table, "create table");
         Identifier identifier = Identifier.create(table.getSchemaName(), table.getTableName());
-        Schema schema = prepareSchema(tableMetadata);
+        Schema schema = prepareSchema(tableMetadata, false);
 
         try {
             Catalog sessionCatalog = catalog.forSession(session);
@@ -1937,7 +1938,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
-    private Schema prepareSchema(ConnectorTableMetadata tableMetadata)
+    private Schema prepareSchema(ConnectorTableMetadata tableMetadata, boolean applyColumnCommentDirectives)
     {
         Map<String, Object> properties = new HashMap<>(tableMetadata.getProperties());
         List<String> primaryKeys = PaimonTableOptions.getPrimaryKeys(properties);
@@ -1950,6 +1951,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Map<String, String> canonicalColumnNames = canonicalColumnNames(columnNames);
         primaryKeys = canonicalKeyColumns(PaimonTableOptions.PRIMARY_KEY_IDENTIFIER, primaryKeys, canonicalColumnNames);
         partitionKeys = canonicalKeyColumns(PaimonTableOptions.PARTITIONED_BY_PROPERTY, partitionKeys, canonicalColumnNames);
+        Map<String, String> options = PaimonTableOptionUtils.buildOptionMap(properties);
         Schema.Builder builder = Schema.newBuilder().primaryKey(primaryKeys)
                 .partitionKeys(partitionKeys)
                 .comment(tableMetadata.getComment().orElse(null));
@@ -1957,11 +1959,21 @@ public record PaimonMetadata(PaimonCatalog catalog,
         for (ColumnMetadata column : tableMetadata.getColumns()) {
             rejectPaimonSystemColumnName("create table", column.getName());
             DataType dataType = toPaimonType(column);
-            validateAddColumnCommentDirective(column, dataType);
-            builder.column(column.getName(), dataType, column.getComment());
+            String comment = column.getComment();
+            if (applyColumnCommentDirectives) {
+                ConvertedColumn convertedColumn = applyAddColumnCommentDirective(column, dataType, options);
+                if (convertedColumn != null) {
+                    dataType = convertedColumn.type();
+                    comment = convertedColumn.comment();
+                }
+            }
+            else {
+                validateAddColumnCommentDirective(column, dataType);
+            }
+            builder.column(column.getName(), dataType, comment);
         }
 
-        PaimonTableOptionUtils.buildOptions(builder, properties);
+        builder.options(options);
 
         return builder.build();
     }
@@ -2030,10 +2042,13 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return toPaimonType(column.getType()).copy(column.isNullable());
     }
 
-    private static void validateAddColumnCommentDirective(ColumnMetadata column, DataType dataType)
+    private static ConvertedColumn applyAddColumnCommentDirective(
+            ColumnMetadata column,
+            DataType dataType,
+            Map<String, String> options)
     {
         try {
-            applyAddColumnDirective(column.getComment(), column.getName(), dataType, new HashMap<>());
+            return applyAddColumnDirective(column.getComment(), column.getName(), dataType, options);
         }
         catch (IllegalArgumentException e) {
             throw new TrinoException(NOT_SUPPORTED,
@@ -2041,6 +2056,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
                             .formatted(column.getName(), e.getMessage()),
                     e);
         }
+    }
+
+    private static void validateAddColumnCommentDirective(ColumnMetadata column, DataType dataType)
+    {
+        applyAddColumnCommentDirective(column, dataType, new HashMap<>());
     }
 
     private PaimonColumnHandle toPaimonColumnHandle(DataField field)
