@@ -300,6 +300,14 @@ public class PaimonPageSinkProvider
             int fieldIndex = latestFieldIndex(fields, latestFields.fieldIndexes(), column.getColumnName());
             inputChannels[fieldIndex] = inputChannel;
         }
+        for (int fieldIndex = 0; fieldIndex < fields.size(); fieldIndex++) {
+            DataField field = fields.get(fieldIndex);
+            if (inputChannels[fieldIndex] < 0 && field.defaultValue() == null && !field.type().isNullable()) {
+                throw new TrinoException(PAIMON_WRITER_DATA_ERROR,
+                        "Write column '%s' is missing, has no default value, and latest Paimon table schema type %s is not nullable"
+                                .formatted(field.name(), paimonTypeName(field.type())));
+            }
+        }
         return new WriteLayout(
                 fields.stream()
                         .map(field -> PaimonTypeUtils.fromPaimonType(field.type(), typeManager))

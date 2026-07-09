@@ -621,7 +621,7 @@ public class PaimonPageSinkProviderTest
     @Test
     public void testWriteLayoutUsesLatestTableSchemaOrder()
     {
-        DataField defaultZipField = new DataField(2, "zip", DataTypes.STRING()).newDefaultValue("'00000'");
+        DataField defaultZipField = new DataField(2, "zip", DataTypes.STRING().notNull()).newDefaultValue("'00000'");
         FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, DataTypes.ROW(
                 DataTypes.FIELD(0, "id", DataTypes.INT()),
                 DataTypes.FIELD(1, "name", DataTypes.STRING()),
@@ -634,7 +634,7 @@ public class PaimonPageSinkProviderTest
                 TESTING_TYPE_MANAGER);
 
         assertThat(layout.columnTypes()).containsExactly(INTEGER, VARCHAR, VARCHAR);
-        assertThat(layout.logicalTypes()).containsExactly(DataTypes.INT(), DataTypes.STRING(), DataTypes.STRING());
+        assertThat(layout.logicalTypes()).containsExactly(DataTypes.INT(), DataTypes.STRING(), DataTypes.STRING().notNull());
         assertThat(layout.inputChannels()).containsExactly(1, 0, -1);
         assertThat(layout.defaultValues()).containsExactly(null, null, BinaryString.fromString("00000"));
 
@@ -645,6 +645,37 @@ public class PaimonPageSinkProviderTest
         Object[] defaultValues = layout.defaultValues();
         defaultValues[2] = null;
         assertThat(layout.defaultValues()).containsExactly(null, null, BinaryString.fromString("00000"));
+    }
+
+    @Test
+    public void testWriteLayoutRejectsMissingNotNullColumnWithoutDefault()
+    {
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "name", DataTypes.STRING().notNull())));
+        List<PaimonColumnHandle> writeColumns = List.of(PaimonColumnHandle.of("id", DataTypes.INT()));
+
+        assertThatThrownBy(() -> PaimonPageSinkProvider.writeLayout(table, writeColumns, TESTING_TYPE_MANAGER))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception)
+                            .hasMessage("Write column 'name' is missing, has no default value, and latest Paimon table schema type STRING NOT NULL is not nullable");
+                });
+    }
+
+    @Test
+    public void testWriteLayoutAllowsMissingNullableColumnWithoutDefault()
+    {
+        FileStoreTable table = fileStoreTable(BucketMode.HASH_FIXED, DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "name", DataTypes.STRING())));
+        List<PaimonColumnHandle> writeColumns = List.of(PaimonColumnHandle.of("id", DataTypes.INT()));
+
+        PaimonPageSinkProvider.WriteLayout layout = PaimonPageSinkProvider.writeLayout(table, writeColumns,
+                TESTING_TYPE_MANAGER);
+
+        assertThat(layout.inputChannels()).containsExactly(0, -1);
+        assertThat(layout.defaultValues()).containsExactly(null, null);
     }
 
     @Test
