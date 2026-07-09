@@ -802,7 +802,7 @@ public class PaimonConfig
         putIfPresent(options, "lock-key-max-length", lockKeyMaxLength);
         putIfPresent(options, "hive-conf-dir", hiveConfDir);
         putIfPresent(options, "hadoop-conf-dir", hadoopConfDir);
-        putIfPresent(options, "metastore.client.class", metastoreClientClass);
+        putIfPresentTrimmed(options, "metastore.client.class", metastoreClientClass);
         putIfPresent(options, "location-in-properties", locationInProperties);
         putIfPresent(options, "client-pool-cache.eviction-interval-ms", clientPoolCacheEvictionIntervalMs);
         putIfPresent(options, "hive.skip-update-stats", hiveSkipUpdateStats);

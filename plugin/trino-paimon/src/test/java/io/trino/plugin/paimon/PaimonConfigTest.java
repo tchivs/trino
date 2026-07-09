@@ -156,7 +156,7 @@ public class PaimonConfigTest
         PaimonConfig config = new PaimonConfig()
                 .setHiveConfDir("/etc/hive/conf")
                 .setHadoopConfDir("/etc/hadoop/conf")
-                .setMetastoreClientClass("com.example.CustomHiveMetaStoreClient")
+                .setMetastoreClientClass(" com.example.CustomHiveMetaStoreClient ")
                 .setLocationInProperties(true)
                 .setClientPoolCacheEvictionIntervalMs(21L)
                 .setHiveSkipUpdateStats(true)
