@@ -903,8 +903,14 @@ public class PaimonPageSinkProviderTest
                 1,
                 writeNativeValue(INTEGER, 1L),
                 writeNativeValue(INTEGER, 2L))))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("page channel count (2) must match write column count (1)");
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_WRITER_DATA_ERROR.toErrorCode());
+                    assertThat(exception)
+                            .hasMessage("Failed to write data to Paimon: page channel count (2) must match write column count (1)");
+                    assertThat(exception.getCause())
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("page channel count (2) must match write column count (1)");
+                });
     }
 
     @Test

@@ -261,8 +261,8 @@ public class PaimonPageSink
         checkState(!closed.get(), "Paimon page sink is already closed");
         requireNonNull(page, "page is null");
         requireNonNull(rowKind, "rowKind is null");
-        validatePageShape(page);
         try {
+            validatePageShape(page);
             for (int i = 0; i < page.getPositionCount(); i++) {
                 InternalRow row = row(page, i, rowKind);
                 if (dynamicBucketWriter == null) {
