@@ -36,6 +36,7 @@ import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.InstantiationUtil;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
@@ -186,10 +187,14 @@ public class TrinoPartitioningHandleTest
     {
         assertThatThrownBy(() -> new PaimonPartitioningHandle(new byte[] {1, 2, 3}))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("schema must contain a serialized Paimon TableSchema");
+                .hasMessage("schema must contain a serialized Paimon TableSchema")
+                .hasCauseInstanceOf(IOException.class);
 
         assertThatThrownBy(() -> codec.fromJson("{\"schema\":\"AQID\"}"))
-                .hasRootCauseMessage("schema must contain a serialized Paimon TableSchema");
+                .isInstanceOfSatisfying(IllegalArgumentException.class, exception -> {
+                    assertThat(exception.getCause()).hasMessageContaining("schema must contain a serialized Paimon TableSchema");
+                    assertThat(exception).hasRootCauseInstanceOf(IOException.class);
+                });
     }
 
     @Test

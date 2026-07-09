@@ -651,7 +651,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             try {
                 return serializer.deserialize(serializer.getVersion(), slice.getBytes());
             }
-            catch (IOException e) {
+            catch (IOException | RuntimeException e) {
                 throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to deserialize Paimon commit fragment", e);
             }
         }).collect(toList());

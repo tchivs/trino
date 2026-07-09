@@ -3444,6 +3444,25 @@ public class PaimonMetadataTableModeTest
                     assertThat(exception.getCause()).isInstanceOf(IOException.class);
                 });
         assertThat(catalog.initialized).isFalse();
+
+        byte[] negativeBinaryRowLength = {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF};
+        assertThatThrownBy(() -> metadata.finishInsert(SESSION, tableHandle,
+                List.of(Slices.wrappedBuffer(negativeBinaryRowLength)), List.of()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to deserialize Paimon commit fragment");
+                    assertThat(exception.getCause()).isInstanceOf(NegativeArraySizeException.class);
+                });
+        assertThat(catalog.initialized).isFalse();
+
+        assertThatThrownBy(() -> metadata.finishMerge(SESSION, new PaimonMergeTableHandle(tableHandle),
+                List.of(Slices.wrappedBuffer(negativeBinaryRowLength)), List.of()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to deserialize Paimon commit fragment");
+                    assertThat(exception.getCause()).isInstanceOf(NegativeArraySizeException.class);
+                });
+        assertThat(catalog.initialized).isFalse();
     }
 
     @Test

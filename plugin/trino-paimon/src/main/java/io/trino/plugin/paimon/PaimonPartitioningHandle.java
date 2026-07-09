@@ -103,7 +103,7 @@ public record PaimonPartitioningHandle(byte[] schema, boolean singleNode, Option
             return (TableSchema) deserialized;
         }
         catch (IOException | ClassNotFoundException e) {
-            throw new IllegalArgumentException("schema must contain a serialized Paimon TableSchema");
+            throw new IllegalArgumentException("schema must contain a serialized Paimon TableSchema", e);
         }
     }
 
