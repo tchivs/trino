@@ -175,6 +175,21 @@ public class TrinoRowTest
     }
 
     @Test
+    void testNegativeHighPrecisionTimestampConversions()
+    {
+        LongTimestamp timestamp = new LongTimestamp(-1_234L, 567_000);
+        LongTimestampWithTimeZone timestampWithTimeZone = fromEpochMillisAndFraction(-2L, 766_000_000, UTC_KEY);
+        Page singlePage = new Page(1,
+                writeNativeValue(TIMESTAMP_NANOS, timestamp),
+                writeNativeValue(TIMESTAMP_TZ_MICROS, timestampWithTimeZone));
+        List<Type> types = List.of(TIMESTAMP_NANOS, TIMESTAMP_TZ_MICROS);
+        PaimonRow trinoRow = new PaimonRow(singlePage, RowKind.INSERT, types, logicalTypes(types));
+
+        assertThat(trinoRow.getTimestamp(0, 9)).isEqualTo(Timestamp.fromEpochMillis(-2L, 766_567));
+        assertThat(trinoRow.getTimestamp(1, 6)).isEqualTo(Timestamp.fromEpochMillis(-2L, 766_000));
+    }
+
+    @Test
     void testVariantRequiresJsonTypeMetadata()
     {
         Page singlePage = new Page(1, writeNativeValue(VARCHAR, Slices.utf8Slice("{\"a\":1}")));

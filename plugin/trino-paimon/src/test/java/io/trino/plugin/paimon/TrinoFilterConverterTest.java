@@ -204,6 +204,22 @@ public class TrinoFilterConverterTest
     }
 
     @Test
+    public void testNegativeHighPrecisionTimeStamp()
+    {
+        RowType rowType = new RowType(
+                Collections.singletonList(new DataField(0, "ts", new org.apache.paimon.types.TimestampType(9))));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PredicateBuilder builder = new PredicateBuilder(rowType);
+        PaimonColumnHandle tsColumn = PaimonColumnHandle.of("ts", new org.apache.paimon.types.TimestampType(9));
+        TupleDomain<PaimonColumnHandle> eq = TupleDomain.withColumnDomains(
+                Map.of(tsColumn, Domain.singleValue(TimestampType.createTimestampType(9),
+                        new LongTimestamp(-1_234L, 567_000))));
+        Predicate expectedEqq = builder.equal(0, Timestamp.fromEpochMillis(-2L, 766_567));
+        Predicate actualEqq = converter.convert(eq).get();
+        assertThat(actualEqq).isEqualTo(expectedEqq);
+    }
+
+    @Test
     public void testTimeStampWithTimeZone()
     {
         RowType rowType = new RowType(Collections
@@ -224,6 +240,22 @@ public class TrinoFilterConverterTest
                         packDateTimeWithZone(1695645403000L, TimeZoneKey.UTC_KEY))));
         expectedEqq = builder.equal(0, Timestamp.fromEpochMillis(1695645403000L));
         actualEqq = converter.convert(eq).get();
+        assertThat(actualEqq).isEqualTo(expectedEqq);
+    }
+
+    @Test
+    public void testNegativeTimeStampWithTimeZone()
+    {
+        RowType rowType = new RowType(Collections
+                .singletonList(new DataField(0, "ts", new org.apache.paimon.types.LocalZonedTimestampType(6))));
+        PaimonFilterConverter converter = new PaimonFilterConverter(rowType);
+        PredicateBuilder builder = new PredicateBuilder(rowType);
+        PaimonColumnHandle tsColumn = PaimonColumnHandle.of("ts", new org.apache.paimon.types.LocalZonedTimestampType(6));
+        TupleDomain<PaimonColumnHandle> eq = TupleDomain
+                .withColumnDomains(Map.of(tsColumn, Domain.singleValue(createTimestampWithTimeZoneType(6),
+                        fromEpochMillisAndFraction(-2L, 766_000_000, TimeZoneKey.UTC_KEY))));
+        Predicate expectedEqq = builder.equal(0, Timestamp.fromEpochMillis(-2L, 766_000));
+        Predicate actualEqq = converter.convert(eq).get();
         assertThat(actualEqq).isEqualTo(expectedEqq);
     }
 

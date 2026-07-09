@@ -174,6 +174,28 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testNegativeHighPrecisionTemporalValues()
+    {
+        GenericRow row = new GenericRow(2);
+        row.setField(0, Timestamp.fromEpochMillis(-2L, 766_567));
+        row.setField(1, Timestamp.fromEpochMillis(-2L, 766_000));
+
+        PaimonPageSource pageSource = new PaimonPageSource(new TestingRecordReader(row), List.of(
+                PaimonColumnHandle.of("ts", new org.apache.paimon.types.TimestampType(9)),
+                PaimonColumnHandle.of("tz", new org.apache.paimon.types.LocalZonedTimestampType(6))),
+                OptionalLong.empty());
+
+        Page page = pageSource.getNextPage();
+
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(TypeUtils.readNativeValue(TIMESTAMP_NANOS, page.getBlock(0), 0))
+                .isEqualTo(new LongTimestamp(-1_234L, 567_000));
+        assertThat(TypeUtils.readNativeValue(TIMESTAMP_TZ_MICROS, page.getBlock(1), 0))
+                .isEqualTo(LongTimestampWithTimeZone.fromEpochMillisAndFraction(-2L, 766_000_000, UTC_KEY));
+        assertThat(pageSource.getNextPage()).isNull();
+    }
+
+    @Test
     void testCompletedPositionsReportsReturnedRows()
     {
         GenericRow row = new GenericRow(1);
