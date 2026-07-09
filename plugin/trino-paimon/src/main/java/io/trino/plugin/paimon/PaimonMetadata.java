@@ -1508,8 +1508,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
             });
             stats.avgLen().ifPresent(avgLen -> {
                 if (records >= 0 && avgLen >= 0) {
-                    long nullCount = stats.nullCount().orElse(0);
-                    long nonNullRecords = Math.max(0, records - nullCount);
+                    OptionalLong nullCount = stats.nullCount();
+                    long nullCountValue = nullCount.orElse(0);
+                    if (nullCount.isPresent() && (nullCountValue < 0 || nullCountValue > records)) {
+                        return;
+                    }
+                    long nonNullRecords = records - nullCountValue;
                     builder.setDataSize(Estimate.of((double) nonNullRecords * avgLen));
                 }
             });

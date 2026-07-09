@@ -507,6 +507,39 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testTableStatisticsSkipsDataSizeForInvalidNullCount()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "missing_null_count", DataTypes.STRING()),
+                DataTypes.FIELD(1, "negative_null_count", DataTypes.STRING()),
+                DataTypes.FIELD(2, "too_many_nulls", DataTypes.STRING()));
+        Statistics statistics = new Statistics(7, 3, 10L, 4096L, Map.of(
+                "missing_null_count", ColStats.newColStats(0, null, null, null, null, 3L, 3L),
+                "negative_null_count", ColStats.newColStats(1, null, null, null, -1L, 3L, 3L),
+                "too_many_nulls", ColStats.newColStats(2, null, null, null, 11L, 3L, 3L)));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(statisticsTable(rowType, Optional.of(statistics))),
+                TESTING_TYPE_MANAGER);
+
+        TableStatistics tableStatistics = metadata.getTableStatistics(SESSION,
+                new PaimonTableHandle("schema", "table", Map.of()));
+
+        ColumnStatistics missingNullCountStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("missing_null_count", DataTypes.STRING()));
+        assertThat(missingNullCountStats.getNullsFraction().isUnknown()).isTrue();
+        assertThat(missingNullCountStats.getDataSize().getValue()).isEqualTo(30);
+
+        ColumnStatistics negativeNullCountStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("negative_null_count", DataTypes.STRING()));
+        assertThat(negativeNullCountStats.getNullsFraction().isUnknown()).isTrue();
+        assertThat(negativeNullCountStats.getDataSize().isUnknown()).isTrue();
+
+        ColumnStatistics tooManyNullsStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("too_many_nulls", DataTypes.STRING()));
+        assertThat(tooManyNullsStats.getNullsFraction().isUnknown()).isTrue();
+        assertThat(tooManyNullsStats.getDataSize().isUnknown()).isTrue();
+    }
+
+    @Test
     public void testTableStatisticsReturnsUnknownWhenPaimonStatsAreMissingOrUnreadable()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
