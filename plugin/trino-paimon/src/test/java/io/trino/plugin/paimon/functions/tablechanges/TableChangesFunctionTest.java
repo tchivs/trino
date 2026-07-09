@@ -129,6 +129,12 @@ public class TableChangesFunctionTest
                 INCREMENTAL_BETWEEN_TIMESTAMP, " 1000 , 2000 ")), new RecordingAccessControl());
         assertThat(((PaimonTableHandle) timestampAnalysis.getHandle()).getDynamicOptions())
                 .containsEntry(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP.key(), "1000,2000");
+
+        TableFunctionAnalysis scanModeAnalysis = function.analyze(SESSION, null, arguments(Map.of(
+                INCREMENTAL_BETWEEN, " 1 , 2 ",
+                INCREMENTAL_BETWEEN_SCAN_MODE, " delta ")), new RecordingAccessControl());
+        assertThat(((PaimonTableHandle) scanModeAnalysis.getHandle()).getDynamicOptions())
+                .containsEntry(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), "delta");
     }
 
     @Test

@@ -115,7 +115,7 @@ public class TableChangesFunction
 
     private static String getRequiredNonBlankVarcharArgument(Map<String, Argument> arguments, String key)
     {
-        String value = getRequiredVarcharArgument(arguments, key).toStringUtf8();
+        String value = getRequiredVarcharArgument(arguments, key).toStringUtf8().strip();
         checkFunctionArgument(!value.isBlank(), FUNCTION_NAME + " argument " + key + " may not be blank");
         return value;
     }
