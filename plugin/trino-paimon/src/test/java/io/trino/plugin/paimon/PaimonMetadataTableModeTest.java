@@ -540,6 +540,49 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testTableStatisticsSkipsInvalidDistinctCount()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "valid_distinct_count", DataTypes.STRING()),
+                DataTypes.FIELD(1, "negative_distinct_count", DataTypes.STRING()),
+                DataTypes.FIELD(2, "too_many_distinct_values", DataTypes.STRING()));
+        Statistics statistics = new Statistics(7, 3, 10L, 4096L, Map.of(
+                "valid_distinct_count", ColStats.newColStats(0, 7L, null, null, null, null, null),
+                "negative_distinct_count", ColStats.newColStats(1, -1L, null, null, null, null, null),
+                "too_many_distinct_values", ColStats.newColStats(2, 11L, null, null, null, null, null)));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(statisticsTable(rowType, Optional.of(statistics))),
+                TESTING_TYPE_MANAGER);
+
+        TableStatistics tableStatistics = metadata.getTableStatistics(SESSION,
+                new PaimonTableHandle("schema", "table", Map.of()));
+
+        ColumnStatistics validDistinctStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("valid_distinct_count", DataTypes.STRING()));
+        assertThat(validDistinctStats.getDistinctValuesCount().getValue()).isEqualTo(7);
+
+        ColumnStatistics negativeDistinctStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("negative_distinct_count", DataTypes.STRING()));
+        assertThat(negativeDistinctStats.getDistinctValuesCount().isUnknown()).isTrue();
+
+        ColumnStatistics tooManyDistinctStats = tableStatistics.getColumnStatistics()
+                .get(PaimonColumnHandle.of("too_many_distinct_values", DataTypes.STRING()));
+        assertThat(tooManyDistinctStats.getDistinctValuesCount().isUnknown()).isTrue();
+
+        org.apache.paimon.types.RowType unknownRowCountRowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "unknown_row_count", DataTypes.STRING()));
+        Statistics unknownRowCountStatistics = new Statistics(7, 3, null, 4096L, Map.of(
+                "unknown_row_count", ColStats.newColStats(0, 11L, null, null, null, null, null)));
+        PaimonMetadata unknownRowCountMetadata = new PaimonMetadata(new TestingPaimonCatalog(statisticsTable(unknownRowCountRowType,
+                Optional.of(unknownRowCountStatistics))), TESTING_TYPE_MANAGER);
+
+        ColumnStatistics unknownRowCountStats = unknownRowCountMetadata.getTableStatistics(SESSION,
+                        new PaimonTableHandle("schema", "table", Map.of()))
+                .getColumnStatistics()
+                .get(PaimonColumnHandle.of("unknown_row_count", DataTypes.STRING()));
+        assertThat(unknownRowCountStats.getDistinctValuesCount().getValue()).isEqualTo(11);
+    }
+
+    @Test
     public void testTableStatisticsReturnsUnknownWhenPaimonStatsAreMissingOrUnreadable()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));

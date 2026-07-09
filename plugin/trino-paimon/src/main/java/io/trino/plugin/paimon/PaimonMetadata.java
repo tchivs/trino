@@ -1492,9 +1492,16 @@ public record PaimonMetadata(PaimonCatalog catalog,
         ColumnStatistics.Builder builder = ColumnStatistics.builder();
 
         stats.distinctCount().ifPresent(distinctCount -> {
-            if (distinctCount >= 0) {
-                builder.setDistinctValuesCount(Estimate.of(distinctCount));
+            if (distinctCount < 0) {
+                return;
             }
+            if (rowCount.isPresent()) {
+                long records = rowCount.getAsLong();
+                if (records >= 0 && distinctCount > records) {
+                    return;
+                }
+            }
+            builder.setDistinctValuesCount(Estimate.of(distinctCount));
         });
         if (rowCount.isPresent()) {
             long records = rowCount.getAsLong();
