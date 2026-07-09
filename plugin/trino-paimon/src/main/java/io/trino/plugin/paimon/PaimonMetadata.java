@@ -112,6 +112,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
@@ -1679,8 +1680,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
     private static void validatePaimonTableOptionUpdate(Map<String, String> existingOptions, String key,
             String value)
     {
+        String oldValue = existingOptions.get(key);
+        if (Objects.equals(oldValue, value)) {
+            return;
+        }
         try {
-            SchemaManager.checkAlterTableOption(existingOptions, key, existingOptions.get(key), value);
+            SchemaManager.checkAlterTableOption(existingOptions, key, oldValue, value);
         }
         catch (UnsupportedOperationException e) {
             throw new TrinoException(NOT_SUPPORTED,

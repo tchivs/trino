@@ -6025,6 +6025,112 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testSetTablePropertiesAllowsNoOpExistingOptionUpdates()
+    {
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        CapturingDdlCatalog dynamicBucketCatalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(CoreOptions.BUCKET.key(), "-1")));
+        PaimonMetadata dynamicBucketMetadata = new PaimonMetadata(dynamicBucketCatalog, TESTING_TYPE_MANAGER);
+
+        dynamicBucketMetadata.setTableProperties(SESSION, tableHandle,
+                Map.of("bucket", Optional.of("-1")));
+
+        assertThat(dynamicBucketCatalog.alterCalls).isEqualTo(1);
+
+        CapturingDdlCatalog pkClusteringCatalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(
+                        CoreOptions.PK_CLUSTERING_OVERRIDE.key(), "true",
+                        CoreOptions.CLUSTERING_COLUMNS.key(), "id")));
+        PaimonMetadata pkClusteringMetadata = new PaimonMetadata(pkClusteringCatalog, TESTING_TYPE_MANAGER);
+
+        pkClusteringMetadata.setTableProperties(SESSION, tableHandle,
+                Map.of("clustering_columns", Optional.of("id")));
+
+        assertThat(pkClusteringCatalog.alterCalls).isEqualTo(1);
+    }
+
+    @Test
+    public void testSetTablePropertiesValidatesPaimonDeletionVectorOptionUpdateBeforeCatalogAlter()
+    {
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(CoreOptions.DELETION_VECTORS_ENABLED.key(), "false")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle,
+                        Map.of("deletion_vectors_enabled", Optional.of("true"))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot change deletion vectors mode from false to true. If modifying table deletion-vectors mode "
+                        + "without full-compaction, this may result in data duplication. If you are confident, "
+                        + "you can set table option 'deletion-vectors.modifiable' = 'true' to allow deletion "
+                        + "vectors modification.");
+        assertThat(catalog.alterCalls).isEqualTo(0);
+
+        CapturingDdlCatalog modifiableCatalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(
+                        CoreOptions.DELETION_VECTORS_ENABLED.key(), "false",
+                        CoreOptions.DELETION_VECTORS_MODIFIABLE.key(), "true")));
+        PaimonMetadata modifiableMetadata = new PaimonMetadata(modifiableCatalog, TESTING_TYPE_MANAGER);
+
+        modifiableMetadata.setTableProperties(SESSION, tableHandle,
+                Map.of("deletion_vectors_enabled", Optional.of("true")));
+
+        assertThat(modifiableCatalog.alterCalls).isEqualTo(1);
+    }
+
+    @Test
+    public void testSetTablePropertiesValidatesPaimonIgnoreOptionUpdatesBeforeCatalogAlter()
+    {
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        CapturingDdlCatalog ignoreDeleteCatalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(CoreOptions.IGNORE_DELETE.key(), "true")));
+        PaimonMetadata ignoreDeleteMetadata = new PaimonMetadata(ignoreDeleteCatalog, TESTING_TYPE_MANAGER);
+
+        assertTrinoError(() -> ignoreDeleteMetadata.setTableProperties(SESSION, tableHandle,
+                        Map.of("ignore_delete", Optional.of("false"))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot change ignore-delete from true to false.");
+        assertThat(ignoreDeleteCatalog.alterCalls).isEqualTo(0);
+
+        CapturingDdlCatalog ignoreUpdateBeforeCatalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(CoreOptions.IGNORE_UPDATE_BEFORE.key(), "true")));
+        PaimonMetadata ignoreUpdateBeforeMetadata = new PaimonMetadata(ignoreUpdateBeforeCatalog, TESTING_TYPE_MANAGER);
+
+        assertTrinoError(() -> ignoreUpdateBeforeMetadata.setTableProperties(SESSION, tableHandle,
+                        Map.of("ignore_update_before", Optional.of("false"))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot change ignore-update-before from true to false.");
+        assertThat(ignoreUpdateBeforeCatalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
+    public void testSetTablePropertiesValidatesPaimonClusteringOptionChangesBeforeCatalogAlter()
+    {
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(
+                        CoreOptions.PK_CLUSTERING_OVERRIDE.key(), "true",
+                        CoreOptions.CLUSTERING_COLUMNS.key(), "id")));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle,
+                        Map.of("clustering_columns", Optional.of("payload"))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot change clustering.columns when pk-clustering-override enabled.");
+        assertThat(catalog.alterCalls).isEqualTo(0);
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, tableHandle,
+                        Map.of("clustering_columns", Optional.empty())),
+                NOT_SUPPORTED.toErrorCode(),
+                "Cannot reset clustering.columns when pk-clustering-override enabled.");
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
     public void testSetTablePropertiesValidatesPaimonOptionRemovesBeforeCatalogAlter()
     {
         CapturingDdlCatalog catalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
