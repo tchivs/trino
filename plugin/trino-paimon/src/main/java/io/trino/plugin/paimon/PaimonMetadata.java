@@ -2367,6 +2367,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         String columnName = canonicalColumn(table, schemaTableName(paimonTableHandle), paimonColumnHandle).name();
         PaimonSchemaEvolutionKeys schemaEvolutionKeys = schemaEvolutionKeys(table);
         rejectPartitionOrPrimaryKeyDrop(paimonColumnHandle, schemaEvolutionKeys);
+        rejectDropAllFields(table.rowType().getFields().size(), "drop column");
         List<SchemaChange> changes = new ArrayList<>();
         changes.add(SchemaChange.dropColumn(columnName));
         try {
@@ -2546,6 +2547,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             FileStoreTable table = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog,
                     "nested field schema change");
             fieldNames = canonicalNestedFieldNames(table, paimonTableHandle, fieldNames, true);
+            rejectDropAllFields(parentRowFieldCount(table, paimonTableHandle, fieldNames), "drop field");
             changes.add(SchemaChange.dropColumn(fieldNames));
             sessionCatalog.alterTable(identifier, changes, false);
         }
@@ -2680,6 +2682,24 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return canonicalFieldNames;
     }
 
+    private static int parentRowFieldCount(
+            FileStoreTable table,
+            PaimonTableHandle tableHandle,
+            String[] fieldNames)
+            throws Catalog.ColumnNotExistException
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(fieldNames, "fieldNames is null");
+        DataType currentType = table.rowType();
+        for (int index = 0; index < fieldNames.length - 1; index++) {
+            currentType = nextNestedType(tableHandle, currentType, fieldNames, index);
+        }
+        if (!(currentType instanceof RowType rowType)) {
+            throw unsupportedNestedFieldPath(fieldNames);
+        }
+        return rowType.getFields().size();
+    }
+
     private static void validateNoCaseInsensitiveDuplicateNestedFieldName(
             FileStoreTable table,
             PaimonTableHandle tableHandle,
@@ -2788,6 +2808,14 @@ public record PaimonMetadata(PaimonCatalog catalog,
         if (schemaEvolutionKeys.isPartitionKey(columnHandle) || schemaEvolutionKeys.isPrimaryKey(columnHandle)) {
             throw new TrinoException(NOT_SUPPORTED,
                     "Cannot drop partition key or primary key: [" + columnHandle.getColumnName() + "]");
+        }
+    }
+
+    private static void rejectDropAllFields(int fieldCount, String operation)
+    {
+        if (fieldCount <= 1) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon " + operation + " is not supported: Cannot drop all fields in table");
         }
     }
 

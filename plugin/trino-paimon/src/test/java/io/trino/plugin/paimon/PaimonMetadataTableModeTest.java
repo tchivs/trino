@@ -4779,7 +4779,8 @@ public class PaimonMetadataTableModeTest
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
                 DataTypes.FIELD(0, "payload", DataTypes.ROW(
-                        DataTypes.FIELD(1, "zip", DataTypes.INT()))));
+                        DataTypes.FIELD(1, "zip", DataTypes.INT()),
+                        DataTypes.FIELD(2, "country", DataTypes.STRING()))));
         CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
                 BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
@@ -4820,7 +4821,8 @@ public class PaimonMetadataTableModeTest
     public void testNestedFieldDdlCanonicalizesPaimonFieldPath()
     {
         org.apache.paimon.types.RowType zipType = DataTypes.ROW(
-                DataTypes.FIELD(2, "Code", DataTypes.INT()));
+                DataTypes.FIELD(2, "Code", DataTypes.INT()),
+                DataTypes.FIELD(3, "Suffix", DataTypes.STRING()));
         org.apache.paimon.types.RowType payloadType = DataTypes.ROW(
                 DataTypes.FIELD(1, "Zip", zipType));
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
@@ -7217,7 +7219,8 @@ public class PaimonMetadataTableModeTest
     public void testDropColumnUsesPaimonDropSchemaChange()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(
-                DataTypes.FIELD(0, "obsolete_col", DataTypes.STRING()));
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "obsolete_col", DataTypes.STRING()));
         CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
                 BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
@@ -7231,6 +7234,23 @@ public class PaimonMetadataTableModeTest
                 .singleElement()
                 .isInstanceOfSatisfying(SchemaChange.DropColumn.class, change ->
                         assertThat(change.fieldNames()).containsExactly("obsolete_col"));
+    }
+
+    @Test
+    public void testDropLastColumnIsRejectedBeforeCatalogAlter()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "only_col", DataTypes.STRING()));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle columnHandle = PaimonColumnHandle.of("only_col", DataTypes.STRING());
+
+        assertTrinoError(() -> metadata.dropColumn(SESSION, tableHandle, columnHandle),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop column is not supported: Cannot drop all fields in table");
+        assertThat(catalog.alterCalls).isEqualTo(0);
     }
 
     @Test
@@ -7401,6 +7421,44 @@ public class PaimonMetadataTableModeTest
                 .singleElement()
                 .isInstanceOfSatisfying(SchemaChange.DropColumn.class, change ->
                         assertThat(change.fieldNames()).containsExactly("address", "street"));
+    }
+
+    @Test
+    public void testDropLastNestedFieldIsRejectedBeforeCatalogAlter()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "address", DataTypes.ROW(
+                        DataTypes.FIELD(1, "street", DataTypes.STRING()))));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle columnHandle = PaimonColumnHandle.of("address", rowType.getField("address").type());
+
+        assertTrinoError(() -> metadata.dropField(SESSION, tableHandle, columnHandle, List.of("street")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop field is not supported: Cannot drop all fields in table");
+        assertThat(catalog.alterCalls).isEqualTo(0);
+    }
+
+    @Test
+    public void testDropLastCollectionNestedFieldIsRejectedBeforeCatalogAlter()
+    {
+        org.apache.paimon.types.RowType valueType = DataTypes.ROW(
+                DataTypes.FIELD(2, "Code", DataTypes.INT()));
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "Payload", DataTypes.ARRAY(DataTypes.MAP(DataTypes.INT(), valueType))));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(), List.of(), ""));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        PaimonColumnHandle columnHandle = PaimonColumnHandle.of("Payload", rowType.getField("Payload").type());
+
+        assertTrinoError(() -> metadata.dropField(SESSION, tableHandle, columnHandle,
+                        List.of("element", "value", "Code")),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon drop field is not supported: Cannot drop all fields in table");
+        assertThat(catalog.alterCalls).isEqualTo(0);
     }
 
     @Test
