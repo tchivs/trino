@@ -768,7 +768,7 @@ public class PaimonConfig
         if (warehouse != null) {
             options.put("warehouse", warehouse);
         }
-        putIfPresent(options, "metastore", metastore);
+        putIfPresentTrimmed(options, "metastore", metastore);
         putIfPresent(options, "uri", uri);
         putIfPresent(options, "table.type", tableType);
         putIfPresent(options, "lock.enabled", lockEnabled);
@@ -831,6 +831,13 @@ public class PaimonConfig
     {
         if (value != null) {
             options.put(key, value.toString());
+        }
+    }
+
+    private static void putIfPresentTrimmed(Map<String, String> options, String key, String value)
+    {
+        if (value != null) {
+            options.put(key, value.strip());
         }
     }
 

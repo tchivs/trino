@@ -57,7 +57,7 @@ public class PaimonConfigTest
     {
         PaimonConfig config = new PaimonConfig()
                 .setWarehouse("/tmp/warehouse")
-                .setMetastore("jdbc")
+                .setMetastore(" jdbc ")
                 .setUri("jdbc:postgresql://localhost:5432/paimon")
                 .setTableType("EXTERNAL")
                 .setLockEnabled(true)
