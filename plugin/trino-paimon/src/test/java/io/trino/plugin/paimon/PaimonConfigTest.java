@@ -61,7 +61,7 @@ public class PaimonConfigTest
                 .setUri("jdbc:postgresql://localhost:5432/paimon")
                 .setTableType(" EXTERNAL ")
                 .setLockEnabled(true)
-                .setLockType("jdbc")
+                .setLockType(" jdbc ")
                 .setLockCheckMaxSleep("9 s")
                 .setLockAcquireTimeout("10 min")
                 .setClientPoolSize(8)

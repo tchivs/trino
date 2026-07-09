@@ -772,7 +772,7 @@ public class PaimonConfig
         putIfPresent(options, "uri", uri);
         putIfPresentTrimmed(options, "table.type", tableType);
         putIfPresent(options, "lock.enabled", lockEnabled);
-        putIfPresent(options, "lock.type", lockType);
+        putIfPresentTrimmed(options, "lock.type", lockType);
         putIfPresent(options, "lock-check-max-sleep", lockCheckMaxSleep);
         putIfPresent(options, "lock-acquire-timeout", lockAcquireTimeout);
         putIfPresent(options, "client-pool-size", clientPoolSize);
