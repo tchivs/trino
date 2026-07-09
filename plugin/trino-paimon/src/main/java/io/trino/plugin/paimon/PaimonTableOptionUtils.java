@@ -87,6 +87,8 @@ public class PaimonTableOptionUtils
             .map(PaimonTableOptionUtils::convertOptionKey)
             .collect(toUnmodifiableSet());
     private static final List<OptionInfo> OPTION_INFOS = buildOptionInfos();
+    private static final Map<String, OptionInfo> ALL_OPTION_INFO_BY_PAIMON_KEY =
+            indexOptionInfosByPaimonKey(buildAllOptionInfos());
     private static final Map<String, OptionInfo> OPTION_INFO_BY_TRINO_KEY = indexOptionInfosByTrinoKey(OPTION_INFOS);
     private static final Map<String, OptionInfo> OPTION_INFO_BY_PAIMON_KEY = indexOptionInfosByPaimonKey(OPTION_INFOS);
 
@@ -118,6 +120,16 @@ public class PaimonTableOptionUtils
         }
         if (optionInfo == null) {
             return requireNonBlankStringOptionValue(trinoOptionKey, rawValue);
+        }
+        return normalizeOptionValue(optionInfo, rawValue);
+    }
+
+    static String normalizeDynamicOptionValue(String paimonOptionKey, String rawValue)
+    {
+        requireNonNull(paimonOptionKey, "paimonOptionKey is null");
+        OptionInfo optionInfo = ALL_OPTION_INFO_BY_PAIMON_KEY.get(paimonOptionKey);
+        if (optionInfo == null) {
+            return requireNonBlankStringOptionValue(paimonOptionKey, rawValue);
         }
         return normalizeOptionValue(optionInfo, rawValue);
     }
@@ -238,6 +250,21 @@ public class PaimonTableOptionUtils
                 continue;
             }
 
+            Optional<Class<?>> valueClass = optionValueClass(optionWithMetaInfo.field);
+            String className = optionValueClassName(optionWithMetaInfo.field);
+            optionInfos.add(new OptionInfo(convertOptionKey(optionWithMetaInfo.option.key()),
+                    optionWithMetaInfo.option.key(), className,
+                    shouldTrimOptionValue(optionWithMetaInfo.option.key(), valueClass)));
+        }
+        validateOptionInfos(optionInfos);
+        return List.copyOf(optionInfos);
+    }
+
+    private static List<OptionInfo> buildAllOptionInfos()
+    {
+        List<OptionInfo> optionInfos = new ArrayList<>();
+        List<OptionWithMetaInfo> optionWithMetaInfos = extractConfigOptions(CoreOptions.class);
+        for (OptionWithMetaInfo optionWithMetaInfo : optionWithMetaInfos) {
             Optional<Class<?>> valueClass = optionValueClass(optionWithMetaInfo.field);
             String className = optionValueClassName(optionWithMetaInfo.field);
             optionInfos.add(new OptionInfo(convertOptionKey(optionWithMetaInfo.option.key()),

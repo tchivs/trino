@@ -168,13 +168,19 @@ public class PaimonTableHandle
 
     private static Map<String, String> copyDynamicOptions(Map<String, String> dynamicOptions)
     {
+        Map<String, String> copiedOptions = new LinkedHashMap<>();
         requireNonNull(dynamicOptions, "dynamicOptions is null").forEach((key, value) -> {
             requireNonNull(key, "dynamicOptions contains null key");
-            checkArgument(!key.isBlank(), "dynamicOptions contains blank key");
+            String optionKey = key.trim();
+            checkArgument(!optionKey.isBlank(), "dynamicOptions contains blank key");
             requireNonNull(value, "dynamicOptions contains null value for key '%s'".formatted(key));
-            checkArgument(!value.isBlank(), "dynamicOptions contains blank value for key '%s'".formatted(key));
+            checkArgument(!value.isBlank(), "dynamicOptions contains blank value for key '%s'", key);
+            String optionValue = PaimonTableOptionUtils.normalizeDynamicOptionValue(optionKey, value);
+            checkArgument(copiedOptions.putIfAbsent(optionKey, optionValue) == null,
+                    "dynamicOptions contains duplicate key after normalization: '%s'",
+                    optionKey);
         });
-        return Map.copyOf(dynamicOptions);
+        return Map.copyOf(copiedOptions);
     }
 
     private static Optional<String> copyCreateTableOperation(Optional<String> createTableOperation)

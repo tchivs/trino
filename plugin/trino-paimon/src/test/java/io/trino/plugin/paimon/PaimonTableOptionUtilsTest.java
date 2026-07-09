@@ -260,6 +260,26 @@ public class PaimonTableOptionUtilsTest
     }
 
     @Test
+    public void testKnownDynamicOptionValuesAreNormalized()
+    {
+        assertThat(PaimonTableOptionUtils.normalizeDynamicOptionValue(CoreOptions.SCAN_SNAPSHOT_ID.key(), " 123 "))
+                .isEqualTo("123");
+        assertThat(PaimonTableOptionUtils.normalizeDynamicOptionValue(CoreOptions.SCAN_IGNORE_LOST_FILE.key(), " true "))
+                .isEqualTo("true");
+        assertThat(PaimonTableOptionUtils.normalizeDynamicOptionValue(CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE.key(), " delta "))
+                .isEqualTo("delta");
+    }
+
+    @Test
+    public void testFreeFormDynamicOptionValuesArePreserved()
+    {
+        assertThat(PaimonTableOptionUtils.normalizeDynamicOptionValue(CoreOptions.SCAN_TAG_NAME.key(), " tag-1 "))
+                .isEqualTo(" tag-1 ");
+        assertThat(PaimonTableOptionUtils.normalizeDynamicOptionValue("custom.option", " custom value "))
+                .isEqualTo(" custom value ");
+    }
+
+    @Test
     public void testTypedAndIdentifierLikeTableOptionValuesAreTrimmed()
     {
         Schema.Builder builder = Schema.newBuilder()

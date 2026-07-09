@@ -162,6 +162,33 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testDynamicOptionsAreNormalizedOnHandleCreation()
+    {
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.ofEntries(
+                entry(" " + CoreOptions.SCAN_SNAPSHOT_ID.key() + " ", " 123 "),
+                entry(CoreOptions.SCAN_IGNORE_LOST_FILE.key(), " true "),
+                entry(CoreOptions.CONSUMER_ID.key(), " consumer-1 "),
+                entry("custom.option", " custom value ")));
+
+        assertThat(handle.getDynamicOptions()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                CoreOptions.SCAN_SNAPSHOT_ID.key(), "123",
+                CoreOptions.SCAN_IGNORE_LOST_FILE.key(), "true",
+                CoreOptions.CONSUMER_ID.key(), " consumer-1 ",
+                "custom.option", " custom value "));
+    }
+
+    @Test
+    public void testDuplicateDynamicOptionKeysAreRejectedAfterNormalization()
+    {
+        assertThatThrownBy(() -> new PaimonTableHandle("test", "user", Map.of(
+                CoreOptions.SCAN_IGNORE_LOST_FILE.key(), "true",
+                " " + CoreOptions.SCAN_IGNORE_LOST_FILE.key() + " ", "false")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("dynamicOptions contains duplicate key after normalization: '%s'",
+                        CoreOptions.SCAN_IGNORE_LOST_FILE.key());
+    }
+
+    @Test
     public void testTableWithDynamicOptionsMergesSessionTagOption()
             throws Exception
     {
