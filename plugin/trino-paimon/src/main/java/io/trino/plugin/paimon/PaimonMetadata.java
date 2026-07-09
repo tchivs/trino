@@ -150,6 +150,7 @@ import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
+import static org.apache.paimon.schema.ColumnDirectiveUtils.applyAddColumnDirective;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 public record PaimonMetadata(PaimonCatalog catalog,
@@ -1955,7 +1956,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
 
         for (ColumnMetadata column : tableMetadata.getColumns()) {
             rejectPaimonSystemColumnName("create table", column.getName());
-            builder.column(column.getName(), toPaimonType(column), column.getComment());
+            DataType dataType = toPaimonType(column);
+            validateAddColumnCommentDirective(column, dataType);
+            builder.column(column.getName(), dataType, column.getComment());
         }
 
         PaimonTableOptionUtils.buildOptions(builder, properties);
@@ -2025,6 +2028,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
     private static DataType toPaimonType(ColumnMetadata column)
     {
         return toPaimonType(column.getType()).copy(column.isNullable());
+    }
+
+    private static void validateAddColumnCommentDirective(ColumnMetadata column, DataType dataType)
+    {
+        try {
+            applyAddColumnDirective(column.getComment(), column.getName(), dataType, new HashMap<>());
+        }
+        catch (IllegalArgumentException e) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Invalid Paimon column comment directive for column '%s': %s"
+                            .formatted(column.getName(), e.getMessage()),
+                    e);
+        }
     }
 
     private PaimonColumnHandle toPaimonColumnHandle(DataField field)
@@ -2355,7 +2371,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
             tryLatestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "add column")
                     .ifPresent(table -> validateNoCaseInsensitiveDuplicateColumnName(
                             table, schemaTableName(paimonTableHandle), column.getName(), Optional.empty()));
-            changes.add(SchemaChange.addColumn(column.getName(), toPaimonType(column), column.getComment(), null));
+            DataType dataType = toPaimonType(column);
+            validateAddColumnCommentDirective(column, dataType);
+            changes.add(SchemaChange.addColumn(column.getName(), dataType, column.getComment(), null));
             sessionCatalog.alterTable(identifier, changes, false);
         }
         catch (Exception e) {

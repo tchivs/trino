@@ -6988,6 +6988,36 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testCreateTableRejectsInvalidPaimonColumnCommentDirectiveBeforeCatalogCall()
+    {
+        ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(ColumnMetadata.builder()
+                        .setName("picture")
+                        .setType(VarbinaryType.VARBINARY)
+                        .setComment(Optional.of("__BLOB_MISSING; profile picture"))
+                        .build()));
+
+        CapturingDdlCatalog createCatalog = new CapturingDdlCatalog();
+        PaimonMetadata createMetadata = new PaimonMetadata(createCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> createMetadata.createTable(SESSION, tableMetadata,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                NOT_SUPPORTED.toErrorCode(),
+                "Invalid Paimon column comment directive for column 'picture': Unsupported BLOB directive in column comment: '__BLOB_MISSING; profile picture'. Supported directives are '__BLOB_FIELD', '__BLOB_DESCRIPTOR_FIELD', '__BLOB_VIEW_FIELD' and '__BLOB_EXTERNAL_STORAGE_FIELD'.");
+        assertThat(createCatalog.initialized).isFalse();
+        assertThat(createCatalog.createdSchema).isNull();
+
+        CapturingDdlCatalog beginCreateCatalog = new CapturingDdlCatalog();
+        PaimonMetadata beginCreateMetadata = new PaimonMetadata(beginCreateCatalog, TESTING_TYPE_MANAGER);
+        assertTrinoError(() -> beginCreateMetadata.beginCreateTable(SESSION, tableMetadata, Optional.empty(),
+                        RetryMode.NO_RETRIES),
+                NOT_SUPPORTED.toErrorCode(),
+                "Invalid Paimon column comment directive for column 'picture': Unsupported BLOB directive in column comment: '__BLOB_MISSING; profile picture'. Supported directives are '__BLOB_FIELD', '__BLOB_DESCRIPTOR_FIELD', '__BLOB_VIEW_FIELD' and '__BLOB_EXTERNAL_STORAGE_FIELD'.");
+        assertThat(beginCreateCatalog.initialized).isFalse();
+        assertThat(beginCreateCatalog.createdSchema).isNull();
+    }
+
+    @Test
     public void testBeginCreateTableMatchesCreatedPaimonSchemaCaseInsensitively()
     {
         CreatedSchemaCatalog catalog = new CreatedSchemaCatalog(createdLowerCaseTable());
@@ -7379,6 +7409,24 @@ public class PaimonMetadataTableModeTest
                     assertThat(change.dataType().isNullable()).isTrue();
                     assertThat(change.description()).isEqualTo("__VECTOR_FIELD;3; added embedding");
                 });
+    }
+
+    @Test
+    public void testAddColumnRejectsInvalidPaimonColumnCommentDirectiveBeforeCatalogAlter()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        ColumnMetadata column = ColumnMetadata.builder()
+                .setName("embedding")
+                .setType(INTEGER)
+                .setComment(Optional.of("__VECTOR_FIELD;3; added embedding"))
+                .build();
+
+        assertTrinoError(() -> metadata.addColumn(SESSION, tableHandle, column),
+                NOT_SUPPORTED.toErrorCode(),
+                "Invalid Paimon column comment directive for column 'embedding': Column embedding declared with a VECTOR directive must be of ARRAY type, but was INT.");
+        assertThat(catalog.alterCalls).isEqualTo(0);
     }
 
     @Test
