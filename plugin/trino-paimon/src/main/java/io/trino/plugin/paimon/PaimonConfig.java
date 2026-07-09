@@ -81,6 +81,31 @@ public class PaimonConfig
     private Boolean s3PathStyleAccess;
     private Boolean s3PathStyleAccessFallback;
     private String s3Region;
+    private String s3EndpointRegion;
+    private String s3SignerType;
+    private String s3SigningAlgorithm;
+    private String s3AEndpoint;
+    private String s3AAccessKey;
+    private String s3AAccessKeyFallback;
+    private String s3ASecretKey;
+    private String s3ASecretKeyFallback;
+    private Boolean s3APathStyleAccess;
+    private Boolean s3APathStyleAccessFallback;
+    private String s3ARegion;
+    private String s3AEndpointRegion;
+    private String s3ASignerType;
+    private String s3ASigningAlgorithm;
+    private String fsS3AEndpoint;
+    private String fsS3AAccessKey;
+    private String fsS3AAccessKeyFallback;
+    private String fsS3ASecretKey;
+    private String fsS3ASecretKeyFallback;
+    private Boolean fsS3APathStyleAccess;
+    private Boolean fsS3APathStyleAccessFallback;
+    private String fsS3ARegion;
+    private String fsS3AEndpointRegion;
+    private String fsS3ASignerType;
+    private String fsS3ASigningAlgorithm;
     private Boolean fsNativeS3Enabled;
     private Boolean fsHadoopEnabled;
     private int catalogSessionCacheMaximumSize = DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE;
@@ -701,6 +726,310 @@ public class PaimonConfig
         return this;
     }
 
+    public String getS3EndpointRegion()
+    {
+        return s3EndpointRegion;
+    }
+
+    @Config("s3.endpoint.region")
+    public PaimonConfig setS3EndpointRegion(String s3EndpointRegion)
+    {
+        this.s3EndpointRegion = s3EndpointRegion;
+        return this;
+    }
+
+    public String getS3SignerType()
+    {
+        return s3SignerType;
+    }
+
+    @Config("s3.signer-type")
+    public PaimonConfig setS3SignerType(String s3SignerType)
+    {
+        this.s3SignerType = s3SignerType;
+        return this;
+    }
+
+    public String getS3SigningAlgorithm()
+    {
+        return s3SigningAlgorithm;
+    }
+
+    @Config("s3.signing-algorithm")
+    public PaimonConfig setS3SigningAlgorithm(String s3SigningAlgorithm)
+    {
+        this.s3SigningAlgorithm = s3SigningAlgorithm;
+        return this;
+    }
+
+    public String getS3AEndpoint()
+    {
+        return s3AEndpoint;
+    }
+
+    @Config("s3a.endpoint")
+    public PaimonConfig setS3AEndpoint(String s3Endpoint)
+    {
+        this.s3AEndpoint = s3Endpoint;
+        return this;
+    }
+
+    public String getS3AAccessKey()
+    {
+        return s3AAccessKey;
+    }
+
+    @Config("s3a.access-key")
+    public PaimonConfig setS3AAccessKey(String s3AccessKey)
+    {
+        this.s3AAccessKey = s3AccessKey;
+        return this;
+    }
+
+    public String getS3AAccessKeyFallback()
+    {
+        return s3AAccessKeyFallback;
+    }
+
+    @Config("s3a.access.key")
+    public PaimonConfig setS3AAccessKeyFallback(String s3AccessKey)
+    {
+        this.s3AAccessKeyFallback = s3AccessKey;
+        return this;
+    }
+
+    public String getS3ASecretKey()
+    {
+        return s3ASecretKey;
+    }
+
+    @Config("s3a.secret-key")
+    @ConfigSecuritySensitive
+    public PaimonConfig setS3ASecretKey(String s3SecretKey)
+    {
+        this.s3ASecretKey = s3SecretKey;
+        return this;
+    }
+
+    public String getS3ASecretKeyFallback()
+    {
+        return s3ASecretKeyFallback;
+    }
+
+    @Config("s3a.secret.key")
+    @ConfigSecuritySensitive
+    public PaimonConfig setS3ASecretKeyFallback(String s3SecretKey)
+    {
+        this.s3ASecretKeyFallback = s3SecretKey;
+        return this;
+    }
+
+    public Boolean getS3APathStyleAccess()
+    {
+        return s3APathStyleAccess;
+    }
+
+    @Config("s3a.path-style-access")
+    public PaimonConfig setS3APathStyleAccess(Boolean s3PathStyleAccess)
+    {
+        this.s3APathStyleAccess = s3PathStyleAccess;
+        return this;
+    }
+
+    public Boolean getS3APathStyleAccessFallback()
+    {
+        return s3APathStyleAccessFallback;
+    }
+
+    @Config("s3a.path.style.access")
+    public PaimonConfig setS3APathStyleAccessFallback(Boolean s3PathStyleAccess)
+    {
+        this.s3APathStyleAccessFallback = s3PathStyleAccess;
+        return this;
+    }
+
+    public String getS3ARegion()
+    {
+        return s3ARegion;
+    }
+
+    @Config("s3a.region")
+    public PaimonConfig setS3ARegion(String s3Region)
+    {
+        this.s3ARegion = s3Region;
+        return this;
+    }
+
+    public String getS3AEndpointRegion()
+    {
+        return s3AEndpointRegion;
+    }
+
+    @Config("s3a.endpoint.region")
+    public PaimonConfig setS3AEndpointRegion(String s3EndpointRegion)
+    {
+        this.s3AEndpointRegion = s3EndpointRegion;
+        return this;
+    }
+
+    public String getS3ASignerType()
+    {
+        return s3ASignerType;
+    }
+
+    @Config("s3a.signer-type")
+    public PaimonConfig setS3ASignerType(String s3SignerType)
+    {
+        this.s3ASignerType = s3SignerType;
+        return this;
+    }
+
+    public String getS3ASigningAlgorithm()
+    {
+        return s3ASigningAlgorithm;
+    }
+
+    @Config("s3a.signing-algorithm")
+    public PaimonConfig setS3ASigningAlgorithm(String s3SigningAlgorithm)
+    {
+        this.s3ASigningAlgorithm = s3SigningAlgorithm;
+        return this;
+    }
+
+    public String getFsS3AEndpoint()
+    {
+        return fsS3AEndpoint;
+    }
+
+    @Config("fs.s3a.endpoint")
+    public PaimonConfig setFsS3AEndpoint(String s3Endpoint)
+    {
+        this.fsS3AEndpoint = s3Endpoint;
+        return this;
+    }
+
+    public String getFsS3AAccessKey()
+    {
+        return fsS3AAccessKey;
+    }
+
+    @Config("fs.s3a.access-key")
+    public PaimonConfig setFsS3AAccessKey(String s3AccessKey)
+    {
+        this.fsS3AAccessKey = s3AccessKey;
+        return this;
+    }
+
+    public String getFsS3AAccessKeyFallback()
+    {
+        return fsS3AAccessKeyFallback;
+    }
+
+    @Config("fs.s3a.access.key")
+    public PaimonConfig setFsS3AAccessKeyFallback(String s3AccessKey)
+    {
+        this.fsS3AAccessKeyFallback = s3AccessKey;
+        return this;
+    }
+
+    public String getFsS3ASecretKey()
+    {
+        return fsS3ASecretKey;
+    }
+
+    @Config("fs.s3a.secret-key")
+    @ConfigSecuritySensitive
+    public PaimonConfig setFsS3ASecretKey(String s3SecretKey)
+    {
+        this.fsS3ASecretKey = s3SecretKey;
+        return this;
+    }
+
+    public String getFsS3ASecretKeyFallback()
+    {
+        return fsS3ASecretKeyFallback;
+    }
+
+    @Config("fs.s3a.secret.key")
+    @ConfigSecuritySensitive
+    public PaimonConfig setFsS3ASecretKeyFallback(String s3SecretKey)
+    {
+        this.fsS3ASecretKeyFallback = s3SecretKey;
+        return this;
+    }
+
+    public Boolean getFsS3APathStyleAccess()
+    {
+        return fsS3APathStyleAccess;
+    }
+
+    @Config("fs.s3a.path-style-access")
+    public PaimonConfig setFsS3APathStyleAccess(Boolean s3PathStyleAccess)
+    {
+        this.fsS3APathStyleAccess = s3PathStyleAccess;
+        return this;
+    }
+
+    public Boolean getFsS3APathStyleAccessFallback()
+    {
+        return fsS3APathStyleAccessFallback;
+    }
+
+    @Config("fs.s3a.path.style.access")
+    public PaimonConfig setFsS3APathStyleAccessFallback(Boolean s3PathStyleAccess)
+    {
+        this.fsS3APathStyleAccessFallback = s3PathStyleAccess;
+        return this;
+    }
+
+    public String getFsS3ARegion()
+    {
+        return fsS3ARegion;
+    }
+
+    @Config("fs.s3a.region")
+    public PaimonConfig setFsS3ARegion(String s3Region)
+    {
+        this.fsS3ARegion = s3Region;
+        return this;
+    }
+
+    public String getFsS3AEndpointRegion()
+    {
+        return fsS3AEndpointRegion;
+    }
+
+    @Config("fs.s3a.endpoint.region")
+    public PaimonConfig setFsS3AEndpointRegion(String s3EndpointRegion)
+    {
+        this.fsS3AEndpointRegion = s3EndpointRegion;
+        return this;
+    }
+
+    public String getFsS3ASignerType()
+    {
+        return fsS3ASignerType;
+    }
+
+    @Config("fs.s3a.signer-type")
+    public PaimonConfig setFsS3ASignerType(String s3SignerType)
+    {
+        this.fsS3ASignerType = s3SignerType;
+        return this;
+    }
+
+    public String getFsS3ASigningAlgorithm()
+    {
+        return fsS3ASigningAlgorithm;
+    }
+
+    @Config("fs.s3a.signing-algorithm")
+    public PaimonConfig setFsS3ASigningAlgorithm(String s3SigningAlgorithm)
+    {
+        this.fsS3ASigningAlgorithm = s3SigningAlgorithm;
+        return this;
+    }
+
     public Boolean getFsNativeS3Enabled()
     {
         return fsNativeS3Enabled;
@@ -808,15 +1137,44 @@ public class PaimonConfig
         putIfPresent(options, "hive.skip-update-stats", hiveSkipUpdateStats);
         putIfPresent(options, "client-pool-cache.keys", clientPoolCacheKeys);
         putIfPresent(options, "alter-table-cascade", alterTableCascade);
-        if (s3Endpoint != null) {
-            options.put("s3.endpoint", s3Endpoint);
-        }
-        putIfPresent(options, "s3.access-key", firstNonNull(s3AccessKey, s3AccessKeyFallback, s3AwsAccessKey));
-        putIfPresent(options, "s3.secret-key", firstNonNull(s3SecretKey, s3SecretKeyFallback, s3AwsSecretKey));
-        putIfPresent(options, "s3.path-style-access", firstNonNull(s3PathStyleAccess, s3PathStyleAccessFallback));
-        if (s3Region != null) {
-            options.put("s3.region", s3Region);
-        }
+        putIfPresent(options, "s3.endpoint", firstNonNull(s3Endpoint, s3AEndpoint, fsS3AEndpoint));
+        putIfPresent(options, "s3.access-key", firstNonNull(
+                s3AccessKey,
+                s3AccessKeyFallback,
+                s3AwsAccessKey,
+                s3AAccessKey,
+                s3AAccessKeyFallback,
+                fsS3AAccessKey,
+                fsS3AAccessKeyFallback));
+        putIfPresent(options, "s3.secret-key", firstNonNull(
+                s3SecretKey,
+                s3SecretKeyFallback,
+                s3AwsSecretKey,
+                s3ASecretKey,
+                s3ASecretKeyFallback,
+                fsS3ASecretKey,
+                fsS3ASecretKeyFallback));
+        putIfPresent(options, "s3.path-style-access", firstNonNull(
+                s3PathStyleAccess,
+                s3PathStyleAccessFallback,
+                s3APathStyleAccess,
+                s3APathStyleAccessFallback,
+                fsS3APathStyleAccess,
+                fsS3APathStyleAccessFallback));
+        putIfPresent(options, "s3.region", firstNonNull(
+                s3Region,
+                s3EndpointRegion,
+                s3ARegion,
+                s3AEndpointRegion,
+                fsS3ARegion,
+                fsS3AEndpointRegion));
+        putIfPresent(options, "s3.signer-type", firstNonNull(
+                s3SignerType,
+                s3SigningAlgorithm,
+                s3ASignerType,
+                s3ASigningAlgorithm,
+                fsS3ASignerType,
+                fsS3ASigningAlgorithm));
         if (fsNativeS3Enabled != null) {
             options.put("fs.native-s3.enabled", fsNativeS3Enabled.toString());
         }
@@ -841,22 +1199,14 @@ public class PaimonConfig
         }
     }
 
-    private static <T> T firstNonNull(T first, T second)
+    @SafeVarargs
+    private static <T> T firstNonNull(T... values)
     {
-        if (first != null) {
-            return first;
+        for (T value : values) {
+            if (value != null) {
+                return value;
+            }
         }
-        return second;
-    }
-
-    private static <T> T firstNonNull(T first, T second, T third)
-    {
-        if (first != null) {
-            return first;
-        }
-        if (second != null) {
-            return second;
-        }
-        return third;
+        return null;
     }
 }

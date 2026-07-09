@@ -232,6 +232,64 @@ public class PaimonConfigTest
     }
 
     @Test
+    public void testS3APrefixAliasesAreMappedToCanonicalOptions()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setS3AEndpoint("http://localhost:9000")
+                .setS3AAccessKeyFallback("access")
+                .setS3ASecretKeyFallback("secret")
+                .setS3APathStyleAccessFallback(true)
+                .setS3AEndpointRegion("us-east-1")
+                .setS3ASigningAlgorithm("custom-signer");
+
+        Options options = config.toOptions();
+
+        assertThat(options.toMap())
+                .containsEntry("s3.endpoint", "http://localhost:9000")
+                .containsEntry("s3.access-key", "access")
+                .containsEntry("s3.secret-key", "secret")
+                .containsEntry("s3.path-style-access", "true")
+                .containsEntry("s3.region", "us-east-1")
+                .containsEntry("s3.signer-type", "custom-signer")
+                .doesNotContainKeys(
+                        "s3a.endpoint",
+                        "s3a.access.key",
+                        "s3a.secret.key",
+                        "s3a.path.style.access",
+                        "s3a.endpoint.region",
+                        "s3a.signing-algorithm");
+    }
+
+    @Test
+    public void testFsS3APrefixAliasesAreMappedToCanonicalOptions()
+    {
+        PaimonConfig config = new PaimonConfig()
+                .setFsS3AEndpoint("http://localhost:9000")
+                .setFsS3AAccessKeyFallback("access")
+                .setFsS3ASecretKeyFallback("secret")
+                .setFsS3APathStyleAccessFallback(true)
+                .setFsS3AEndpointRegion("us-east-1")
+                .setFsS3ASigningAlgorithm("custom-signer");
+
+        Options options = config.toOptions();
+
+        assertThat(options.toMap())
+                .containsEntry("s3.endpoint", "http://localhost:9000")
+                .containsEntry("s3.access-key", "access")
+                .containsEntry("s3.secret-key", "secret")
+                .containsEntry("s3.path-style-access", "true")
+                .containsEntry("s3.region", "us-east-1")
+                .containsEntry("s3.signer-type", "custom-signer")
+                .doesNotContainKeys(
+                        "fs.s3a.endpoint",
+                        "fs.s3a.access.key",
+                        "fs.s3a.secret.key",
+                        "fs.s3a.path.style.access",
+                        "fs.s3a.endpoint.region",
+                        "fs.s3a.signing-algorithm");
+    }
+
+    @Test
     public void testTrinoS3CredentialAliasesAreMappedToCanonicalOptions()
     {
         PaimonConfig config = new PaimonConfig()
@@ -250,21 +308,39 @@ public class PaimonConfigTest
     public void testS3CanonicalOptionsTakePrecedenceOverAliases()
     {
         PaimonConfig config = new PaimonConfig()
+                .setS3Endpoint("http://canonical")
+                .setS3AEndpoint("http://s3a")
+                .setFsS3AEndpoint("http://fs-s3a")
                 .setS3AccessKey("canonical-access")
                 .setS3AccessKeyFallback("fallback-access")
                 .setS3AwsAccessKey("trino-access")
+                .setS3AAccessKey("s3a-access")
+                .setFsS3AAccessKey("fs-s3a-access")
                 .setS3SecretKey("canonical-secret")
                 .setS3SecretKeyFallback("fallback-secret")
                 .setS3AwsSecretKey("trino-secret")
+                .setS3ASecretKey("s3a-secret")
+                .setFsS3ASecretKey("fs-s3a-secret")
                 .setS3PathStyleAccess(false)
-                .setS3PathStyleAccessFallback(true);
+                .setS3PathStyleAccessFallback(true)
+                .setS3APathStyleAccess(true)
+                .setFsS3APathStyleAccess(true)
+                .setS3Region("canonical-region")
+                .setS3ARegion("s3a-region")
+                .setFsS3ARegion("fs-s3a-region")
+                .setS3SignerType("canonical-signer")
+                .setS3ASignerType("s3a-signer")
+                .setFsS3ASignerType("fs-s3a-signer");
 
         Options options = config.toOptions();
 
         assertThat(options.toMap())
+                .containsEntry("s3.endpoint", "http://canonical")
                 .containsEntry("s3.access-key", "canonical-access")
                 .containsEntry("s3.secret-key", "canonical-secret")
-                .containsEntry("s3.path-style-access", "false");
+                .containsEntry("s3.path-style-access", "false")
+                .containsEntry("s3.region", "canonical-region")
+                .containsEntry("s3.signer-type", "canonical-signer");
     }
 
     @Test

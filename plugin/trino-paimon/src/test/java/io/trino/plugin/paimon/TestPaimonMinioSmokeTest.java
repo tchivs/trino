@@ -71,11 +71,11 @@ public class TestPaimonMinioSmokeTest
                         .put("warehouse", "s3://%s/%s".formatted(bucketName, WAREHOUSE_PREFIX))
                         .put("fs.hadoop.enabled", "false")
                         .put("fs.native-s3.enabled", "true")
-                        .put("s3.aws-access-key", MINIO_ACCESS_KEY)
-                        .put("s3.aws-secret-key", MINIO_SECRET_KEY)
-                        .put("s3.region", MINIO_REGION)
-                        .put("s3.endpoint", minio.getMinioAddress())
-                        .put("s3.path-style-access", "true")
+                        .put("fs.s3a.access.key", MINIO_ACCESS_KEY)
+                        .put("fs.s3a.secret.key", MINIO_SECRET_KEY)
+                        .put("fs.s3a.endpoint.region", MINIO_REGION)
+                        .put("fs.s3a.endpoint", minio.getMinioAddress())
+                        .put("fs.s3a.path.style.access", "true")
                         .buildOrThrow());
 
         return queryRunner;

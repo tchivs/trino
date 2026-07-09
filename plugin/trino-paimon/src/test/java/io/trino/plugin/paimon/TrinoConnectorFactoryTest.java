@@ -89,7 +89,10 @@ public class TrinoConnectorFactoryTest
                 Map.entry("alter-table-cascade", "false"),
                 Map.entry("s3.access.key", "access"),
                 Map.entry("s3.secret.key", "secret"),
-                Map.entry("s3.path.style.access", "true"));
+                Map.entry("s3.path.style.access", "true"),
+                Map.entry("s3a.endpoint", "http://localhost:9000"),
+                Map.entry("s3a.endpoint.region", "us-east-1"),
+                Map.entry("fs.s3a.signing-algorithm", "custom-signer"));
         ConnectorFactory factory = new PaimonConnectorFactory();
 
         Connector connector = factory.create("paimon", config, new TestingConnectorContext());
@@ -287,6 +290,54 @@ public class TrinoConnectorFactoryTest
                 .containsEntry("s3.access-key", "paimon-access")
                 .containsEntry("s3.secret-key", "paimon-secret")
                 .containsEntry("s3.path-style-access", "true")
+                .containsEntry("s3.aws-access-key", "paimon-access")
+                .containsEntry("s3.aws-secret-key", "paimon-secret");
+    }
+
+    @Test
+    public void testPaimonS3AObjectStorePropertiesAreMappedToTrinoNativeProperties()
+    {
+        Map<String, String> config = new HashMap<>();
+        config.put("s3a.access.key", "paimon-access");
+        config.put("s3a.secret.key", "paimon-secret");
+        config.put("s3a.endpoint", "http://localhost:9000");
+        config.put("s3a.path.style.access", "true");
+        config.put("s3a.endpoint.region", "us-east-1");
+        config.put("s3a.signing-algorithm", "custom-signer");
+
+        PaimonConnectorFactory.addS3CredentialProperties(config);
+
+        assertThat(config)
+                .containsEntry("s3.access-key", "paimon-access")
+                .containsEntry("s3.secret-key", "paimon-secret")
+                .containsEntry("s3.endpoint", "http://localhost:9000")
+                .containsEntry("s3.path-style-access", "true")
+                .containsEntry("s3.region", "us-east-1")
+                .containsEntry("s3.signer-type", "custom-signer")
+                .containsEntry("s3.aws-access-key", "paimon-access")
+                .containsEntry("s3.aws-secret-key", "paimon-secret");
+    }
+
+    @Test
+    public void testHadoopS3AObjectStorePropertiesAreMappedToTrinoNativeProperties()
+    {
+        Map<String, String> config = new HashMap<>();
+        config.put("fs.s3a.access.key", "paimon-access");
+        config.put("fs.s3a.secret.key", "paimon-secret");
+        config.put("fs.s3a.endpoint", "http://localhost:9000");
+        config.put("fs.s3a.path.style.access", "true");
+        config.put("fs.s3a.endpoint.region", "us-east-1");
+        config.put("fs.s3a.signing-algorithm", "custom-signer");
+
+        PaimonConnectorFactory.addS3CredentialProperties(config);
+
+        assertThat(config)
+                .containsEntry("s3.access-key", "paimon-access")
+                .containsEntry("s3.secret-key", "paimon-secret")
+                .containsEntry("s3.endpoint", "http://localhost:9000")
+                .containsEntry("s3.path-style-access", "true")
+                .containsEntry("s3.region", "us-east-1")
+                .containsEntry("s3.signer-type", "custom-signer")
                 .containsEntry("s3.aws-access-key", "paimon-access")
                 .containsEntry("s3.aws-secret-key", "paimon-secret");
     }
