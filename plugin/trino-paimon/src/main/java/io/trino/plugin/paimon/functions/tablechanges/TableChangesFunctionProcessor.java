@@ -44,7 +44,6 @@ public class TableChangesFunctionProcessor
 
     private final ConnectorPageSource pageSource;
     private boolean closed;
-    private RuntimeException closeFailure;
 
     public TableChangesFunctionProcessor(ConnectorSession session, PaimonTableHandle handle, PaimonSplit split,
             PaimonPageSourceProvider pageSourceProvider)
@@ -102,32 +101,22 @@ public class TableChangesFunctionProcessor
     private void closeIfNecessary()
     {
         if (closed) {
-            if (closeFailure != null) {
-                throw closeFailure;
-            }
             return;
         }
-        RuntimeException failure = null;
         try {
             pageSource.close();
+            closed = true;
         }
         catch (TrinoException e) {
-            failure = e;
             throw e;
         }
         catch (IOException e) {
-            failure = new TrinoException(PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT,
+            throw new TrinoException(PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT,
                     CLOSE_PAGE_SOURCE_ERROR, e);
-            throw failure;
         }
         catch (RuntimeException e) {
-            failure = new TrinoException(PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT,
+            throw new TrinoException(PaimonErrorCode.PAIMON_CANNOT_OPEN_SPLIT,
                     CLOSE_PAGE_SOURCE_ERROR, e);
-            throw failure;
-        }
-        finally {
-            closed = true;
-            closeFailure = failure;
         }
     }
 }

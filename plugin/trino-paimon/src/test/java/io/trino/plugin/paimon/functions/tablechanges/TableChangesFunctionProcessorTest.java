@@ -256,9 +256,9 @@ public class TableChangesFunctionProcessorTest
     }
 
     @Test
-    public void testProcessorDoesNotRetryTerminalCloseFailure()
+    public void testProcessorRetriesTerminalCloseFailure()
     {
-        CloseFailurePageSource pageSource = new CloseFailurePageSource(true, true);
+        CloseFailurePageSource pageSource = new CloseFailurePageSource(true, 1);
         TableChangesFunctionProcessor processor = new TableChangesFunctionProcessor(
                 SESSION,
                 handleWithProjectedColumns(),
@@ -266,13 +266,13 @@ public class TableChangesFunctionProcessorTest
                 pageSourceProvider(pageSource));
 
         Throwable firstFailure = catchThrowable(processor::process);
-        Throwable secondFailure = catchThrowable(processor::process);
 
         assertThat(firstFailure)
                 .isInstanceOfSatisfying(TrinoException.class, exception ->
                         assertThat(exception.getErrorCode()).isEqualTo(PAIMON_CANNOT_OPEN_SPLIT.toErrorCode()));
-        assertThat(secondFailure).isSameAs(firstFailure);
-        assertThat(pageSource.closeCount()).isEqualTo(1);
+        assertThat(processor.process()).isEqualTo(TableFunctionProcessorState.Finished.FINISHED);
+        assertThat(processor.process()).isEqualTo(TableFunctionProcessorState.Finished.FINISHED);
+        assertThat(pageSource.closeCount()).isEqualTo(2);
     }
 
     @Test
@@ -578,31 +578,36 @@ public class TableChangesFunctionProcessorTest
     {
         private final boolean finished;
         private final boolean failOnRead;
-        private final boolean failOnClose;
+        private final int closeFailures;
         private final RuntimeException runtimeCloseFailure;
         private final AtomicInteger closeCount = new AtomicInteger();
 
         private CloseFailurePageSource(boolean finished, boolean failOnClose)
         {
-            this(finished, false, failOnClose, null);
+            this(finished, false, failOnClose ? Integer.MAX_VALUE : 0, null);
+        }
+
+        private CloseFailurePageSource(boolean finished, int closeFailures)
+        {
+            this(finished, false, closeFailures, null);
         }
 
         private CloseFailurePageSource(boolean finished, RuntimeException runtimeCloseFailure)
         {
-            this(finished, false, false, runtimeCloseFailure);
+            this(finished, false, 0, runtimeCloseFailure);
         }
 
         private CloseFailurePageSource(boolean finished, boolean failOnRead, boolean failOnClose)
         {
-            this(finished, failOnRead, failOnClose, null);
+            this(finished, failOnRead, failOnClose ? Integer.MAX_VALUE : 0, null);
         }
 
-        private CloseFailurePageSource(boolean finished, boolean failOnRead, boolean failOnClose,
+        private CloseFailurePageSource(boolean finished, boolean failOnRead, int closeFailures,
                 RuntimeException runtimeCloseFailure)
         {
             this.finished = finished;
             this.failOnRead = failOnRead;
-            this.failOnClose = failOnClose;
+            this.closeFailures = closeFailures;
             this.runtimeCloseFailure = runtimeCloseFailure;
         }
 
@@ -643,11 +648,11 @@ public class TableChangesFunctionProcessorTest
         public void close()
                 throws IOException
         {
-            closeCount.incrementAndGet();
+            int closeAttempt = closeCount.incrementAndGet();
             if (runtimeCloseFailure != null) {
                 throw runtimeCloseFailure;
             }
-            if (failOnClose) {
+            if (closeAttempt <= closeFailures) {
                 throw new IOException("close failure");
             }
         }
