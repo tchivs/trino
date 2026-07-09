@@ -68,6 +68,8 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.GenericVariant;
 import org.apache.paimon.deletionvectors.DeletionVector;
+import org.apache.paimon.disk.IOManager;
+import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
@@ -82,6 +84,7 @@ import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.table.source.DeletionFile;
 import org.apache.paimon.table.source.RawFile;
 import org.apache.paimon.table.source.ReadBuilder;
+import org.apache.paimon.table.source.TableRead;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
@@ -1470,6 +1473,59 @@ public class PaimonPageSourceTest
                     assertThat(exception.getCause()).isSameAs(readFailure);
                 });
         assertThat(copyOptions.get()).isNull();
+    }
+
+    @Test
+    void testPaimonReaderFallbackUsesAndClosesIoManager()
+            throws IOException
+    {
+        PaimonColumnHandle idColumn = PaimonColumnHandle.of("id", DataTypes.BIGINT());
+        TrackingRecordReader reader = new TrackingRecordReader(GenericRow.of(11L));
+        AtomicReference<IOManager> readIoManager = new AtomicReference<>();
+        FileStoreTable table = ioManagerRecordingFileStoreTable(readIoManager, DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.BIGINT())), reader);
+        TestingIoManager ioManager = new TestingIoManager();
+        PaimonPageSourceProvider provider = new PaimonPageSourceProvider(
+                session -> {
+                    throw new AssertionError("filesystem should not be used by Paimon reader fallback");
+                },
+                new PaimonMetadataFactory(new Options(),
+                        session -> {
+                            throw new AssertionError("filesystem should not be used by Paimon reader fallback catalog");
+                        },
+                        TESTING_TYPE_MANAGER)
+                {
+                    @Override
+                    public PaimonMetadata create()
+                    {
+                        return new PaimonMetadata(new TestingCatalog(table), TESTING_TYPE_MANAGER);
+                    }
+                },
+                new OrcReaderConfig(),
+                new ParquetReaderConfig(),
+                () -> ioManager);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.empty());
+        ConnectorSession session = io.trino.testing.TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        ConnectorPageSource pageSource = provider.createPageSource(null, session,
+                PaimonSplit.fromSplit(testingSplit(1), 1.0),
+                tableHandle,
+                List.of(idColumn),
+                DynamicFilter.EMPTY);
+
+        assertThat(readIoManager).hasValue(ioManager);
+        Page page = pageSource.getNextPage();
+        assertThat(page.getPositionCount()).isEqualTo(1);
+        assertThat(TypeUtils.readNativeValue(BIGINT, page.getBlock(0), 0)).isEqualTo(11L);
+        assertThat(reader.closeCalls()).isEqualTo(1);
+        assertThat(ioManager.closeCount()).isEqualTo(1);
+
+        pageSource.close();
+        assertThat(reader.closeCalls()).isEqualTo(1);
+        assertThat(ioManager.closeCount()).isEqualTo(1);
     }
 
     @Test
@@ -3953,6 +4009,59 @@ public class PaimonPageSourceTest
                 });
     }
 
+    private static FileStoreTable ioManagerRecordingFileStoreTable(
+            AtomicReference<IOManager> readIoManager,
+            org.apache.paimon.types.RowType rowType,
+            RecordReader<InternalRow> reader)
+    {
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonPageSourceTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copyWithLatestSchema" -> proxy;
+                    case "rowType" -> rowType;
+                    case "partitionKeys" -> List.of();
+                    case "coreOptions" -> new org.apache.paimon.CoreOptions(new Options());
+                    case "newReadBuilder" -> ioManagerRecordingReadBuilder(readIoManager, reader);
+                    case "toString" -> "io-manager-recording-file-store-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder ioManagerRecordingReadBuilder(
+            AtomicReference<IOManager> readIoManager,
+            RecordReader<InternalRow> reader)
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                PaimonPageSourceTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "newRead" -> ioManagerRecordingTableRead(readIoManager, reader);
+                    case "tableName" -> "testing";
+                    case "toString" -> "io-manager-recording-read-builder";
+                    default -> proxy;
+                });
+    }
+
+    private static TableRead ioManagerRecordingTableRead(
+            AtomicReference<IOManager> readIoManager,
+            RecordReader<InternalRow> reader)
+    {
+        return (TableRead) Proxy.newProxyInstance(
+                PaimonPageSourceTest.class.getClassLoader(),
+                new Class<?>[] {TableRead.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "withIOManager" -> {
+                        readIoManager.set((IOManager) args[0]);
+                        yield proxy;
+                    }
+                    case "executeFilter", "withMetricRegistry" -> proxy;
+                    case "createReader" -> reader;
+                    case "toString" -> "io-manager-recording-table-read";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
     private static ReadBuilder readBuilder(UnsupportedOperationException readFailure)
     {
         return (ReadBuilder) Proxy.newProxyInstance(
@@ -4252,6 +4361,30 @@ public class PaimonPageSourceTest
         private int closeCalls()
         {
             return closeCalls.get();
+        }
+    }
+
+    private static class TestingIoManager
+            extends IOManagerImpl
+    {
+        private final AtomicInteger closeCount = new AtomicInteger();
+
+        private TestingIoManager()
+        {
+            super(System.getProperty("java.io.tmpdir"));
+        }
+
+        @Override
+        public void close()
+                throws Exception
+        {
+            closeCount.incrementAndGet();
+            super.close();
+        }
+
+        private int closeCount()
+        {
+            return closeCount.get();
         }
     }
 

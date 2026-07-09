@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import com.google.common.collect.ImmutableList;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -45,17 +46,30 @@ public class PaimonPageSource
     private final CloseableIterator<InternalRow> iterator;
     private final OptionalLong limit;
     private final PaimonPageBuilder pageBuilder;
+    private final List<AutoCloseable> closeables;
+    private final boolean[] closeablesClosed;
 
     private boolean isFinished;
     private boolean closed;
+    private boolean iteratorClosed;
     private long numReturn;
     private long readTimeNanos;
 
     public PaimonPageSource(RecordReader<InternalRow> reader, List<? extends ColumnHandle> projectedColumns,
             OptionalLong limit)
     {
+        this(reader, projectedColumns, limit, List.of());
+    }
+
+    PaimonPageSource(RecordReader<InternalRow> reader, List<? extends ColumnHandle> projectedColumns,
+            OptionalLong limit, List<? extends AutoCloseable> closeables)
+    {
         RecordReader<InternalRow> recordReader = requireNonNull(reader, "reader is null");
+        List<AutoCloseable> extraCloseables = List.of();
         try {
+            extraCloseables = copyCloseables(closeables);
+            this.closeables = extraCloseables;
+            this.closeablesClosed = new boolean[extraCloseables.size()];
             this.limit = requireNonNull(limit, "limit is null");
             checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
             PageSourceColumns pageSourceColumns = pageSourceColumns(projectedColumns);
@@ -63,11 +77,28 @@ public class PaimonPageSource
         }
         catch (RuntimeException | Error e) {
             closeAllSuppress(e, recordReader);
+            closeAllSuppress(e, extraCloseables.toArray(AutoCloseable[]::new));
             throw e;
         }
 
-        // Paimon's RecordReaderIterator closes the reader if the initial readBatch fails.
-        this.iterator = recordReader.toCloseableIterator();
+        try {
+            // Paimon's RecordReaderIterator closes the reader if the initial readBatch fails.
+            this.iterator = recordReader.toCloseableIterator();
+        }
+        catch (RuntimeException | Error e) {
+            closeAllSuppress(e, extraCloseables.toArray(AutoCloseable[]::new));
+            throw e;
+        }
+    }
+
+    private static List<AutoCloseable> copyCloseables(List<? extends AutoCloseable> closeables)
+    {
+        requireNonNull(closeables, "closeables is null");
+        ImmutableList.Builder<AutoCloseable> builder = ImmutableList.builder();
+        for (AutoCloseable closeable : closeables) {
+            builder.add(requireNonNull(closeable, "closeables contains null closeable"));
+        }
+        return builder.build();
     }
 
     private static PageSourceColumns pageSourceColumns(List<? extends ColumnHandle> projectedColumns)
@@ -219,14 +250,41 @@ public class PaimonPageSource
             return;
         }
         isFinished = true;
-        try {
-            this.iterator.close();
+        Throwable failure = null;
+        if (!iteratorClosed) {
+            try {
+                this.iterator.close();
+                iteratorClosed = true;
+            }
+            catch (Throwable e) {
+                failure = e;
+            }
         }
-        catch (IOException e) {
-            throw e;
+        for (int i = 0; i < closeables.size(); i++) {
+            if (closeablesClosed[i]) {
+                continue;
+            }
+            try {
+                closeables.get(i).close();
+                closeablesClosed[i] = true;
+            }
+            catch (Throwable e) {
+                if (failure == null) {
+                    failure = e;
+                }
+                else if (failure != e) {
+                    failure.addSuppressed(e);
+                }
+            }
         }
-        catch (Exception e) {
-            throw new IOException(e);
+        if (failure != null) {
+            if (failure instanceof IOException e) {
+                throw e;
+            }
+            if (failure instanceof Error e) {
+                throw e;
+            }
+            throw new IOException(failure);
         }
         closed = true;
     }

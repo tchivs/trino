@@ -57,10 +57,13 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.deletionvectors.DeletionVector;
+import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.fileindex.FileIndexPredicate;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.predicate.Predicate;
+import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.SpecialFields;
@@ -70,6 +73,7 @@ import org.apache.paimon.table.source.IndexFile;
 import org.apache.paimon.table.source.RawFile;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
+import org.apache.paimon.table.source.TableRead;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypeChecks;
@@ -104,6 +108,7 @@ import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
+import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static io.trino.plugin.hive.parquet.ParquetPageSourceFactory.createDataSource;
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_BAD_DATA;
@@ -126,11 +131,31 @@ public class PaimonPageSourceProvider
     private final PaimonCatalog paimonCatalog;
     private final OrcReaderOptions orcReaderOptions;
     private final ParquetReaderOptions parquetReaderOptions;
+    private final Supplier<IOManager> ioManagerFactory;
 
     @Inject
     public PaimonPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, PaimonMetadataFactory paimonMetadataFactory,
             io.trino.plugin.hive.orc.OrcReaderConfig orcReaderConfig,
+            io.trino.plugin.hive.parquet.ParquetReaderConfig parquetReaderConfig,
+            PaimonConfig config)
+    {
+        this(fileSystemFactory, paimonMetadataFactory, orcReaderConfig, parquetReaderConfig,
+                () -> PaimonPageSinkProvider.createIoManager(requireNonNull(config, "config is null")
+                        .getWriteSpillPath()));
+    }
+
+    public PaimonPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, PaimonMetadataFactory paimonMetadataFactory,
+            io.trino.plugin.hive.orc.OrcReaderConfig orcReaderConfig,
             io.trino.plugin.hive.parquet.ParquetReaderConfig parquetReaderConfig)
+    {
+        this(fileSystemFactory, paimonMetadataFactory, orcReaderConfig, parquetReaderConfig,
+                () -> PaimonPageSinkProvider.createIoManager(new PaimonConfig().getWriteSpillPath()));
+    }
+
+    PaimonPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, PaimonMetadataFactory paimonMetadataFactory,
+            io.trino.plugin.hive.orc.OrcReaderConfig orcReaderConfig,
+            io.trino.plugin.hive.parquet.ParquetReaderConfig parquetReaderConfig,
+            Supplier<IOManager> ioManagerFactory)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.paimonCatalog = requireNonNull(paimonMetadataFactory, "trinoMetadataFactory is null").create().catalog();
@@ -140,6 +165,7 @@ public class PaimonPageSourceProvider
                 // but not the whole stripe)
                 .withTinyStripeThreshold(DataSize.of(4, DataSize.Unit.KILOBYTE));
         this.parquetReaderOptions = requireNonNull(parquetReaderConfig, "parquetReaderConfig is null").toParquetReaderOptions();
+        this.ioManagerFactory = requireNonNull(ioManagerFactory, "ioManagerFactory is null");
     }
 
     @Override
@@ -474,7 +500,17 @@ public class PaimonPageSourceProvider
             read.withReadType(paimonReadType);
         }
 
-        return new PaimonPageSource(read.newRead().executeFilter().createReader(paimonSplit), columns, limit);
+        IOManager ioManager = requireNonNull(ioManagerFactory.get(), "ioManagerFactory returned null");
+        RecordReader<InternalRow> reader;
+        try {
+            TableRead tableRead = read.newRead().withIOManager(ioManager).executeFilter();
+            reader = tableRead.createReader(paimonSplit);
+        }
+        catch (IOException | RuntimeException | Error e) {
+            closeAllSuppress(e, ioManager);
+            throw e;
+        }
+        return new PaimonPageSource(reader, columns, limit, List.of(ioManager));
     }
 
     static List<String> readerFields(List<String> fieldNames, List<String> projectedFields, TupleDomain<PaimonColumnHandle> readerFilter)
