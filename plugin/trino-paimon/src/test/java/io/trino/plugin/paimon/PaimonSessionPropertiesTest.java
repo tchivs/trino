@@ -92,6 +92,9 @@ public class PaimonSessionPropertiesTest
         assertThat(PaimonSessionProperties.getInsertExistingPartitionsBehavior(session(Map.of(
                 INSERT_EXISTING_PARTITIONS_BEHAVIOR, "OvErWrItE"))))
                 .isEqualTo(PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE);
+        assertThat(PaimonSessionProperties.getInsertExistingPartitionsBehavior(session(Map.of(
+                INSERT_EXISTING_PARTITIONS_BEHAVIOR, " error "))))
+                .isEqualTo(PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR);
     }
 
     private static void assertInvalidMinimumSplitWeight(double value)

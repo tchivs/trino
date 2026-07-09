@@ -83,7 +83,7 @@ public class PaimonSessionProperties
                 .add(new PropertyMetadata<>(INSERT_EXISTING_PARTITIONS_BEHAVIOR,
                         "Behavior on insert existing partitions", VARCHAR, InsertExistingPartitionsBehavior.class,
                         InsertExistingPartitionsBehavior.APPEND, false,
-                        value -> InsertExistingPartitionsBehavior.valueOf(((String) value).toUpperCase(Locale.ENGLISH)),
+                        value -> InsertExistingPartitionsBehavior.valueOf(((String) value).strip().toUpperCase(Locale.ENGLISH)),
                         InsertExistingPartitionsBehavior::toString))
                 .add(durationProperty(DYNAMIC_FILTERING_WAIT_TIMEOUT,
                         "Duration to wait for completion of dynamic filters during split generation",
