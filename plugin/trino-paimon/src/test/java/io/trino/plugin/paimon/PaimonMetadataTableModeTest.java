@@ -6028,26 +6028,85 @@ public class PaimonMetadataTableModeTest
     public void testSetTablePropertiesAllowsNoOpExistingOptionUpdates()
     {
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        AtomicInteger dynamicBucketLatestSnapshotCalls = new AtomicInteger();
 
         CapturingDdlCatalog dynamicBucketCatalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
-                Map.of(CoreOptions.BUCKET.key(), "-1")));
+                Map.of(CoreOptions.BUCKET.key(), "-1"),
+                true,
+                dynamicBucketLatestSnapshotCalls));
         PaimonMetadata dynamicBucketMetadata = new PaimonMetadata(dynamicBucketCatalog, TESTING_TYPE_MANAGER);
 
         dynamicBucketMetadata.setTableProperties(SESSION, tableHandle,
                 Map.of("bucket", Optional.of("-1")));
 
         assertThat(dynamicBucketCatalog.alterCalls).isEqualTo(1);
+        assertThat(dynamicBucketLatestSnapshotCalls).hasValue(0);
 
+        AtomicInteger pkClusteringLatestSnapshotCalls = new AtomicInteger();
         CapturingDdlCatalog pkClusteringCatalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
                 Map.of(
                         CoreOptions.PK_CLUSTERING_OVERRIDE.key(), "true",
-                        CoreOptions.CLUSTERING_COLUMNS.key(), "id")));
+                        CoreOptions.CLUSTERING_COLUMNS.key(), "id"),
+                true,
+                pkClusteringLatestSnapshotCalls));
         PaimonMetadata pkClusteringMetadata = new PaimonMetadata(pkClusteringCatalog, TESTING_TYPE_MANAGER);
 
         pkClusteringMetadata.setTableProperties(SESSION, tableHandle,
                 Map.of("clustering_columns", Optional.of("id")));
 
         assertThat(pkClusteringCatalog.alterCalls).isEqualTo(1);
+        assertThat(pkClusteringLatestSnapshotCalls).hasValue(0);
+    }
+
+    @Test
+    public void testSetTablePropertiesAllowsSnapshotlessPaimonOptionChangesBeforeCatalogAlter()
+    {
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        AtomicInteger getTableCalls = new AtomicInteger();
+        AtomicInteger latestSnapshotCalls = new AtomicInteger();
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(schemaOptionsFileStoreTable(
+                Map.of(
+                        CoreOptions.BUCKET.key(), "-1",
+                        CoreOptions.DELETION_VECTORS_ENABLED.key(), "false",
+                        CoreOptions.IGNORE_DELETE.key(), "true",
+                        CoreOptions.IGNORE_UPDATE_BEFORE.key(), "true",
+                        CoreOptions.PK_CLUSTERING_OVERRIDE.key(), "true",
+                        CoreOptions.CLUSTERING_COLUMNS.key(), "id"),
+                false,
+                latestSnapshotCalls))
+        {
+            @Override
+            public Table getTable(Identifier identifier)
+                    throws Catalog.TableNotExistException
+            {
+                getTableCalls.incrementAndGet();
+                return super.getTable(identifier);
+            }
+        };
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+
+        metadata.setTableProperties(SESSION, tableHandle,
+                Map.of(
+                        "bucket", Optional.of("4"),
+                        "deletion_vectors_enabled", Optional.of("true"),
+                        "ignore_delete", Optional.of("false"),
+                        "ignore_update_before", Optional.of("false"),
+                        "clustering_columns", Optional.of("payload")));
+
+        assertThat(catalog.alterCalls).isEqualTo(1);
+        assertThat(catalog.lastAlterChanges).hasSize(5);
+        assertThat(getTableCalls).hasValue(1);
+        assertThat(latestSnapshotCalls).hasValue(1);
+
+        metadata.setTableProperties(SESSION, tableHandle,
+                Map.of(
+                        "bucket", Optional.empty(),
+                        "clustering_columns", Optional.empty()));
+
+        assertThat(catalog.alterCalls).isEqualTo(2);
+        assertThat(catalog.lastAlterChanges).hasSize(2);
+        assertThat(getTableCalls).hasValue(2);
+        assertThat(latestSnapshotCalls).hasValue(2);
     }
 
     @Test
@@ -7805,6 +7864,7 @@ public class PaimonMetadataTableModeTest
                     case "comment" -> Optional.empty();
                     case "options" -> options;
                     case "coreOptions" -> new CoreOptions(new Options(options));
+                    case "latestSnapshot" -> Optional.of(true);
                     case "schema" -> TableSchema.create(1, new Schema(
                             rowType.getFields(),
                             partitionKeys,
@@ -7826,6 +7886,19 @@ public class PaimonMetadataTableModeTest
 
     private static FileStoreTable schemaOptionsFileStoreTable(Map<String, String> options)
     {
+        return schemaOptionsFileStoreTable(options, true);
+    }
+
+    private static FileStoreTable schemaOptionsFileStoreTable(Map<String, String> options, boolean hasSnapshots)
+    {
+        return schemaOptionsFileStoreTable(options, hasSnapshots, new AtomicInteger());
+    }
+
+    private static FileStoreTable schemaOptionsFileStoreTable(
+            Map<String, String> options,
+            boolean hasSnapshots,
+            AtomicInteger latestSnapshotCalls)
+    {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
         TableSchema schema = TableSchema.create(1, new Schema(rowType.getFields(), List.of(), List.of(), options, ""));
         return (FileStoreTable) Proxy.newProxyInstance(
@@ -7840,6 +7913,10 @@ public class PaimonMetadataTableModeTest
                     case "options" -> options;
                     case "coreOptions" -> new CoreOptions(new Options(options));
                     case "schema" -> schema;
+                    case "latestSnapshot" -> {
+                        latestSnapshotCalls.incrementAndGet();
+                        yield hasSnapshots ? Optional.of(true) : Optional.empty();
+                    }
                     case "copyWithLatestSchema", "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "schema-options-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());

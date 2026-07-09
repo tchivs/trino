@@ -117,6 +117,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -168,6 +169,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
             CoreOptions.IGNORE_UPDATE_BEFORE.key(),
             CoreOptions.CLUSTERING_COLUMNS.key());
     private static final Set<String> PAIMON_OPTION_REMOVES_REQUIRING_EXISTING_OPTIONS = Set.of(
+            CoreOptions.BUCKET.key(),
             CoreOptions.CLUSTERING_COLUMNS.key());
 
     public PaimonMetadata
@@ -1599,7 +1601,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Identifier identifier = new Identifier(paimonTableHandle.getSchemaName(), paimonTableHandle.getTableName());
         rejectUnsupportedTablePropertyUpdates(properties);
         Catalog sessionCatalog = catalog.forSession(session);
-        Optional<Map<String, String>> existingOptions = Optional.empty();
+        Optional<PaimonTableOptionSnapshot> tableOptionSnapshot = Optional.empty();
         List<SchemaChange> changes = new ArrayList<>();
         Set<String> updatedPaimonOptionKeys = new HashSet<>();
 
@@ -1620,24 +1622,26 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 // Set the property to the specified value
                 String optionValue = PaimonTableOptionUtils.normalizeOptionValue(propertyName, key, value.get());
                 if (requiresExistingOptionsForPaimonOptionUpdate(key)) {
-                    existingOptions = existingOptions.or(() ->
-                            getPaimonTableOptionsIfAvailable(sessionCatalog, paimonTableHandle));
-                    existingOptions.ifPresent(options -> validatePaimonTableOptionUpdate(options, key, optionValue));
+                    tableOptionSnapshot = tableOptionSnapshot.or(() ->
+                            getPaimonTableOptionSnapshotIfAvailable(sessionCatalog, paimonTableHandle));
+                    tableOptionSnapshot.ifPresent(snapshot ->
+                            validatePaimonTableOptionUpdate(snapshot.options(), snapshot::hasSnapshots, key, optionValue));
                 }
                 else {
-                    validatePaimonTableOptionUpdate(Map.of(), key, optionValue);
+                    validatePaimonTableOptionUpdate(Map.of(), () -> true, key, optionValue);
                 }
                 changes.add(SchemaChange.setOption(key, optionValue));
             }
             else {
                 // Remove the property (SET PROPERTIES x = DEFAULT)
                 if (requiresExistingOptionsForPaimonOptionRemove(key)) {
-                    existingOptions = existingOptions.or(() ->
-                            getPaimonTableOptionsIfAvailable(sessionCatalog, paimonTableHandle));
-                    existingOptions.ifPresent(options -> validatePaimonTableOptionRemove(options, key));
+                    tableOptionSnapshot = tableOptionSnapshot.or(() ->
+                            getPaimonTableOptionSnapshotIfAvailable(sessionCatalog, paimonTableHandle));
+                    tableOptionSnapshot.ifPresent(snapshot ->
+                            validatePaimonTableOptionRemove(snapshot.options(), snapshot::hasSnapshots, key));
                 }
                 else {
-                    validatePaimonTableOptionRemove(Map.of(), key);
+                    validatePaimonTableOptionRemove(Map.of(), () -> true, key);
                 }
                 changes.add(SchemaChange.removeOption(key));
             }
@@ -1661,7 +1665,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         return PAIMON_OPTION_REMOVES_REQUIRING_EXISTING_OPTIONS.contains(key);
     }
 
-    private static Optional<Map<String, String>> getPaimonTableOptionsIfAvailable(Catalog sessionCatalog,
+    private static Optional<PaimonTableOptionSnapshot> getPaimonTableOptionSnapshotIfAvailable(Catalog sessionCatalog,
             PaimonTableHandle tableHandle)
     {
         try {
@@ -1670,18 +1674,18 @@ public record PaimonMetadata(PaimonCatalog catalog,
             Map<String, String> options = table instanceof FileStoreTable fileStoreTable
                     ? fileStoreTable.schema().options()
                     : table.options();
-            return Optional.of(Map.copyOf(options));
+            return Optional.of(new PaimonTableOptionSnapshot(options, table));
         }
         catch (Catalog.TableNotExistException e) {
             return Optional.empty();
         }
     }
 
-    private static void validatePaimonTableOptionUpdate(Map<String, String> existingOptions, String key,
-            String value)
+    private static void validatePaimonTableOptionUpdate(Map<String, String> existingOptions, BooleanSupplier hasSnapshots,
+            String key, String value)
     {
         String oldValue = existingOptions.get(key);
-        if (Objects.equals(oldValue, value)) {
+        if (Objects.equals(oldValue, value) || !hasSnapshots.getAsBoolean()) {
             return;
         }
         try {
@@ -1695,8 +1699,12 @@ public record PaimonMetadata(PaimonCatalog catalog,
         }
     }
 
-    private static void validatePaimonTableOptionRemove(Map<String, String> existingOptions, String key)
+    private static void validatePaimonTableOptionRemove(Map<String, String> existingOptions, BooleanSupplier hasSnapshots,
+            String key)
     {
+        if (!hasSnapshots.getAsBoolean()) {
+            return;
+        }
         try {
             SchemaManager.checkResetTableOption(existingOptions, key);
         }
@@ -1705,6 +1713,32 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     unsupportedOperationMessageOrFallback(
                             "Paimon table option '%s' reset is not supported".formatted(key), e),
                     e);
+        }
+    }
+
+    private static final class PaimonTableOptionSnapshot
+    {
+        private final Map<String, String> options;
+        private final Table table;
+        private Boolean hasSnapshots;
+
+        private PaimonTableOptionSnapshot(Map<String, String> options, Table table)
+        {
+            this.options = Map.copyOf(requireNonNull(options, "options is null"));
+            this.table = requireNonNull(table, "table is null");
+        }
+
+        private Map<String, String> options()
+        {
+            return options;
+        }
+
+        private boolean hasSnapshots()
+        {
+            if (hasSnapshots == null) {
+                hasSnapshots = table.latestSnapshot().isPresent();
+            }
+            return hasSnapshots;
         }
     }
 
