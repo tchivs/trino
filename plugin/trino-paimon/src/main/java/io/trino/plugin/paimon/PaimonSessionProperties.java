@@ -103,7 +103,8 @@ public class PaimonSessionProperties
 
     public static String getScanTagName(ConnectorSession session)
     {
-        return session.getProperty(SCAN_TAG, String.class);
+        String scanTagName = session.getProperty(SCAN_TAG, String.class);
+        return scanTagName == null ? null : scanTagName.strip();
     }
 
     public static Long getScanFileCreationTimeMillis(ConnectorSession session)

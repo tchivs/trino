@@ -174,7 +174,7 @@ public class TrinoTableHandleTest
 
         ConnectorSession session = TestingConnectorSession.builder()
                 .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
-                .setPropertyValues(Map.of(SCAN_TAG, "tag-2"))
+                .setPropertyValues(Map.of(SCAN_TAG, " tag-2 "))
                 .build();
 
         assertThat(handle.tableWithDynamicOptions(TESTING_CATALOG, session)).isSameAs(table);

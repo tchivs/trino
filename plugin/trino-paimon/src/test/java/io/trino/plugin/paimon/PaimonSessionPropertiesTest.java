@@ -56,6 +56,8 @@ public class PaimonSessionPropertiesTest
         assertThat(PaimonSessionProperties.getScanTagName(session(Map.of()))).isNull();
         assertThat(PaimonSessionProperties.getScanTagName(session(Map.of(SCAN_TAG, "tag-1"))))
                 .isEqualTo("tag-1");
+        assertThat(PaimonSessionProperties.getScanTagName(session(Map.of(SCAN_TAG, " tag-1 "))))
+                .isEqualTo("tag-1");
     }
 
     @Test
