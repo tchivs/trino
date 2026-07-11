@@ -61,6 +61,7 @@ import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketNumAssigners;
@@ -516,6 +517,11 @@ public class PaimonPageSinkProvider
         CoreOptions coreOptions = table.coreOptions();
         int assignerParallelism = requireNonNull(plannedAssignerParallelism, "plannedAssignerParallelism is null")
                 .orElseGet(() -> dynamicBucketAssignerParallelism(coreOptions, workerCount));
+        checkArgument(workerCount > 0, "workerCount must be positive: %s", workerCount);
+        checkArgument(assignerParallelism <= workerCount,
+                "Paimon HASH_DYNAMIC assigner parallelism %s exceeds available workers %s",
+                assignerParallelism,
+                workerCount);
         int numAssigners = dynamicBucketNumAssigners(coreOptions, assignerParallelism);
         int assignId = pageSinkTaskPartitionId(pageSinkId);
         if (assignId >= assignerParallelism) {

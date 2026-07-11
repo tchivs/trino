@@ -71,22 +71,26 @@ public class PaimonNodePartitioningProvider
 
     @Override
     public BucketFunction getBucketFunction(ConnectorTransactionHandle transactionHandle, ConnectorSession session,
-            ConnectorPartitioningHandle partitioningHandle, List<Type> partitionChannelTypes, int workerCount)
+            ConnectorPartitioningHandle partitioningHandle, List<Type> partitionChannelTypes, int bucketCount)
     {
         PaimonPartitioningHandle paimonPartitioningHandle = getPartitioningHandle(partitioningHandle);
         requireNonNull(partitionChannelTypes, "partitionChannelTypes is null");
         partitionChannelTypes.forEach(type -> requireNonNull(type, "partitionChannelTypes contains null type"));
-        checkArgument(workerCount > 0, "workerCount must be positive: %s", workerCount);
+        checkArgument(bucketCount > 0, "bucketCount must be positive: %s", bucketCount);
         if (paimonPartitioningHandle.isSingleNode()) {
             return (page, position) -> 0;
         }
         TableSchema schema = paimonPartitioningHandle.getOriginalSchema();
         if (bucketMode(schema) == BucketMode.HASH_DYNAMIC) {
             int assignerCount = paimonPartitioningHandle.dynamicBucketAssignerParallelism()
-                    .orElseGet(() -> dynamicBucketAssignerParallelism(new CoreOptions(schema.options()), workerCount));
+                    .orElseGet(() -> dynamicBucketAssignerParallelism(new CoreOptions(schema.options()), bucketCount));
+            checkArgument(assignerCount <= bucketCount,
+                    "Paimon HASH_DYNAMIC assigner parallelism %s exceeds Trino bucket count %s",
+                    assignerCount,
+                    bucketCount);
             return new DynamicBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, assignerCount);
         }
-        return new FixedBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, workerCount);
+        return new FixedBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, bucketCount);
     }
 
     static PaimonPartitioningHandle getPartitioningHandle(ConnectorPartitioningHandle partitioningHandle)

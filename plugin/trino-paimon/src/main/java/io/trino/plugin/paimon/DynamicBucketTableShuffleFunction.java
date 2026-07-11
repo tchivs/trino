@@ -84,6 +84,9 @@ public class DynamicBucketTableShuffleFunction
     @Override
     public int getBucket(Page page, int position)
     {
+        // HASH_DYNAMIC uses Trino's partition bucket as Paimon's assigner id. This mirrors
+        // DynamicBucketSink's shuffle by key hash before HashBucketAssignerOperator. The global
+        // index topology is for KEY_DYNAMIC and is intentionally not emulated here.
         if (isRowId) {
             page = rowIdFieldPage(page);
         }

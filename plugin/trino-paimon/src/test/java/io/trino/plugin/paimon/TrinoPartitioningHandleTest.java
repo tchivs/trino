@@ -232,10 +232,10 @@ public class TrinoPartitioningHandleTest
                 .hasMessage("partitionChannelTypes contains null type");
         assertThatThrownBy(() -> provider.getBucketFunction(null, null, handle, List.of(BIGINT), 0))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("workerCount must be positive: 0");
+                .hasMessage("bucketCount must be positive: 0");
         assertThatThrownBy(() -> provider.getBucketFunction(null, null, handle, List.of(BIGINT), -1))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("workerCount must be positive: -1");
+                .hasMessage("bucketCount must be positive: -1");
     }
 
     @Test
@@ -363,6 +363,20 @@ public class TrinoPartitioningHandleTest
 
         assertThatThrownBy(() -> provider.getBucketNodeMapping(null, null, handle))
                 .hasMessage("Paimon HASH_DYNAMIC planned assigner parallelism 2 exceeds available worker nodes 1");
+    }
+
+    @Test
+    public void testDynamicBucketPartitioningProviderRejectsTooFewTrinoBuckets()
+            throws Exception
+    {
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(new TestingNodeManager());
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(
+                InstantiationUtil.serializeObject(dynamicBucketSchema(Map.of())),
+                false,
+                OptionalInt.of(2));
+
+        assertThatThrownBy(() -> provider.getBucketFunction(null, null, handle, List.of(BIGINT, BIGINT), 1))
+                .hasMessage("Paimon HASH_DYNAMIC assigner parallelism 2 exceeds Trino bucket count 1");
     }
 
     @Test
