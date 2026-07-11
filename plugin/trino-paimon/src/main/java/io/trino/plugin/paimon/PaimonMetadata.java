@@ -120,6 +120,9 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 import java.util.stream.Collectors;
@@ -158,10 +161,14 @@ import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
 import static org.apache.paimon.schema.ColumnDirectiveUtils.applyAddColumnDirective;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
-public record PaimonMetadata(PaimonCatalog catalog,
-                             TypeManager typeManager,
-                             IntSupplier dynamicBucketWorkerCountSupplier) implements ConnectorMetadata
+public final class PaimonMetadata
+        implements ConnectorMetadata
 {
+    private final PaimonCatalog catalog;
+    private final TypeManager typeManager;
+    private final IntSupplier dynamicBucketWorkerCountSupplier;
+    private final ConcurrentMap<String, List<BootstrapCleanup>> bootstrapCleanups = new ConcurrentHashMap<>();
+
     private static final int MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE = 1000;
     private static final int MAX_PARTITION_DELETE_SPECS = 1024;
     private static final String MERGE_OPERATION = "MERGE";
@@ -178,17 +185,45 @@ public record PaimonMetadata(PaimonCatalog catalog,
             CoreOptions.BUCKET.key(),
             CoreOptions.CLUSTERING_COLUMNS.key());
 
-    public PaimonMetadata
+    public PaimonMetadata(PaimonCatalog catalog, TypeManager typeManager, IntSupplier dynamicBucketWorkerCountSupplier)
     {
         catalog = requireNonNull(catalog, "catalog is null");
         typeManager = requireNonNull(typeManager, "typeManager is null");
         dynamicBucketWorkerCountSupplier = requireNonNull(dynamicBucketWorkerCountSupplier,
                 "dynamicBucketWorkerCountSupplier is null");
+        this.catalog = catalog;
+        this.typeManager = typeManager;
+        this.dynamicBucketWorkerCountSupplier = dynamicBucketWorkerCountSupplier;
     }
 
     public PaimonMetadata(PaimonCatalog catalog, TypeManager typeManager)
     {
         this(catalog, typeManager, () -> 1);
+    }
+
+    public PaimonCatalog catalog()
+    {
+        return catalog;
+    }
+
+    public TypeManager typeManager()
+    {
+        return typeManager;
+    }
+
+    public IntSupplier dynamicBucketWorkerCountSupplier()
+    {
+        return dynamicBucketWorkerCountSupplier;
+    }
+
+    @Override
+    public void cleanupQuery(ConnectorSession session)
+    {
+        requireNonNull(session, "session is null");
+        List<BootstrapCleanup> cleanups = bootstrapCleanups.remove(session.getQueryId());
+        if (cleanups != null) {
+            cleanups.forEach(BootstrapCleanup::cleanup);
+        }
     }
 
     @Override
@@ -349,11 +384,29 @@ public record PaimonMetadata(PaimonCatalog catalog,
                     queryId,
                     PaimonKeyDynamicBootstrap.snapshotFor(planned),
                     planned.getDynamicBucketAssignerParallelism().orElseThrow());
+            bootstrapCleanups.computeIfAbsent(queryId, ignored -> new CopyOnWriteArrayList<>())
+                    .add(new BootstrapCleanup(
+                            queryId,
+                            storeTable,
+                            PaimonKeyDynamicBootstrap.snapshotFor(planned),
+                            planned.getDynamicBucketAssignerParallelism().orElseThrow()));
         }
         catch (Exception e) {
             throw PaimonPageSink.wrapWriteException(e);
         }
         return planned;
+    }
+
+    private record BootstrapCleanup(
+            String queryId,
+            FileStoreTable table,
+            PaimonKeyDynamicBootstrap.OptionalSnapshot snapshot,
+            int assignerParallelism)
+    {
+        private void cleanup()
+        {
+            PaimonKeyDynamicBootstrap.cleanup(table, queryId, snapshot, assignerParallelism);
+        }
     }
 
     private static PaimonTableHandle pinKeyDynamicBootstrapSnapshot(
@@ -624,7 +677,19 @@ public record PaimonMetadata(PaimonCatalog catalog,
         try {
             fileStoreTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, "commit writes");
             if (tableHandle.isKeyDynamicBootstrapSnapshotPlanned()) {
-                PaimonKeyDynamicBootstrap.validateSnapshot(fileStoreTable, expectedSnapshot, "before commit");
+                int assignerParallelism = tableHandle.getDynamicBucketAssignerParallelism()
+                        .orElseThrow(() -> new IllegalStateException(
+                                "Paimon KEY_DYNAMIC commit is missing assigner parallelism"));
+                boolean rejectConcurrentSnapshot = insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE
+                        || operation.filter(operationName -> PaimonTableHandle.CREATE_TABLE_AS_SELECT_OPERATION.equals(operationName)
+                                || PaimonTableHandle.CREATE_OR_REPLACE_TABLE_AS_SELECT_OPERATION.equals(operationName))
+                        .isPresent();
+                PaimonKeyDynamicBootstrap.validateSnapshotForCommit(
+                        fileStoreTable,
+                        session.getQueryId(),
+                        expectedSnapshot,
+                        assignerParallelism,
+                        rejectConcurrentSnapshot);
             }
             if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR) {
                 validateInsertTargetIsNew(sessionCatalog, fileStoreTable, tableHandle, commitMessages);

@@ -34,6 +34,7 @@ import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.crosspartition.GlobalIndexAssigner;
+import org.apache.paimon.crosspartition.KeyPartPartitionKeyExtractor;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.index.BucketAssigner;
@@ -570,7 +571,9 @@ public class PaimonPageSinkProvider
         }
 
         PaimonKeyDynamicBootstrap.Artifact bootstrapArtifact = null;
+        PaimonKeyDynamicBootstrap.KeyFingerprintWriter keyFingerprintWriter = null;
         GlobalIndexAssigner assigner = new GlobalIndexAssigner(table);
+        KeyPartPartitionKeyExtractor keyExtractor = new KeyPartPartitionKeyExtractor(table.schema());
         PaimonPageSink.KeyDynamicWriter keyDynamicWriter = null;
         try {
             // A newly created CTAS table has no snapshot and therefore no existing keys to bootstrap.
@@ -579,8 +582,15 @@ public class PaimonPageSinkProvider
             if (!emptyCreateTable && (expectedSnapshot.pinned() || PaimonKeyDynamicBootstrap.latestSnapshot(table).isPresent())) {
                 bootstrapArtifact = PaimonKeyDynamicBootstrap.open(table, queryId, expectedSnapshot, assignerParallelism);
             }
-            keyDynamicWriter = new PaimonPageSink.KeyDynamicWriter(writer, assigner,
-                    () -> PaimonKeyDynamicBootstrap.cleanup(table, queryId, expectedSnapshot, assignerParallelism));
+            if (expectedSnapshot.pinned()) {
+                keyFingerprintWriter = PaimonKeyDynamicBootstrap.openKeyFingerprintWriter(
+                        table, queryId, expectedSnapshot, assignerParallelism, assignId, pageSinkId.getId());
+            }
+            keyDynamicWriter = new PaimonPageSink.KeyDynamicWriter(
+                    writer,
+                    assigner,
+                    expectedSnapshot.pinned() ? keyExtractor : null,
+                    keyFingerprintWriter);
             assigner.open(0, ioManager, assignerParallelism, assignId, keyDynamicWriter::writeAssignedRow);
             if (bootstrapArtifact != null) {
                 try (PaimonKeyDynamicBootstrap.ShardReader reader = bootstrapArtifact.openShard(assignId)) {
@@ -610,8 +620,8 @@ public class PaimonPageSinkProvider
                     e.addSuppressed(closeFailure);
                 }
             }
-            if (keyDynamicWriter == null && bootstrapArtifact != null) {
-                PaimonKeyDynamicBootstrap.cleanup(table, queryId, expectedSnapshot, assignerParallelism);
+            if (keyDynamicWriter == null && keyFingerprintWriter != null) {
+                keyFingerprintWriter.abort();
             }
             throw e;
         }

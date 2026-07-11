@@ -15,12 +15,14 @@ package io.trino.plugin.paimon;
 
 import jakarta.annotation.Nullable;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.crosspartition.IndexBootstrap;
 import org.apache.paimon.crosspartition.KeyPartPartitionKeyExtractor;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.fs.FileStatus;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.io.DataInputViewStreamWrapper;
@@ -33,11 +35,14 @@ import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.DataTableScan;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
+import org.apache.paimon.table.source.TableRead;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.RowDataToObjectArrayConverter;
 import org.apache.paimon.utils.TypeUtils;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -56,8 +61,12 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
+import static org.apache.paimon.CoreOptions.INCREMENTAL_BETWEEN;
+import static org.apache.paimon.CoreOptions.INCREMENTAL_BETWEEN_SCAN_MODE;
+import static org.apache.paimon.CoreOptions.IncrementalBetweenScanMode.DELTA;
 import static org.apache.paimon.CoreOptions.SCAN_MODE;
 import static org.apache.paimon.CoreOptions.SCAN_SNAPSHOT_ID;
 import static org.apache.paimon.CoreOptions.StartupMode.FROM_SNAPSHOT;
@@ -71,6 +80,14 @@ final class PaimonKeyDynamicBootstrap
     private static final int MANIFEST_VERSION = 1;
     private static final String ROOT_DIRECTORY = ".trino-key-dynamic-bootstrap";
     private static final String MANIFEST_FILE = "manifest";
+    private static final String KEY_FINGERPRINT_DIRECTORY = "key-fingerprints";
+    private static final int KEY_FINGERPRINT_MAGIC = 0x504B4446;
+    private static final int KEY_FINGERPRINT_VERSION = 1;
+    private static final int KEY_FINGERPRINT_BITS = 1 << 20;
+    private static final int KEY_FINGERPRINT_HASHES = 4;
+    private static final int KEY_FINGERPRINT_WORDS = KEY_FINGERPRINT_BITS / Long.SIZE;
+    private static final int KEY_FINGERPRINT_DIGEST_BYTES = 32;
+    private static final int MAX_SNAPSHOT_VALIDATION_RETRIES = 3;
 
     private PaimonKeyDynamicBootstrap() {}
 
@@ -87,7 +104,9 @@ final class PaimonKeyDynamicBootstrap
         checkArgument(!queryId.isBlank(), "queryId is blank");
         checkArgument(assignerParallelism > 0, "assignerParallelism must be positive: %s", assignerParallelism);
 
-        Long snapshot = snapshotForBootstrap(table, expectedSnapshot);
+        Long snapshot = expectedSnapshot.pinned()
+                ? optionalSnapshotValue(expectedSnapshot.snapshotId())
+                : latestSnapshotId(table);
         FileIO fileIO = table.fileIO();
         Path root = artifactRoot(table, queryId, expectedSnapshot.pinned() ? snapshot : null, assignerParallelism);
         Path manifest = new Path(root, MANIFEST_FILE);
@@ -138,12 +157,163 @@ final class PaimonKeyDynamicBootstrap
         return snapshot == null ? OptionalLong.empty() : OptionalLong.of(snapshot);
     }
 
-    static void validateSnapshot(FileStoreTable table, OptionalSnapshot expectedSnapshot, String phase)
+    static void validateSnapshotForCommit(
+            FileStoreTable table,
+            String queryId,
+            OptionalSnapshot expectedSnapshot,
+            int assignerParallelism,
+            boolean rejectConcurrentSnapshot)
+            throws Exception
     {
         requireNonNull(table, "table is null");
+        requireNonNull(queryId, "queryId is null");
         requireNonNull(expectedSnapshot, "expectedSnapshot is null");
-        Long expected = expectedSnapshot.pinned() ? optionalSnapshotValue(expectedSnapshot.snapshotId()) : null;
-        verifySnapshot(latestSnapshotId(table), expected, expectedSnapshot.pinned(), phase);
+        checkArgument(!queryId.isBlank(), "queryId is blank");
+        checkArgument(assignerParallelism > 0, "assignerParallelism must be positive: %s", assignerParallelism);
+
+        if (!expectedSnapshot.pinned()) {
+            return;
+        }
+
+        Long expected = optionalSnapshotValue(expectedSnapshot.snapshotId());
+        Long end = latestSnapshotId(table);
+        if (equalsNullable(end, expected)) {
+            return;
+        }
+        if (rejectConcurrentSnapshot) {
+            throw snapshotChanged(expected, end, "before commit");
+        }
+        if (expected != null && (end == null || end < expected)) {
+            throw snapshotChanged(expected, end, "before commit");
+        }
+
+        KeyFingerprint inputKeys = readKeyFingerprints(table, queryId, expectedSnapshot, assignerParallelism);
+        for (int attempt = 0; attempt < MAX_SNAPSHOT_VALIDATION_RETRIES; attempt++) {
+            checkAppendOnlySnapshotRange(table, expected, end);
+            if (incrementalKeysIntersect(table, expected, end, inputKeys)) {
+                throw new IllegalStateException(
+                        "Paimon KEY_DYNAMIC concurrent snapshot contains a primary key written by this query: "
+                                + "expected " + expected + ", actual " + end);
+            }
+
+            Long afterScan = latestSnapshotId(table);
+            if (equalsNullable(end, afterScan)) {
+                return;
+            }
+            if (expected != null && (afterScan == null || afterScan < expected)) {
+                throw snapshotChanged(expected, afterScan, "during commit validation");
+            }
+            end = afterScan;
+            if (end == null) {
+                throw snapshotChanged(expected, end, "during commit validation");
+            }
+        }
+
+        throw new IllegalStateException(
+                "Paimon KEY_DYNAMIC table snapshot continued changing during commit validation: expected "
+                        + expected + ", actual " + end);
+    }
+
+    private static IllegalStateException snapshotChanged(@Nullable Long expected, @Nullable Long actual, String phase)
+    {
+        return new IllegalStateException(
+                "Paimon KEY_DYNAMIC table snapshot changed " + phase + ": expected " + expected + ", actual " + actual);
+    }
+
+    private static void checkAppendOnlySnapshotRange(FileStoreTable table, @Nullable Long start, long end)
+    {
+        long first = start == null ? Snapshot.FIRST_SNAPSHOT_ID : start + 1;
+        for (long snapshotId = first; snapshotId <= end; snapshotId++) {
+            Snapshot snapshot = table.store().snapshotManager().snapshot(snapshotId);
+            if (snapshot.commitKind() != Snapshot.CommitKind.APPEND) {
+                throw new IllegalStateException(
+                        "Paimon KEY_DYNAMIC cannot validate concurrent " + snapshot.commitKind()
+                                + " snapshot " + snapshotId + "; refusing to mix bootstrap state with it");
+            }
+        }
+    }
+
+    private static boolean incrementalKeysIntersect(
+            FileStoreTable table,
+            @Nullable Long start,
+            long end,
+            KeyFingerprint inputKeys)
+            throws IOException
+    {
+        long startSnapshot = start == null ? Snapshot.FIRST_SNAPSHOT_ID - 1 : start;
+        Map<String, String> scanOptions = new HashMap<>();
+        scanOptions.put(INCREMENTAL_BETWEEN.key(), startSnapshot + "," + end);
+        scanOptions.put(INCREMENTAL_BETWEEN_SCAN_MODE.key(), DELTA.toString());
+
+        FileStoreTable scanTable = table.copy(scanOptions);
+        List<String> fieldNames = scanTable.rowType().getFieldNames();
+        int[] keyAndPartitionProjection = java.util.stream.Stream
+                .concat(scanTable.schema().trimmedPrimaryKeys().stream(), scanTable.schema().partitionKeys().stream())
+                .map(fieldNames::indexOf)
+                .mapToInt(Integer::intValue)
+                .toArray();
+        ReadBuilder readBuilder = scanTable.newReadBuilder().withProjection(keyAndPartitionProjection);
+        DataTableScan tableScan = (DataTableScan) readBuilder.newScan();
+        List<Split> splits = tableScan.withLevelFilter(level -> true).plan().splits();
+        TableRead read = readBuilder.newRead();
+        KeyPartPartitionKeyExtractor keyExtractor = new KeyPartPartitionKeyExtractor(scanTable.schema());
+        for (Split split : splits) {
+            try (RecordReader<InternalRow> reader = read.createReader(split)) {
+                RecordIterator<InternalRow> batch;
+                while ((batch = reader.readBatch()) != null) {
+                    try {
+                        InternalRow row;
+                        while ((row = batch.next()) != null) {
+                            if (inputKeys.mightContain(keyExtractor.trimmedPrimaryKey(row))) {
+                                return true;
+                            }
+                        }
+                    }
+                    finally {
+                        batch.releaseBatch();
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static KeyFingerprint readKeyFingerprints(
+            FileStoreTable table,
+            String queryId,
+            OptionalSnapshot expectedSnapshot,
+            int assignerParallelism)
+            throws IOException
+    {
+        Path root = artifactRoot(
+                table,
+                queryId,
+                expectedSnapshot.pinned() ? optionalSnapshotValue(expectedSnapshot.snapshotId()) : null,
+                assignerParallelism);
+        KeyFingerprint result = KeyFingerprint.empty();
+        FileIO fileIO = table.fileIO();
+        Path directory = new Path(root, KEY_FINGERPRINT_DIRECTORY);
+        FileStatus[] statuses = fileIO.listStatus(directory);
+        for (int assigner = 0; assigner < assignerParallelism; assigner++) {
+            String prefix = "part-" + assigner + "-";
+            boolean found = false;
+            for (FileStatus status : statuses) {
+                if (!status.isDir() && status.getPath().getName().startsWith(prefix)) {
+                    found = true;
+                    result.merge(KeyFingerprint.read(
+                            fileIO,
+                            status.getPath(),
+                            schemaFingerprint(table.schema()),
+                            assignerParallelism,
+                            assigner));
+                }
+            }
+            if (!found) {
+                throw new IOException(
+                        "Missing Paimon KEY_DYNAMIC key fingerprint sidecar for assigner " + assigner + ": " + directory);
+            }
+        }
+        return result;
     }
 
     static OptionalSnapshot snapshotFor(PaimonTableHandle tableHandle)
@@ -332,10 +502,14 @@ final class PaimonKeyDynamicBootstrap
     private static Long snapshotForBootstrap(FileStoreTable table, OptionalSnapshot expectedSnapshot)
     {
         Long currentSnapshot = latestSnapshotId(table);
-        Long snapshot = expectedSnapshot.pinned()
-                ? optionalSnapshotValue(expectedSnapshot.snapshotId())
-                : currentSnapshot;
-        verifySnapshot(currentSnapshot, snapshot, expectedSnapshot.pinned(), "before bootstrap");
+        if (expectedSnapshot.pinned()) {
+            Long snapshot = optionalSnapshotValue(expectedSnapshot.snapshotId());
+            if (snapshot != null && !table.store().snapshotManager().snapshotExists(snapshot)) {
+                throw new IllegalStateException("Paimon KEY_DYNAMIC bootstrap snapshot no longer exists: " + snapshot);
+            }
+            return snapshot;
+        }
+        Long snapshot = currentSnapshot;
         return snapshot;
     }
 
@@ -347,21 +521,50 @@ final class PaimonKeyDynamicBootstrap
         return new Path(table.location(), ROOT_DIRECTORY + "/" + sha256(identity));
     }
 
+    static KeyFingerprintWriter openKeyFingerprintWriter(
+            FileStoreTable table,
+            String queryId,
+            OptionalSnapshot expectedSnapshot,
+            int assignerParallelism,
+            int assigner,
+            long writerId)
+            throws IOException
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(queryId, "queryId is null");
+        requireNonNull(expectedSnapshot, "expectedSnapshot is null");
+        checkArgument(!queryId.isBlank(), "queryId is blank");
+        checkArgument(assignerParallelism > 0, "assignerParallelism must be positive: %s", assignerParallelism);
+        checkArgument(assigner >= 0 && assigner < assignerParallelism,
+                "assigner must be within fingerprint parallelism: %s", assigner);
+
+        Path root = artifactRoot(
+                table,
+                queryId,
+                expectedSnapshot.pinned() ? optionalSnapshotValue(expectedSnapshot.snapshotId()) : null,
+                assignerParallelism);
+        FileIO fileIO = table.fileIO();
+        fileIO.mkdirs(new Path(root, KEY_FINGERPRINT_DIRECTORY));
+        return new KeyFingerprintWriter(
+                fileIO,
+                keyFingerprintPath(root, assigner, writerId),
+                schemaFingerprint(table.schema()),
+                assignerParallelism,
+                assigner);
+    }
+
+    private static Path keyFingerprintPath(Path root, int assigner, long writerId)
+    {
+        // PageSinkId identifies a task, but a task can create more than one writer driver.
+        // Keep every finished sidecar so retries and multiple drivers can be merged at commit.
+        return new Path(
+                new Path(root, KEY_FINGERPRINT_DIRECTORY),
+                "part-" + assigner + "-" + writerId + "-" + UUID.randomUUID());
+    }
+
     private static Long latestSnapshotId(FileStoreTable table)
     {
         return table.store().snapshotManager().latestSnapshotId();
-    }
-
-    private static void verifySnapshot(
-            @Nullable Long actual,
-            @Nullable Long expected,
-            boolean pinned,
-            String phase)
-    {
-        if (pinned && !equalsNullable(actual, expected)) {
-            throw new IllegalStateException(
-                    "Paimon KEY_DYNAMIC table snapshot changed " + phase + ": expected " + expected + ", actual " + actual);
-        }
     }
 
     private static boolean equalsNullable(@Nullable Long left, @Nullable Long right)
@@ -574,6 +777,202 @@ final class PaimonKeyDynamicBootstrap
     {
     }
 
+    static final class KeyFingerprintWriter
+            implements AutoCloseable
+    {
+        private final FileIO fileIO;
+        private final Path path;
+        private final String schemaFingerprint;
+        private final int parallelism;
+        private final int assigner;
+        private final KeyFingerprint fingerprint = KeyFingerprint.empty();
+        private boolean closed;
+
+        KeyFingerprintWriter(
+                FileIO fileIO,
+                Path path,
+                String schemaFingerprint,
+                int parallelism,
+                int assigner)
+        {
+            this.fileIO = requireNonNull(fileIO, "fileIO is null");
+            this.path = requireNonNull(path, "path is null");
+            this.schemaFingerprint = requireNonNull(schemaFingerprint, "schemaFingerprint is null");
+            this.parallelism = parallelism;
+            this.assigner = assigner;
+        }
+
+        void add(BinaryRow key)
+        {
+            checkState(!closed, "key fingerprint writer is already closed");
+            fingerprint.add(requireNonNull(key, "key is null"));
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            if (closed) {
+                return;
+            }
+            byte[] payload = fingerprint.serialize(schemaFingerprint, parallelism, assigner);
+            try (PositionOutputStream output = fileIO.newOutputStream(path, false);
+                    DataOutputStream data = new DataOutputStream(output)) {
+                data.write(payload);
+                data.write(sha256Bytes(payload));
+            }
+            closed = true;
+        }
+
+        void abort()
+        {
+            closed = true;
+            fileIO.deleteQuietly(path);
+        }
+    }
+
+    static final class KeyFingerprint
+    {
+        private final long[] words;
+
+        private KeyFingerprint(long[] words)
+        {
+            this.words = requireNonNull(words, "words is null");
+            checkArgument(words.length == KEY_FINGERPRINT_WORDS,
+                    "Unexpected key fingerprint word count: %s", words.length);
+        }
+
+        static KeyFingerprint empty()
+        {
+            return new KeyFingerprint(new long[KEY_FINGERPRINT_WORDS]);
+        }
+
+        void add(BinaryRow key)
+        {
+            addHash(requireNonNull(key, "key is null").hashCode());
+        }
+
+        void addHash(int hash)
+        {
+            long unsignedHash = Integer.toUnsignedLong(hash);
+            for (int salt = 0; salt < KEY_FINGERPRINT_HASHES; salt++) {
+                int bit = fingerprintBit(unsignedHash, salt);
+                words[bit >>> 6] |= 1L << (bit & 63);
+            }
+        }
+
+        boolean mightContain(BinaryRow key)
+        {
+            return mightContainHash(requireNonNull(key, "key is null").hashCode());
+        }
+
+        boolean mightContainHash(int hash)
+        {
+            long unsignedHash = Integer.toUnsignedLong(hash);
+            for (int salt = 0; salt < KEY_FINGERPRINT_HASHES; salt++) {
+                int bit = fingerprintBit(unsignedHash, salt);
+                if ((words[bit >>> 6] & (1L << (bit & 63))) == 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        void merge(KeyFingerprint other)
+        {
+            requireNonNull(other, "other is null");
+            for (int index = 0; index < words.length; index++) {
+                words[index] |= other.words[index];
+            }
+        }
+
+        byte[] serialize(String schemaFingerprint, int parallelism, int assigner)
+                throws IOException
+        {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream(128 * 1024);
+            try (DataOutputStream data = new DataOutputStream(bytes)) {
+                data.writeInt(KEY_FINGERPRINT_MAGIC);
+                data.writeInt(KEY_FINGERPRINT_VERSION);
+                data.writeInt(KEY_FINGERPRINT_BITS);
+                data.writeInt(KEY_FINGERPRINT_HASHES);
+                data.writeInt(parallelism);
+                data.writeInt(assigner);
+                data.writeUTF(schemaFingerprint);
+                data.writeInt(words.length);
+                for (long word : words) {
+                    data.writeLong(word);
+                }
+            }
+            return bytes.toByteArray();
+        }
+
+        static KeyFingerprint read(
+                FileIO fileIO,
+                Path path,
+                String expectedSchemaFingerprint,
+                int expectedParallelism,
+                int expectedAssigner)
+                throws IOException
+        {
+            long length = fileIO.getFileStatus(path).getLen();
+            if (length <= KEY_FINGERPRINT_DIGEST_BYTES || length > 2 * 1024 * 1024
+                    || length > Integer.MAX_VALUE) {
+                throw new IOException("Invalid Paimon KEY_DYNAMIC key fingerprint length: " + path);
+            }
+            byte[] encoded;
+            try (InputStream input = fileIO.newInputStream(path)) {
+                encoded = input.readAllBytes();
+            }
+            if (encoded.length != length || encoded.length <= KEY_FINGERPRINT_DIGEST_BYTES) {
+                throw new IOException("Paimon KEY_DYNAMIC key fingerprint length changed: " + path);
+            }
+            int payloadLength = encoded.length - KEY_FINGERPRINT_DIGEST_BYTES;
+            byte[] payload = java.util.Arrays.copyOf(encoded, payloadLength);
+            byte[] expectedDigest = java.util.Arrays.copyOfRange(encoded, payloadLength, encoded.length);
+            if (!MessageDigest.isEqual(expectedDigest, sha256Bytes(payload))) {
+                throw new IOException("Paimon KEY_DYNAMIC key fingerprint checksum mismatch: " + path);
+            }
+
+            try (DataInputStream data = new DataInputStream(new ByteArrayInputStream(payload))) {
+                if (data.readInt() != KEY_FINGERPRINT_MAGIC
+                        || data.readInt() != KEY_FINGERPRINT_VERSION
+                        || data.readInt() != KEY_FINGERPRINT_BITS
+                        || data.readInt() != KEY_FINGERPRINT_HASHES
+                        || data.readInt() != expectedParallelism
+                        || data.readInt() != expectedAssigner
+                        || !expectedSchemaFingerprint.equals(data.readUTF())) {
+                    throw new IOException("Paimon KEY_DYNAMIC key fingerprint metadata mismatch: " + path);
+                }
+                int wordCount = data.readInt();
+                if (wordCount != KEY_FINGERPRINT_WORDS) {
+                    throw new IOException("Paimon KEY_DYNAMIC key fingerprint word count mismatch: " + path);
+                }
+                long[] words = new long[wordCount];
+                for (int index = 0; index < wordCount; index++) {
+                    words[index] = data.readLong();
+                }
+                if (data.available() != 0) {
+                    throw new IOException("Paimon KEY_DYNAMIC key fingerprint has trailing data: " + path);
+                }
+                return new KeyFingerprint(words);
+            }
+        }
+
+        private static int fingerprintBit(long hash, int salt)
+        {
+            long value = hash + 0x9E3779B97F4A7C15L * (salt + 1);
+            value = mix64(value);
+            return (int) value & (KEY_FINGERPRINT_BITS - 1);
+        }
+
+        private static long mix64(long value)
+        {
+            value = (value ^ (value >>> 30)) * 0xBF58476D1CE4E5B9L;
+            value = (value ^ (value >>> 27)) * 0x94D049BB133111EBL;
+            return value ^ (value >>> 31);
+        }
+    }
+
     private static MessageDigest newDigest()
     {
         try {
@@ -582,6 +981,11 @@ final class PaimonKeyDynamicBootstrap
         catch (NoSuchAlgorithmException e) {
             throw new AssertionError(e);
         }
+    }
+
+    private static byte[] sha256Bytes(byte[] value)
+    {
+        return newDigest().digest(requireNonNull(value, "value is null"));
     }
 
     private static String hex(byte[] bytes)

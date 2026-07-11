@@ -20,6 +20,7 @@ import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.type.Type;
 import jakarta.annotation.Nullable;
 import org.apache.paimon.crosspartition.GlobalIndexAssigner;
+import org.apache.paimon.crosspartition.KeyPartPartitionKeyExtractor;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Blob;
@@ -361,9 +362,6 @@ public class PaimonPageSink
             failure = wrapWriteException(e);
         }
         failure = close(failure, false);
-        if (failure != null && keyDynamicWriter != null) {
-            keyDynamicWriter.cleanupAfterAbort();
-        }
         if (failure != null) {
             throw failure;
         }
@@ -397,9 +395,6 @@ public class PaimonPageSink
     private RuntimeException close(@Nullable RuntimeException failure, boolean abort)
     {
         if (!closed.compareAndSet(false, true)) {
-            if (abort && keyDynamicWriter != null) {
-                keyDynamicWriter.cleanupAfterAbort();
-            }
             return failure;
         }
         failure = closeKeyDynamicWriter(keyDynamicWriter, failure, abort);
@@ -628,24 +623,36 @@ public class PaimonPageSink
     {
         private final BatchTableWrite writer;
         private final GlobalIndexAssigner assigner;
-        private final Runnable abortCleanup;
-        private final AtomicBoolean abortCleanupDone = new AtomicBoolean();
 
         KeyDynamicWriter(BatchTableWrite writer, GlobalIndexAssigner assigner)
         {
-            this(writer, assigner, () -> {});
+            this(writer, assigner, null, null);
         }
 
-        KeyDynamicWriter(BatchTableWrite writer, GlobalIndexAssigner assigner, Runnable abortCleanup)
+        KeyDynamicWriter(
+                BatchTableWrite writer,
+                GlobalIndexAssigner assigner,
+                @Nullable KeyPartPartitionKeyExtractor keyExtractor,
+                @Nullable PaimonKeyDynamicBootstrap.KeyFingerprintWriter keyFingerprintWriter)
         {
             this.writer = requireNonNull(writer, "writer is null");
             this.assigner = requireNonNull(assigner, "assigner is null");
-            this.abortCleanup = requireNonNull(abortCleanup, "abortCleanup is null");
+            this.keyExtractor = keyExtractor;
+            this.keyFingerprintWriter = keyFingerprintWriter;
         }
+
+        @Nullable
+        private final KeyPartPartitionKeyExtractor keyExtractor;
+        @Nullable
+        private final PaimonKeyDynamicBootstrap.KeyFingerprintWriter keyFingerprintWriter;
 
         void write(InternalRow row)
                 throws Exception
         {
+            if (keyExtractor != null) {
+                requireNonNull(keyFingerprintWriter, "keyFingerprintWriter is null")
+                        .add(keyExtractor.trimmedPrimaryKey(row));
+            }
             assigner.processInput(row);
         }
 
@@ -662,28 +669,24 @@ public class PaimonPageSink
         void close()
                 throws Exception
         {
-            assigner.close();
-        }
-
-        void abort()
-                throws Exception
-        {
             Exception failure = null;
             try {
-                close();
+                assigner.close();
             }
             catch (Exception e) {
                 failure = e;
             }
-            try {
-                cleanupAfterAbort();
-            }
-            catch (RuntimeException e) {
-                if (failure == null) {
-                    failure = e;
+            if (keyFingerprintWriter != null) {
+                try {
+                    keyFingerprintWriter.close();
                 }
-                else {
-                    failure.addSuppressed(e);
+                catch (Exception e) {
+                    if (failure == null) {
+                        failure = e;
+                    }
+                    else {
+                        failure.addSuppressed(e);
+                    }
                 }
             }
             if (failure != null) {
@@ -691,10 +694,31 @@ public class PaimonPageSink
             }
         }
 
-        void cleanupAfterAbort()
+        void abort()
+                throws Exception
         {
-            if (abortCleanupDone.compareAndSet(false, true)) {
-                abortCleanup.run();
+            Exception failure = null;
+            try {
+                assigner.close();
+            }
+            catch (Exception e) {
+                failure = e;
+            }
+            if (keyFingerprintWriter != null) {
+                try {
+                    keyFingerprintWriter.abort();
+                }
+                catch (Exception e) {
+                    if (failure == null) {
+                        failure = e;
+                    }
+                    else {
+                        failure.addSuppressed(e);
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
             }
         }
     }
