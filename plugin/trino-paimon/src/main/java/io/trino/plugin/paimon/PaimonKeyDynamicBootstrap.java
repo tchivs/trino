@@ -189,7 +189,7 @@ final class PaimonKeyDynamicBootstrap
 
         KeyFingerprint inputKeys = readKeyFingerprints(table, queryId, expectedSnapshot, assignerParallelism);
         for (int attempt = 0; attempt < MAX_SNAPSHOT_VALIDATION_RETRIES; attempt++) {
-            checkAppendOnlySnapshotRange(table, expected, end);
+            checkSnapshotRangeCanRebase(table, expected, end);
             if (incrementalKeysIntersect(table, expected, end, inputKeys)) {
                 throw new IllegalStateException(
                         "Paimon KEY_DYNAMIC concurrent snapshot contains a primary key written by this query: "
@@ -220,12 +220,18 @@ final class PaimonKeyDynamicBootstrap
                 "Paimon KEY_DYNAMIC table snapshot changed " + phase + ": expected " + expected + ", actual " + actual);
     }
 
-    private static void checkAppendOnlySnapshotRange(FileStoreTable table, @Nullable Long start, long end)
+    private static void checkSnapshotRangeCanRebase(FileStoreTable table, @Nullable Long start, long end)
     {
         long first = start == null ? Snapshot.FIRST_SNAPSHOT_ID : start + 1;
         for (long snapshotId = first; snapshotId <= end; snapshotId++) {
             Snapshot snapshot = table.store().snapshotManager().snapshot(snapshotId);
-            if (snapshot.commitKind() != Snapshot.CommitKind.APPEND) {
+            // COMPACT rewrites files without changing key-to-(partition,bucket) state and ANALYZE
+            // only updates statistics. Both are ignored by Paimon's DELTA scanner and can be
+            // safely rebased against the pinned global-key index. Keep unknown future kinds
+            // fail-closed until their effect on the index is understood.
+            if (snapshot.commitKind() != Snapshot.CommitKind.APPEND
+                    && snapshot.commitKind() != Snapshot.CommitKind.COMPACT
+                    && snapshot.commitKind() != Snapshot.CommitKind.ANALYZE) {
                 throw new IllegalStateException(
                         "Paimon KEY_DYNAMIC cannot validate concurrent " + snapshot.commitKind()
                                 + " snapshot " + snapshotId + "; refusing to mix bootstrap state with it");

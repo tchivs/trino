@@ -18,8 +18,10 @@ import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaManager;
+import org.apache.paimon.stats.Statistics;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FileStoreTableFactory;
+import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.InnerTableCommit;
 import org.apache.paimon.table.sink.InnerTableWrite;
 import org.apache.paimon.types.DataField;
@@ -179,6 +181,48 @@ class PaimonKeyDynamicBootstrapTest
     }
 
     @Test
+    void testConcurrentCompactionAndAnalyzeCanBeRebased()
+            throws Exception
+    {
+        java.nio.file.Path directory = Files.createTempDirectory("paimon-key-dynamic-metadata-snapshots");
+        Path tablePath = new Path(directory.toUri().toString());
+        RowType rowType = new RowType(List.of(
+                new DataField(0, "a", new IntType()),
+                new DataField(1, "v", new VarCharType())));
+        new SchemaManager(LocalFileIO.create(), tablePath).createTable(new Schema(
+                rowType.getFields(),
+                Collections.emptyList(),
+                Collections.singletonList("a"),
+                Map.of("bucket", "1"),
+                ""));
+        FileStoreTable table = FileStoreTableFactory.create(LocalFileIO.create(), tablePath);
+        writeRow(table, 1);
+        writeRow(table, 4);
+
+        PaimonKeyDynamicBootstrap.OptionalSnapshot expected =
+                PaimonKeyDynamicBootstrap.OptionalSnapshot.pinned(OptionalLong.of(2));
+        String compactQuery = "compact-" + UUID.randomUUID();
+        try (BatchTableCommit commit = table.newBatchWriteBuilder().newCommit()) {
+            commit.compactManifests();
+        }
+        assertThat(table.store().snapshotManager().latestSnapshot().commitKind())
+                .isEqualTo(org.apache.paimon.Snapshot.CommitKind.COMPACT);
+        writeFingerprint(table, compactQuery, expected, 2);
+        assertThatCode(() -> PaimonKeyDynamicBootstrap.validateSnapshotForCommit(
+                table, compactQuery, expected, 1, false)).doesNotThrowAnyException();
+
+        String analyzeQuery = "analyze-" + UUID.randomUUID();
+        try (BatchTableCommit commit = table.newBatchWriteBuilder().newCommit()) {
+            commit.updateStatistics(new Statistics(1L, 0L, 1L, 1L));
+        }
+        assertThat(table.store().snapshotManager().latestSnapshot().commitKind())
+                .isEqualTo(org.apache.paimon.Snapshot.CommitKind.ANALYZE);
+        writeFingerprint(table, analyzeQuery, expected, 3);
+        assertThatCode(() -> PaimonKeyDynamicBootstrap.validateSnapshotForCommit(
+                table, analyzeQuery, expected, 1, false)).doesNotThrowAnyException();
+    }
+
+    @Test
     void testConcurrentSameKeyInDifferentPartitionIsRejected()
             throws Exception
     {
@@ -225,6 +269,19 @@ class PaimonKeyDynamicBootstrapTest
         finally {
             writer.close();
             commit.close();
+        }
+    }
+
+    private static void writeFingerprint(
+            FileStoreTable table,
+            String queryId,
+            PaimonKeyDynamicBootstrap.OptionalSnapshot expected,
+            int writerId)
+            throws Exception
+    {
+        try (PaimonKeyDynamicBootstrap.KeyFingerprintWriter writer =
+                PaimonKeyDynamicBootstrap.openKeyFingerprintWriter(table, queryId, expected, 1, 0, writerId)) {
+            writer.add(BinaryRow.singleColumn(2));
         }
     }
 
