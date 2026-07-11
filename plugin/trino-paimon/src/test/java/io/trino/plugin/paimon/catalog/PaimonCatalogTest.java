@@ -234,6 +234,37 @@ public class PaimonCatalogTest
     }
 
     @Test
+    public void testCatalogDefersEvictedCatalogCloseUntilOperationCompletes()
+            throws Exception
+    {
+        BlockingCatalog aliceCatalog = new BlockingCatalog();
+        BlockingCatalog bobCatalog = new BlockingCatalog();
+        PaimonCatalog catalog = new PaimonCatalog(
+                new Options(),
+                new LocalFileSystemFactory(root),
+                1,
+                session -> session.getIdentity().getUser().equals("alice") ? aliceCatalog.catalog() : bobCatalog.catalog());
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> operation = executor.submit(() -> catalog.forSession(session("alice")).listDatabases());
+            assertThat(aliceCatalog.awaitOperationStarted()).isTrue();
+
+            catalog.forSession(session("bob"));
+            assertThat(aliceCatalog.closeCalls()).hasValue(0);
+
+            aliceCatalog.releaseOperation();
+            operation.get(30, TimeUnit.SECONDS);
+            assertThat(aliceCatalog.closeCalls()).hasValue(1);
+        }
+        finally {
+            aliceCatalog.releaseOperation();
+            catalog.close();
+            executor.shutdownNow();
+        }
+        assertThat(bobCatalog.closeCalls()).hasValue(1);
+    }
+
+    @Test
     public void testCatalogRejectsSessionInitializationAfterClose()
             throws Exception
     {
@@ -450,6 +481,65 @@ public class PaimonCatalogTest
         private List<String> calls()
         {
             return calls;
+        }
+    }
+
+    private static final class BlockingCatalog
+    {
+        private final CountDownLatch operationStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseOperation = new CountDownLatch(1);
+        private final AtomicInteger closeCalls = new AtomicInteger();
+
+        private Catalog catalog()
+        {
+            return (Catalog) Proxy.newProxyInstance(
+                    PaimonCatalogTest.class.getClassLoader(),
+                    new Class<?>[] {Catalog.class},
+                    (proxy, method, args) -> {
+                        if (method.getDeclaringClass() == Object.class) {
+                            return handleObjectMethod(method.getName(), proxy, args);
+                        }
+                        if (method.getName().equals("listDatabases")) {
+                            operationStarted.countDown();
+                            if (!releaseOperation.await(30, TimeUnit.SECONDS)) {
+                                throw new IllegalStateException("Timed out waiting to release catalog operation");
+                            }
+                            return List.of();
+                        }
+                        if (method.getName().equals("close")) {
+                            closeCalls.incrementAndGet();
+                            return null;
+                        }
+                        if (method.getReturnType() == boolean.class) {
+                            return false;
+                        }
+                        if (method.getReturnType() == Map.class) {
+                            return Map.of();
+                        }
+                        if (method.getReturnType() == List.class) {
+                            return List.of();
+                        }
+                        if (method.getReturnType() == org.apache.paimon.PagedList.class) {
+                            return new org.apache.paimon.PagedList<>(List.of(), null);
+                        }
+                        return null;
+                    });
+        }
+
+        private boolean awaitOperationStarted()
+                throws InterruptedException
+        {
+            return operationStarted.await(30, TimeUnit.SECONDS);
+        }
+
+        private void releaseOperation()
+        {
+            releaseOperation.countDown();
+        }
+
+        private AtomicInteger closeCalls()
+        {
+            return closeCalls;
         }
     }
 

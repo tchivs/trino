@@ -55,6 +55,8 @@ import org.apache.paimon.view.View;
 import org.apache.paimon.view.ViewChange;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.security.Principal;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -87,7 +89,9 @@ public class PaimonCatalog
 
     private final int sessionCatalogCacheMaximumSize;
 
-    private final Map<SessionCatalogKey, Catalog> catalogs = new LinkedHashMap<>(16, 0.75f, true);
+    private final java.util.function.Function<ConnectorSession, Catalog> sessionCatalogFactory;
+
+    private final Map<SessionCatalogKey, SessionCatalogEntry> catalogs = new LinkedHashMap<>(16, 0.75f, true);
     private final ThreadLocal<Catalog> currentCatalog = new ThreadLocal<>();
     private volatile boolean closed;
 
@@ -99,12 +103,20 @@ public class PaimonCatalog
     public PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory,
             int sessionCatalogCacheMaximumSize)
     {
+        this(options, paimonFileSystemFactory, sessionCatalogCacheMaximumSize, null);
+    }
+
+    PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory,
+            int sessionCatalogCacheMaximumSize,
+            @Nullable java.util.function.Function<ConnectorSession, Catalog> sessionCatalogFactory)
+    {
         this.options = requireNonNull(options, "options is null");
         this.paimonFileSystemFactory = requireNonNull(paimonFileSystemFactory, "paimonFileSystemFactory is null");
         checkArgument(sessionCatalogCacheMaximumSize > 0,
                 "sessionCatalogCacheMaximumSize must be greater than zero: %s",
                 sessionCatalogCacheMaximumSize);
         this.sessionCatalogCacheMaximumSize = sessionCatalogCacheMaximumSize;
+        this.sessionCatalogFactory = sessionCatalogFactory == null ? this::createCatalog : sessionCatalogFactory;
     }
 
     public void initSession(ConnectorSession connectorSession)
@@ -119,49 +131,51 @@ public class PaimonCatalog
         SessionCatalogKey key = SessionCatalogKey.from(requireNonNull(connectorSession.getIdentity(), "connectorSession identity is null"));
         synchronized (catalogs) {
             checkState(!closed, "Paimon catalog is already closed");
-            Catalog catalog = catalogs.get(key);
-            if (catalog != null) {
-                return catalog;
+            SessionCatalogEntry entry = catalogs.get(key);
+            if (entry != null) {
+                return entry.proxy();
             }
         }
 
-        Catalog createdCatalog = createCatalog(connectorSession);
-        Catalog catalogToClose = null;
-        Catalog evictedCatalog = null;
-        Catalog result = null;
+        SessionCatalogEntry createdEntry = new SessionCatalogEntry(requireNonNull(
+                sessionCatalogFactory.apply(connectorSession), "session catalog is null"));
+        SessionCatalogEntry catalogToClose = null;
+        SessionCatalogEntry evictedCatalog = null;
+        SessionCatalogEntry result = null;
         boolean closedAfterCreate = false;
         synchronized (catalogs) {
             if (closed) {
-                catalogToClose = createdCatalog;
+                catalogToClose = createdEntry;
                 closedAfterCreate = true;
             }
             else {
-                Catalog existingCatalog = catalogs.get(key);
-                if (existingCatalog != null) {
-                    result = existingCatalog;
-                    catalogToClose = createdCatalog;
+                SessionCatalogEntry existingEntry = catalogs.get(key);
+                if (existingEntry != null) {
+                    result = existingEntry;
+                    catalogToClose = createdEntry;
                 }
                 else {
-                    result = createdCatalog;
-                    catalogs.put(key, createdCatalog);
+                    result = createdEntry;
+                    catalogs.put(key, createdEntry);
                     evictedCatalog = evictCatalogIfNeeded();
                 }
             }
         }
-        closeCatalogQuietly(catalogToClose);
-        closeCatalogQuietly(evictedCatalog);
+        closeCatalogQuietly(catalogToClose == null ? null : catalogToClose.retire());
+        closeCatalogQuietly(evictedCatalog == null ? null : evictedCatalog.retire());
         checkState(!closedAfterCreate, "Paimon catalog is already closed");
         verify(result != null, "Paimon session catalog result is null");
-        return result;
+        return result.proxy();
     }
 
-    private Catalog evictCatalogIfNeeded()
+    @Nullable
+    private SessionCatalogEntry evictCatalogIfNeeded()
     {
         if (catalogs.size() <= sessionCatalogCacheMaximumSize) {
             return null;
         }
-        Iterator<Entry<SessionCatalogKey, Catalog>> iterator = catalogs.entrySet().iterator();
-        Catalog evictedCatalog = iterator.next().getValue();
+        Iterator<Entry<SessionCatalogKey, SessionCatalogEntry>> iterator = catalogs.entrySet().iterator();
+        SessionCatalogEntry evictedCatalog = iterator.next().getValue();
         iterator.remove();
         return evictedCatalog;
     }
@@ -771,10 +785,15 @@ public class PaimonCatalog
                 return;
             }
             closed = true;
-            catalogsToClose = List.copyOf(catalogs.values());
+            catalogsToClose = catalogs.values().stream()
+                    .map(SessionCatalogEntry::retire)
+                    .toList();
             catalogs.clear();
         }
         for (Catalog catalog : catalogsToClose) {
+            if (catalog == null) {
+                continue;
+            }
             try {
                 catalog.close();
             }
@@ -809,6 +828,91 @@ public class PaimonCatalog
         }
         catch (Exception ignored) {
             LOG.warn(ignored, "Failed to close stale Paimon session catalog");
+        }
+    }
+
+    private static final class SessionCatalogEntry
+    {
+        private final Catalog delegate;
+        private final Catalog proxy;
+
+        private int activeOperations;
+        private boolean retired;
+        private boolean closed;
+
+        private SessionCatalogEntry(Catalog delegate)
+        {
+            this.delegate = requireNonNull(delegate, "delegate is null");
+            this.proxy = (Catalog) Proxy.newProxyInstance(
+                    Catalog.class.getClassLoader(),
+                    new Class<?>[] {Catalog.class},
+                    this::invoke);
+        }
+
+        private Catalog proxy()
+        {
+            return proxy;
+        }
+
+        @Nullable
+        private Catalog retire()
+        {
+            synchronized (this) {
+                retired = true;
+                return closeIfIdle();
+            }
+        }
+
+        @Nullable
+        private Catalog release()
+        {
+            synchronized (this) {
+                activeOperations--;
+                verify(activeOperations >= 0, "session catalog active operation count is negative");
+                return closeIfIdle();
+            }
+        }
+
+        private void acquire()
+        {
+            synchronized (this) {
+                checkState(!closed, "Paimon session catalog is already closed");
+                activeOperations++;
+            }
+        }
+
+        @Nullable
+        private Catalog closeIfIdle()
+        {
+            if (!retired || closed || activeOperations != 0) {
+                return null;
+            }
+            closed = true;
+            return delegate;
+        }
+
+        private Object invoke(Object proxy, java.lang.reflect.Method method, @Nullable Object[] arguments)
+                throws Throwable
+        {
+            if (method.getDeclaringClass() == Object.class) {
+                return switch (method.getName()) {
+                    case "toString" -> delegate.toString();
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == arguments[0];
+                    default -> throw new AssertionError("Unexpected Object method: " + method.getName());
+                };
+            }
+
+            acquire();
+            try {
+                return method.invoke(delegate, arguments);
+            }
+            catch (InvocationTargetException e) {
+                throw e.getCause();
+            }
+            finally {
+                closeCatalogQuietly(release());
+            }
         }
     }
 
