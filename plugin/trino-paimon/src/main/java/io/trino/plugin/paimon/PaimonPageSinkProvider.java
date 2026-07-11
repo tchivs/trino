@@ -34,7 +34,6 @@ import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.crosspartition.GlobalIndexAssigner;
-import org.apache.paimon.crosspartition.IndexBootstrap;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.index.BucketAssigner;
@@ -44,13 +43,12 @@ import org.apache.paimon.lookup.rocksdb.RocksDBOptions;
 import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.reader.RecordReader;
-import org.apache.paimon.reader.RecordReader.RecordIterator;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
+import org.apache.paimon.table.sink.BatchWriteBuilderImpl;
 import org.apache.paimon.table.sink.RowPartitionKeyExtractor;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
@@ -188,7 +186,7 @@ public class PaimonPageSinkProvider
             validateWriteBucketMode(table);
             validateWriteColumns(table, writeColumns);
             return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), pageSinkId,
-                    tableHandle.getDynamicBucketAssignerParallelism());
+                    tableHandle.getDynamicBucketAssignerParallelism(), session.getQueryId(), tableHandle);
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -208,7 +206,7 @@ public class PaimonPageSinkProvider
                 PaimonTableSupport.validateInsertOverwrite(table);
             }
             return createPageSink(table, overwrite, writeLayout(table, writeColumns, typeManager), pageSinkId,
-                    tableHandle.getDynamicBucketAssignerParallelism());
+                    tableHandle.getDynamicBucketAssignerParallelism(), session.getQueryId(), tableHandle);
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -225,7 +223,7 @@ public class PaimonPageSinkProvider
             PaimonTableSupport.validateRowLevelDelete(table, "merge writes");
             validateMergeWriteColumns(table, writeColumns);
             return createPageSink(table, false, writeLayout(table, writeColumns, typeManager), pageSinkId,
-                    tableHandle.getDynamicBucketAssignerParallelism());
+                    tableHandle.getDynamicBucketAssignerParallelism(), session.getQueryId(), tableHandle);
         }, PaimonPageSinkProvider.class.getClassLoader());
     }
 
@@ -454,13 +452,15 @@ public class PaimonPageSinkProvider
     }
 
     private PaimonPageSink createPageSink(FileStoreTable table, boolean overwrite, WriteLayout writeLayout,
-            ConnectorPageSinkId pageSinkId, OptionalInt dynamicBucketAssignerParallelism)
+            ConnectorPageSinkId pageSinkId, OptionalInt dynamicBucketAssignerParallelism, String queryId,
+            PaimonTableHandle tableHandle)
     {
         BatchTableWrite write = null;
         IOManager ioManager = null;
         try {
             validateTrinoManagedFileFormatWriteType(table);
             BatchWriteBuilder batchWriteBuilder = table.newBatchWriteBuilder();
+            enableKeyDynamicConflictCheck(table, batchWriteBuilder);
             if (overwrite) {
                 batchWriteBuilder.withOverwrite();
             }
@@ -485,7 +485,10 @@ public class PaimonPageSinkProvider
                             ioManager,
                             pageSinkId,
                             dynamicBucketAssignerParallelism,
-                            dynamicBucketWorkerCountSupplier.getAsInt());
+                            dynamicBucketWorkerCountSupplier.getAsInt(),
+                            queryId,
+                            PaimonKeyDynamicBootstrap.snapshotFor(tableHandle),
+                            tableHandle.getCreateTableOperation().isPresent());
                     return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
                             writeLayout.inputChannels(), writeLayout.defaultValues(), null, keyDynamicWriter,
                             memoryPoolFactory, ioManager, keyDynamicMemoryUsage(table));
@@ -493,7 +496,12 @@ public class PaimonPageSinkProvider
                 catch (Exception e) {
                     RuntimeException failure = PaimonPageSink.wrapWriteException(e);
                     if (keyDynamicWriter != null) {
-                        failure = PaimonPageSink.closeKeyDynamicWriter(keyDynamicWriter, failure);
+                        try {
+                            keyDynamicWriter.abort();
+                        }
+                        catch (Exception closeFailure) {
+                            failure.addSuppressed(PaimonPageSink.wrapWriterCloseException(closeFailure));
+                        }
                     }
                     throw failure;
                 }
@@ -511,6 +519,13 @@ public class PaimonPageSinkProvider
         }
     }
 
+    private static void enableKeyDynamicConflictCheck(FileStoreTable table, BatchWriteBuilder batchWriteBuilder)
+    {
+        if (batchWriteBuilder instanceof BatchWriteBuilderImpl builder && table.bucketMode() == BucketMode.KEY_DYNAMIC) {
+            builder.appendCommitCheckConflict(true);
+        }
+    }
+
     static PaimonPageSink.KeyDynamicWriter keyDynamicWriter(
             FileStoreTable table,
             BatchTableWrite writer,
@@ -518,6 +533,22 @@ public class PaimonPageSinkProvider
             ConnectorPageSinkId pageSinkId,
             OptionalInt plannedAssignerParallelism,
             int workerCount)
+            throws Exception
+    {
+        return keyDynamicWriter(table, writer, ioManager, pageSinkId, plannedAssignerParallelism, workerCount,
+                "legacy-key-dynamic-writer", PaimonKeyDynamicBootstrap.OptionalSnapshot.unpinned(), false);
+    }
+
+    static PaimonPageSink.KeyDynamicWriter keyDynamicWriter(
+            FileStoreTable table,
+            BatchTableWrite writer,
+            IOManager ioManager,
+            ConnectorPageSinkId pageSinkId,
+            OptionalInt plannedAssignerParallelism,
+            int workerCount,
+            String queryId,
+            PaimonKeyDynamicBootstrap.OptionalSnapshot expectedSnapshot,
+            boolean emptyCreateTable)
             throws Exception
     {
         requireNonNull(table, "table is null");
@@ -538,27 +569,24 @@ public class PaimonPageSinkProvider
                             .formatted(assignId, assignerParallelism));
         }
 
+        PaimonKeyDynamicBootstrap.Artifact bootstrapArtifact = null;
         GlobalIndexAssigner assigner = new GlobalIndexAssigner(table);
+        PaimonPageSink.KeyDynamicWriter keyDynamicWriter = null;
         try {
-            PaimonPageSink.KeyDynamicWriter keyDynamicWriter = new PaimonPageSink.KeyDynamicWriter(writer, assigner);
+            // A newly created CTAS table has no snapshot and therefore no existing keys to bootstrap.
+            // Any table with existing state must have been planned by the coordinator and publish a
+            // shared artifact; workers must never independently scan it.
+            if (!emptyCreateTable && (expectedSnapshot.pinned() || PaimonKeyDynamicBootstrap.latestSnapshot(table).isPresent())) {
+                bootstrapArtifact = PaimonKeyDynamicBootstrap.open(table, queryId, expectedSnapshot, assignerParallelism);
+            }
+            keyDynamicWriter = new PaimonPageSink.KeyDynamicWriter(writer, assigner,
+                    () -> PaimonKeyDynamicBootstrap.cleanup(table, queryId, expectedSnapshot, assignerParallelism));
             assigner.open(0, ioManager, assignerParallelism, assignId, keyDynamicWriter::writeAssignedRow);
-            // IndexBootstrap's bucket filter is only the first stage of Paimon's two-stage
-            // topology. Paimon subsequently shuffles every bootstrap record by primary-key hash
-            // before it reaches the assigner. Trino has no connector-owned second shuffle, so
-            // every assigner must bootstrap the complete visible index to avoid treating a key
-            // from another bucket residue as a new key.
-            try (RecordReader<org.apache.paimon.data.InternalRow> reader =
-                    new IndexBootstrap(table).bootstrap(1, 0)) {
-                RecordIterator<org.apache.paimon.data.InternalRow> batch;
-                while ((batch = reader.readBatch()) != null) {
-                    try {
-                        org.apache.paimon.data.InternalRow row;
-                        while ((row = batch.next()) != null) {
-                            assigner.bootstrapKey(row);
-                        }
-                    }
-                    finally {
-                        batch.releaseBatch();
+            if (bootstrapArtifact != null) {
+                try (PaimonKeyDynamicBootstrap.ShardReader reader = bootstrapArtifact.openShard(assignId)) {
+                    org.apache.paimon.data.InternalRow row;
+                    while ((row = reader.next()) != null) {
+                        assigner.bootstrapKey(row);
                     }
                 }
             }
@@ -566,11 +594,24 @@ public class PaimonPageSinkProvider
             return keyDynamicWriter;
         }
         catch (Exception e) {
-            try {
-                assigner.close();
+            if (keyDynamicWriter != null) {
+                try {
+                    keyDynamicWriter.abort();
+                }
+                catch (Exception closeFailure) {
+                    e.addSuppressed(closeFailure);
+                }
             }
-            catch (Exception closeFailure) {
-                e.addSuppressed(closeFailure);
+            else {
+                try {
+                    assigner.close();
+                }
+                catch (Exception closeFailure) {
+                    e.addSuppressed(closeFailure);
+                }
+            }
+            if (keyDynamicWriter == null && bootstrapArtifact != null) {
+                PaimonKeyDynamicBootstrap.cleanup(table, queryId, expectedSnapshot, assignerParallelism);
             }
             throw e;
         }

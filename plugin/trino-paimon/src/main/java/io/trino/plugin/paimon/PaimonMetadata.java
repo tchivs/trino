@@ -59,6 +59,7 @@ import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
+import jakarta.annotation.Nullable;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
@@ -81,6 +82,7 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
+import org.apache.paimon.table.sink.BatchWriteBuilderImpl;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageSerializer;
 import org.apache.paimon.table.source.ReadBuilder;
@@ -328,6 +330,54 @@ public record PaimonMetadata(PaimonCatalog catalog,
         };
     }
 
+    private PaimonTableHandle planKeyDynamicBootstrap(
+            FileStoreTable storeTable,
+            PaimonTableHandle tableHandle,
+            String queryId)
+    {
+        requireNonNull(storeTable, "storeTable is null");
+        requireNonNull(tableHandle, "tableHandle is null");
+        requireNonNull(queryId, "queryId is null");
+        if (storeTable.bucketMode() != BucketMode.KEY_DYNAMIC) {
+            return tableHandle;
+        }
+        PaimonTableHandle planned = tableHandle.withKeyDynamicBootstrapSnapshot(
+                PaimonKeyDynamicBootstrap.latestSnapshot(storeTable));
+        try {
+            PaimonKeyDynamicBootstrap.prepare(
+                    storeTable,
+                    queryId,
+                    PaimonKeyDynamicBootstrap.snapshotFor(planned),
+                    planned.getDynamicBucketAssignerParallelism().orElseThrow());
+        }
+        catch (Exception e) {
+            throw PaimonPageSink.wrapWriteException(e);
+        }
+        return planned;
+    }
+
+    private static PaimonTableHandle pinKeyDynamicBootstrapSnapshot(
+            Table table,
+            PaimonTableHandle tableHandle,
+            boolean keyDynamic)
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(tableHandle, "tableHandle is null");
+        if (!keyDynamic || !(table instanceof FileStoreTable storeTable)) {
+            return tableHandle;
+        }
+        try {
+            if (storeTable.bucketMode() != BucketMode.KEY_DYNAMIC) {
+                return tableHandle;
+            }
+            return tableHandle.withKeyDynamicBootstrapSnapshot(PaimonKeyDynamicBootstrap.latestSnapshot(storeTable));
+        }
+        catch (UnsupportedOperationException ignored) {
+            // Some metadata-only table implementations do not expose storage snapshots.
+            return tableHandle;
+        }
+    }
+
     private static OptionalInt dynamicBucketAssignerParallelism(Optional<ConnectorTableLayout> layout)
     {
         requireNonNull(layout, "layout is null");
@@ -362,7 +412,8 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(retryMode, "retryMode is null");
         validateNoQueryRetries(retryMode);
         rejectSystemTableWrite(tableMetadata.getTable(), "create table");
-        writeLayout(newTableSchema(tableMetadata), "create table", tableMetadata.getTable().toString());
+        TableSchema createTableSchema = newTableSchema(tableMetadata);
+        writeLayout(createTableSchema, "create table", tableMetadata.getTable().toString());
         createTable(session, tableMetadata,
                 replace ? io.trino.spi.connector.SaveMode.REPLACE : io.trino.spi.connector.SaveMode.FAIL);
         PaimonTableHandle tableHandle = requireNonNull(getTableHandle(session, tableMetadata.getTable(),
@@ -374,7 +425,7 @@ public record PaimonMetadata(PaimonCatalog catalog,
         String createTableOperation = replace
                 ? PaimonTableHandle.CREATE_OR_REPLACE_TABLE_AS_SELECT_OPERATION
                 : PaimonTableHandle.CREATE_TABLE_AS_SELECT_OPERATION;
-        return tableHandle.withWriteColumns(tableMetadata.getColumns().stream()
+        PaimonTableHandle outputHandle = tableHandle.withWriteColumns(tableMetadata.getColumns().stream()
                 .map(column -> {
                     DataField field = createdTableField(createdFieldsByLowerName, column.getName(),
                             tableMetadata.getTable());
@@ -383,6 +434,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .collect(toList()))
                 .withCreateTableOperation(createTableOperation)
                 .withDynamicBucketAssignerParallelism(dynamicBucketAssignerParallelism(layout));
+        // CTAS starts with an empty table, so workers do not need a bootstrap artifact. The initial
+        // snapshot is still pinned so a concurrent write cannot race this query's first commit.
+        return pinKeyDynamicBootstrapSnapshot(table, outputHandle, bucketMode(createTableSchema) == BucketMode.KEY_DYNAMIC);
     }
 
     static Map<String, DataField> createdTableFieldsByLowerName(List<DataField> fields, SchemaTableName tableName)
@@ -502,10 +556,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable storeTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, "begin insert");
         OptionalInt plannedAssignerParallelism = paimonTableHandle.getPlannedInsertDynamicBucketAssignerParallelism();
-        return paimonTableHandle.withWriteColumns(columns)
+        PaimonTableHandle insertHandle = paimonTableHandle.withWriteColumns(columns)
                 .withDynamicBucketAssignerParallelism(plannedAssignerParallelism.isPresent()
                         ? plannedAssignerParallelism
                         : dynamicBucketAssignerParallelism(storeTable));
+        return planKeyDynamicBootstrap(storeTable, insertHandle, session.getQueryId());
     }
 
     @Override
@@ -554,22 +609,29 @@ public record PaimonMetadata(PaimonCatalog catalog,
         requireNonNull(insertBehavior, "insertBehavior is null");
         requireNonNull(operation, "operation is null");
         List<Slice> fragmentsList = copyFragments(fragments);
+        Optional<String> commitOperation = commitOperation(insertBehavior, operation);
         if (fragmentsList.isEmpty()
-                && insertBehavior != PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE) {
+                && insertBehavior != PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE
+                && !tableHandle.isKeyDynamicBootstrapSnapshotPlanned()) {
             return Optional.empty();
         }
-        Optional<String> commitOperation = commitOperation(insertBehavior, operation);
 
         List<CommitMessage> commitMessages = deserializeCommitMessages(fragmentsList);
         Catalog sessionCatalog = catalog.forSession(session);
-        FileStoreTable fileStoreTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, "commit writes");
+        FileStoreTable fileStoreTable = null;
+        PaimonKeyDynamicBootstrap.OptionalSnapshot expectedSnapshot = PaimonKeyDynamicBootstrap.snapshotFor(tableHandle);
 
         try {
+            fileStoreTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, "commit writes");
+            if (tableHandle.isKeyDynamicBootstrapSnapshotPlanned()) {
+                PaimonKeyDynamicBootstrap.validateSnapshot(fileStoreTable, expectedSnapshot, "before commit");
+            }
             if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR) {
                 validateInsertTargetIsNew(sessionCatalog, fileStoreTable, tableHandle, commitMessages);
             }
 
             BatchWriteBuilder batchWriteBuilder = fileStoreTable.newBatchWriteBuilder();
+            enableKeyDynamicConflictCheck(fileStoreTable, batchWriteBuilder);
             if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE) {
                 PaimonTableSupport.validateInsertOverwrite(fileStoreTable);
                 batchWriteBuilder.withOverwrite();
@@ -600,7 +662,41 @@ public record PaimonMetadata(PaimonCatalog catalog,
             }
             throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to commit Paimon write fragments", e);
         }
+        finally {
+            cleanupKeyDynamicBootstrap(session, tableHandle, fileStoreTable, expectedSnapshot);
+        }
         return Optional.empty();
+    }
+
+    private static void enableKeyDynamicConflictCheck(FileStoreTable table, BatchWriteBuilder batchWriteBuilder)
+    {
+        if (batchWriteBuilder instanceof BatchWriteBuilderImpl builder && table.bucketMode() == BucketMode.KEY_DYNAMIC) {
+            builder.appendCommitCheckConflict(true);
+        }
+    }
+
+    private void cleanupKeyDynamicBootstrap(
+            ConnectorSession session,
+            PaimonTableHandle tableHandle,
+            @Nullable FileStoreTable table,
+            PaimonKeyDynamicBootstrap.OptionalSnapshot expectedSnapshot)
+    {
+        if (!tableHandle.isKeyDynamicBootstrapSnapshotPlanned()) {
+            return;
+        }
+        if (table == null) {
+            try {
+                table = requireFileStoreTable(tableHandle.table(catalog.forSession(session)), "cleanup bootstrap");
+            }
+            catch (Exception ignored) {
+                return;
+            }
+        }
+        OptionalInt assignerParallelism = tableHandle.getDynamicBucketAssignerParallelism();
+        if (assignerParallelism.isPresent()) {
+            PaimonKeyDynamicBootstrap.cleanup(table, session.getQueryId(), expectedSnapshot,
+                    assignerParallelism.getAsInt());
+        }
     }
 
     private static Throwable firstRecognizedCommitFailure(Exception exception)
@@ -937,10 +1033,11 @@ public record PaimonMetadata(PaimonCatalog catalog,
                 .map(this::toPaimonColumnHandle)
                 .collect(toList());
         OptionalInt plannedAssignerParallelism = paimonTableHandle.getPlannedRowLevelDynamicBucketAssignerParallelism();
-        return new PaimonMergeTableHandle(paimonTableHandle.withWriteColumns(writeColumns)
+        PaimonTableHandle mergeHandle = paimonTableHandle.withWriteColumns(writeColumns)
                 .withDynamicBucketAssignerParallelism(plannedAssignerParallelism.isPresent()
                         ? plannedAssignerParallelism
-                        : dynamicBucketAssignerParallelism(storeTable)));
+                        : dynamicBucketAssignerParallelism(storeTable));
+        return new PaimonMergeTableHandle(planKeyDynamicBootstrap(storeTable, mergeHandle, session.getQueryId()));
     }
 
     private static void validateNoQueryRetries(RetryMode retryMode)

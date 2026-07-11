@@ -360,7 +360,10 @@ public class PaimonPageSink
         catch (Exception e) {
             failure = wrapWriteException(e);
         }
-        failure = close(failure);
+        failure = close(failure, false);
+        if (failure != null && keyDynamicWriter != null) {
+            keyDynamicWriter.cleanupAfterAbort();
+        }
         if (failure != null) {
             throw failure;
         }
@@ -378,7 +381,7 @@ public class PaimonPageSink
 
     private void abortInternal()
     {
-        RuntimeException failure = close(null);
+        RuntimeException failure = close(null, true);
         if (failure != null) {
             throw failure;
         }
@@ -387,10 +390,19 @@ public class PaimonPageSink
     @Nullable
     private RuntimeException close(@Nullable RuntimeException failure)
     {
+        return close(failure, false);
+    }
+
+    @Nullable
+    private RuntimeException close(@Nullable RuntimeException failure, boolean abort)
+    {
         if (!closed.compareAndSet(false, true)) {
+            if (abort && keyDynamicWriter != null) {
+                keyDynamicWriter.cleanupAfterAbort();
+            }
             return failure;
         }
-        failure = closeKeyDynamicWriter(keyDynamicWriter, failure);
+        failure = closeKeyDynamicWriter(keyDynamicWriter, failure, abort);
         failure = closeWriter(writer, failure);
         failure = closeIoManager(ioManager, failure);
         return failure;
@@ -400,11 +412,23 @@ public class PaimonPageSink
     static RuntimeException closeKeyDynamicWriter(@Nullable KeyDynamicWriter keyDynamicWriter,
             @Nullable RuntimeException failure)
     {
+        return closeKeyDynamicWriter(keyDynamicWriter, failure, false);
+    }
+
+    @Nullable
+    private static RuntimeException closeKeyDynamicWriter(@Nullable KeyDynamicWriter keyDynamicWriter,
+            @Nullable RuntimeException failure, boolean abort)
+    {
         if (keyDynamicWriter == null) {
             return failure;
         }
         try {
-            keyDynamicWriter.close();
+            if (abort) {
+                keyDynamicWriter.abort();
+            }
+            else {
+                keyDynamicWriter.close();
+            }
         }
         catch (Exception e) {
             RuntimeException closeFailure = wrapWriterCloseException(e);
@@ -604,11 +628,19 @@ public class PaimonPageSink
     {
         private final BatchTableWrite writer;
         private final GlobalIndexAssigner assigner;
+        private final Runnable abortCleanup;
+        private final AtomicBoolean abortCleanupDone = new AtomicBoolean();
 
         KeyDynamicWriter(BatchTableWrite writer, GlobalIndexAssigner assigner)
         {
+            this(writer, assigner, () -> {});
+        }
+
+        KeyDynamicWriter(BatchTableWrite writer, GlobalIndexAssigner assigner, Runnable abortCleanup)
+        {
             this.writer = requireNonNull(writer, "writer is null");
             this.assigner = requireNonNull(assigner, "assigner is null");
+            this.abortCleanup = requireNonNull(abortCleanup, "abortCleanup is null");
         }
 
         void write(InternalRow row)
@@ -631,6 +663,39 @@ public class PaimonPageSink
                 throws Exception
         {
             assigner.close();
+        }
+
+        void abort()
+                throws Exception
+        {
+            Exception failure = null;
+            try {
+                close();
+            }
+            catch (Exception e) {
+                failure = e;
+            }
+            try {
+                cleanupAfterAbort();
+            }
+            catch (RuntimeException e) {
+                if (failure == null) {
+                    failure = e;
+                }
+                else {
+                    failure.addSuppressed(e);
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        }
+
+        void cleanupAfterAbort()
+        {
+            if (abortCleanupDone.compareAndSet(false, true)) {
+                abortCleanup.run();
+            }
         }
     }
 

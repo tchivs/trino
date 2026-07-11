@@ -108,6 +108,8 @@ public class PaimonTableHandle
     private final Optional<List<Map<String, String>>> deletePartitionSpecs;
     private final Optional<String> createTableOperation;
     private final OptionalInt dynamicBucketAssignerParallelism;
+    private final boolean keyDynamicBootstrapSnapshotPlanned;
+    private final OptionalLong keyDynamicBootstrapSnapshot;
     private final Map<String, String> dynamicOptions;
 
     private final transient Map<Catalog, Table> tablesByCatalog = Collections.synchronizedMap(new IdentityHashMap<>());
@@ -137,6 +139,17 @@ public class PaimonTableHandle
                 deletePartitionSpecs, Optional.empty(), OptionalInt.empty());
     }
 
+    public PaimonTableHandle(String schemaName, String tableName, Map<String, String> dynamicOptions,
+            TupleDomain<PaimonColumnHandle> filter, Optional<List<PaimonColumnHandle>> projectedColumns,
+            Optional<List<PaimonColumnHandle>> writeColumns, OptionalLong limit,
+            Optional<List<Map<String, String>>> deletePartitionSpecs, Optional<String> createTableOperation,
+            OptionalInt dynamicBucketAssignerParallelism)
+    {
+        this(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns, limit,
+                deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism, false,
+                OptionalLong.empty());
+    }
+
     @JsonCreator
     public PaimonTableHandle(@JsonProperty(value = "schemaName", required = true) String schemaName,
             @JsonProperty(value = "tableName", required = true) String tableName,
@@ -147,7 +160,9 @@ public class PaimonTableHandle
             @JsonProperty(value = "limit", required = true) OptionalLong limit,
             @JsonProperty("deletePartitionSpecs") Optional<List<Map<String, String>>> deletePartitionSpecs,
             @JsonProperty("createTableOperation") Optional<String> createTableOperation,
-            @JsonProperty("dynamicBucketAssignerParallelism") OptionalInt dynamicBucketAssignerParallelism)
+            @JsonProperty("dynamicBucketAssignerParallelism") OptionalInt dynamicBucketAssignerParallelism,
+            @JsonProperty("keyDynamicBootstrapSnapshotPlanned") Boolean keyDynamicBootstrapSnapshotPlanned,
+            @JsonProperty("keyDynamicBootstrapSnapshot") OptionalLong keyDynamicBootstrapSnapshot)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         checkArgument(!this.schemaName.isBlank(), "schemaName is blank");
@@ -163,6 +178,16 @@ public class PaimonTableHandle
         this.createTableOperation = copyCreateTableOperation(createTableOperation);
         this.dynamicBucketAssignerParallelism = copyDynamicBucketAssignerParallelism(
                 dynamicBucketAssignerParallelism);
+        this.keyDynamicBootstrapSnapshotPlanned = Boolean.TRUE.equals(keyDynamicBootstrapSnapshotPlanned);
+        this.keyDynamicBootstrapSnapshot = keyDynamicBootstrapSnapshot == null
+                ? OptionalLong.empty()
+                : keyDynamicBootstrapSnapshot;
+        if (!this.keyDynamicBootstrapSnapshotPlanned) {
+            checkArgument(this.keyDynamicBootstrapSnapshot.isEmpty(),
+                    "keyDynamicBootstrapSnapshot must be empty when planning is disabled");
+        }
+        this.keyDynamicBootstrapSnapshot.ifPresent(value ->
+                checkArgument(value >= 0, "keyDynamicBootstrapSnapshot must be non-negative: %s", value));
         checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
     }
 
@@ -380,6 +405,20 @@ public class PaimonTableHandle
     public OptionalInt getDynamicBucketAssignerParallelism()
     {
         return dynamicBucketAssignerParallelism;
+    }
+
+    @JsonProperty
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    public boolean isKeyDynamicBootstrapSnapshotPlanned()
+    {
+        return keyDynamicBootstrapSnapshotPlanned;
+    }
+
+    @JsonProperty
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    public OptionalLong getKeyDynamicBootstrapSnapshot()
+    {
+        return keyDynamicBootstrapSnapshot;
     }
 
     synchronized void rememberPlannedInsertDynamicBucketAssignerParallelism(OptionalInt dynamicBucketAssignerParallelism)
@@ -777,14 +816,16 @@ public class PaimonTableHandle
     public PaimonTableHandle copy(TupleDomain<PaimonColumnHandle> filter)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit, Optional.empty(), createTableOperation, dynamicBucketAssignerParallelism);
+                limit, Optional.empty(), createTableOperation, dynamicBucketAssignerParallelism,
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
 
     public PaimonTableHandle copy(Optional<List<ColumnHandle>> projectedColumns)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter,
                 toPaimonColumnHandles(projectedColumns), writeColumns, limit, Optional.empty(),
-                createTableOperation, dynamicBucketAssignerParallelism);
+                createTableOperation, dynamicBucketAssignerParallelism,
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
 
     public PaimonTableHandle withWriteColumns(List<ColumnHandle> writeColumns)
@@ -793,14 +834,15 @@ public class PaimonTableHandle
         checkArgument(!writeColumns.isEmpty(), "writeColumns is empty");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns,
                 Optional.of(toPaimonColumnHandles(writeColumns)), limit, Optional.empty(), createTableOperation,
-                dynamicBucketAssignerParallelism);
+                dynamicBucketAssignerParallelism, keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
 
     public PaimonTableHandle withCreateTableOperation(String createTableOperation)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
                 limit, deletePartitionSpecs, Optional.of(requireNonNull(createTableOperation,
-                        "createTableOperation is null")), dynamicBucketAssignerParallelism);
+                        "createTableOperation is null")), dynamicBucketAssignerParallelism,
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
 
     public PaimonTableHandle withDynamicBucketAssignerParallelism(
@@ -808,7 +850,8 @@ public class PaimonTableHandle
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
                 limit, deletePartitionSpecs, createTableOperation,
-                copyDynamicBucketAssignerParallelism(dynamicBucketAssignerParallelism));
+                copyDynamicBucketAssignerParallelism(dynamicBucketAssignerParallelism),
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
 
     private static Optional<List<PaimonColumnHandle>> toPaimonColumnHandles(Optional<List<ColumnHandle>> columns)
@@ -834,14 +877,23 @@ public class PaimonTableHandle
     public PaimonTableHandle copy(OptionalLong limit)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit, Optional.empty(), createTableOperation, dynamicBucketAssignerParallelism);
+                limit, Optional.empty(), createTableOperation, dynamicBucketAssignerParallelism,
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
 
     public PaimonTableHandle withDeletePartitionSpecs(List<Map<String, String>> deletePartitionSpecs)
     {
         requireNonNull(deletePartitionSpecs, "deletePartitionSpecs is null");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit, Optional.of(deletePartitionSpecs), createTableOperation, dynamicBucketAssignerParallelism);
+                limit, Optional.of(deletePartitionSpecs), createTableOperation, dynamicBucketAssignerParallelism,
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
+    }
+
+    PaimonTableHandle withKeyDynamicBootstrapSnapshot(OptionalLong snapshot)
+    {
+        requireNonNull(snapshot, "snapshot is null");
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
+                limit, deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism, true, snapshot);
     }
 
     @Override
@@ -861,13 +913,16 @@ public class PaimonTableHandle
                 && Objects.equals(limit, that.limit)
                 && Objects.equals(deletePartitionSpecs, that.deletePartitionSpecs)
                 && Objects.equals(createTableOperation, that.createTableOperation)
-                && Objects.equals(dynamicBucketAssignerParallelism, that.dynamicBucketAssignerParallelism);
+                && Objects.equals(dynamicBucketAssignerParallelism, that.dynamicBucketAssignerParallelism)
+                && keyDynamicBootstrapSnapshotPlanned == that.keyDynamicBootstrapSnapshotPlanned
+                && Objects.equals(keyDynamicBootstrapSnapshot, that.keyDynamicBootstrapSnapshot);
     }
 
     @Override
     public int hashCode()
     {
         return Objects.hash(schemaName, tableName, filter, projectedColumns, writeColumns, limit, deletePartitionSpecs,
-                createTableOperation, dynamicBucketAssignerParallelism, dynamicOptions);
+                createTableOperation, dynamicBucketAssignerParallelism, keyDynamicBootstrapSnapshotPlanned,
+                keyDynamicBootstrapSnapshot, dynamicOptions);
     }
 }

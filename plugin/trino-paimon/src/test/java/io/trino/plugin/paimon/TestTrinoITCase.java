@@ -1240,6 +1240,26 @@ public class TestTrinoITCase
     }
 
     @Test
+    public void testKeyDynamicCreateTableAsSelect()
+    {
+        String tableName = "key_dynamic_ctas_" + UUID.randomUUID().toString().replace('-', '_');
+        String table = "paimon.default." + tableName;
+        try {
+            sql("CREATE TABLE " + table + " WITH ("
+                    + "primary_key = ARRAY['id'], bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2', dynamic_bucket_initial_buckets = '2') AS "
+                    + "SELECT * FROM (VALUES (10, 1, 'one'), (20, 2, 'two')) "
+                    + "AS source(dt, id, name)");
+
+            assertThat(sql("SELECT dt, id, name FROM " + table + " ORDER BY id"))
+                    .isEqualTo("[[10, 1, one], [20, 2, two]]");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
     public void testHashDynamicInsertOverwrite()
     {
         sql("CREATE TABLE paimon.default.hash_dynamic_overwrite ("
