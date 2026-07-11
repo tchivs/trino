@@ -16,6 +16,7 @@ package io.trino.plugin.paimon;
 import jakarta.annotation.Nullable;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.catalog.CommitValidationException;
 import org.apache.paimon.crosspartition.IndexBootstrap;
 import org.apache.paimon.crosspartition.KeyPartPartitionKeyExtractor;
 import org.apache.paimon.data.BinaryRow;
@@ -212,6 +213,65 @@ final class PaimonKeyDynamicBootstrap
         throw new IllegalStateException(
                 "Paimon KEY_DYNAMIC table snapshot continued changing during commit validation: expected "
                         + expected + ", actual " + end);
+    }
+
+    /**
+     * Validate a pinned KEY_DYNAMIC write against the snapshot already observed by Paimon's
+     * atomic commit implementation. The caller must invoke this only inside that implementation's
+     * catalog lock; this method deliberately performs no second latest-snapshot read.
+     */
+    static boolean validateSnapshotForAtomicCommit(
+            FileStoreTable table,
+            String queryId,
+            OptionalSnapshot expectedSnapshot,
+            int assignerParallelism,
+            @Nullable Snapshot latestSnapshot,
+            boolean rejectConcurrentSnapshot)
+            throws Exception
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(queryId, "queryId is null");
+        requireNonNull(expectedSnapshot, "expectedSnapshot is null");
+        checkArgument(!queryId.isBlank(), "queryId is blank");
+        checkArgument(assignerParallelism > 0, "assignerParallelism must be positive: %s", assignerParallelism);
+
+        if (!expectedSnapshot.pinned()) {
+            throw new CommitValidationException(
+                    "Paimon KEY_DYNAMIC commit is missing its pinned bootstrap snapshot");
+        }
+
+        Long expected = optionalSnapshotValue(expectedSnapshot.snapshotId());
+        Long actual = latestSnapshot == null ? null : latestSnapshot.id();
+        if (equalsNullable(actual, expected)) {
+            return true;
+        }
+        if (rejectConcurrentSnapshot) {
+            throw new CommitValidationException(snapshotChanged(expected, actual, "under the Paimon commit lock").getMessage());
+        }
+        if (expected != null && (actual == null || actual < expected)) {
+            throw new CommitValidationException(snapshotChanged(expected, actual, "under the Paimon commit lock").getMessage());
+        }
+        if (actual == null) {
+            throw new CommitValidationException(snapshotChanged(expected, null, "under the Paimon commit lock").getMessage());
+        }
+
+        try {
+            checkSnapshotRangeCanRebase(table, expected, actual);
+            KeyFingerprint inputKeys = readKeyFingerprints(table, queryId, expectedSnapshot, assignerParallelism);
+            if (incrementalKeysIntersect(table, expected, actual, inputKeys)) {
+                throw new CommitValidationException(
+                        "Paimon KEY_DYNAMIC concurrent snapshot contains a primary key written by this query: "
+                                + "expected " + expected + ", actual " + actual);
+            }
+            return true;
+        }
+        catch (CommitValidationException e) {
+            throw e;
+        }
+        catch (Exception e) {
+            throw new CommitValidationException(
+                    "Paimon KEY_DYNAMIC commit validation failed under the Paimon commit lock", e);
+        }
     }
 
     private static IllegalStateException snapshotChanged(@Nullable Long expected, @Nullable Long actual, String phase)

@@ -8807,6 +8807,7 @@ public class PaimonMetadataTableModeTest
                 new Class<?>[] {FileStoreTable.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "newBatchWriteBuilder" -> batchWriteBuilder;
+                    case "bucketMode" -> BucketMode.HASH_FIXED;
                     case "copyWithLatestSchema", "copy", "copyWithoutTimeTravel" -> proxy;
                     case "toString" -> "latest-failing-truncate-testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
