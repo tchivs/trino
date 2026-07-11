@@ -31,6 +31,7 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerNodes;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism;
 import static io.trino.spi.connector.ConnectorBucketNodeMap.createBucketNodeMap;
 import static java.util.Objects.requireNonNull;
 
@@ -79,9 +80,10 @@ public class PaimonNodePartitioningProvider
         if (paimonPartitioningHandle.isSingleNode()) {
             return (page, position) -> 0;
         }
-        if (bucketMode(paimonPartitioningHandle.getOriginalSchema()) == BucketMode.HASH_DYNAMIC) {
+        TableSchema schema = paimonPartitioningHandle.getOriginalSchema();
+        if (bucketMode(schema) == BucketMode.HASH_DYNAMIC) {
             int assignerCount = paimonPartitioningHandle.dynamicBucketAssignerParallelism()
-                    .orElse(workerCount);
+                    .orElseGet(() -> dynamicBucketAssignerParallelism(new CoreOptions(schema.options()), workerCount));
             return new DynamicBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, assignerCount);
         }
         return new FixedBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, workerCount);

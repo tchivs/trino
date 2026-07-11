@@ -303,6 +303,54 @@ public class TrinoPartitioningHandleTest
     }
 
     @Test
+    public void testDynamicBucketShuffleFunctionUsesConfiguredAssignerCountWithoutPlannedHandle()
+            throws Exception
+    {
+        TableSchema schema = dynamicBucketSchema(Map.of(
+                CoreOptions.DYNAMIC_BUCKET_ASSIGNER_PARALLELISM.key(), "2"));
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(
+                InstantiationUtil.serializeObject(schema));
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(
+                new TestingNodeManager(List.of(
+                        node("node-a", "127.0.0.1"),
+                        node("node-b", "127.0.0.2"),
+                        node("node-c", "127.0.0.3"))));
+
+        assertThat(provider.getBucketNodeMapping(null, null, handle))
+                .get()
+                .extracting(mapping -> mapping.getBucketCount())
+                .isEqualTo(2);
+
+        BucketFunction bucketFunction = provider.getBucketFunction(null, null, handle, List.of(BIGINT, BIGINT), 3);
+        RowPartitionKeyExtractor extractor = new RowPartitionKeyExtractor(schema);
+        for (long partitionValue = 1; partitionValue < 100; partitionValue++) {
+            for (long id = 1; id < 100; id++) {
+                Page page = new Page(
+                        1,
+                        writeNativeValue(BIGINT, partitionValue),
+                        writeNativeValue(BIGINT, id));
+                PaimonRow row = new PaimonRow(page, 0, RowKind.INSERT, List.of(BIGINT, BIGINT),
+                        List.of(DataTypes.BIGINT(), DataTypes.BIGINT()));
+                int expected = BucketAssigner.computeAssigner(
+                        extractor.partition(row).hashCode(),
+                        extractor.trimmedPrimaryKey(row).hashCode(),
+                        2,
+                        2);
+                int previousRouting = BucketAssigner.computeAssigner(
+                        extractor.partition(row).hashCode(),
+                        extractor.trimmedPrimaryKey(row).hashCode(),
+                        3,
+                        3);
+                if (expected != previousRouting) {
+                    assertThat(bucketFunction.getBucket(page, 0)).isEqualTo(expected);
+                    return;
+                }
+            }
+        }
+        fail("test data did not exercise configured dynamic-bucket routing");
+    }
+
+    @Test
     public void testDynamicBucketPartitioningProviderRejectsPlannedAssignerMappingWithoutEnoughWorkers()
             throws Exception
     {
