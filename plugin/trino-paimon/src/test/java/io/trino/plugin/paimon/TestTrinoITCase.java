@@ -68,6 +68,7 @@ import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.api.parallel.Isolated;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -1227,6 +1228,108 @@ public class TestTrinoITCase
 
         assertThat(sql("SELECT * FROM paimon.default.hash_dynamic_mutations ORDER BY id"))
                 .isEqualTo("[[1, one-updated, 11], [4, four, 40]]");
+    }
+
+    @Test
+    public void testHashDynamicWriterOwnershipAcrossInitialBuckets()
+            throws IOException
+    {
+        String initialOneTable = "hash_dynamic_initial_one_" + UUID.randomUUID().toString().replace('-', '_');
+        String initialTwoTable = "hash_dynamic_initial_two_" + UUID.randomUUID().toString().replace('-', '_');
+        String initialOneName = "paimon.default." + initialOneTable;
+        String initialTwoName = "paimon.default." + initialTwoTable;
+
+        try {
+            sql("CREATE TABLE " + initialOneName + " ("
+                    + "id integer, name varchar, score integer) WITH ("
+                    + "primary_key = ARRAY['id'], bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2', "
+                    + "dynamic_bucket_initial_buckets = '1')");
+            sql("INSERT INTO " + initialOneName + " VALUES "
+                    + "(1, 'one', 10), (2, 'two', 20), (3, 'three', 30), (4, 'four', 40)");
+            assertThat(sql("SELECT id, name, score FROM " + initialOneName + " ORDER BY id"))
+                    .isEqualTo("[[1, one, 10], [2, two, 20], [3, three, 30], [4, four, 40]]");
+
+            Session overwriteSession = Session.builder(getSession())
+                    .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR, "overwrite")
+                    .build();
+            getQueryRunner().execute(overwriteSession,
+                    "INSERT INTO " + initialOneName + " VALUES (10, 'ten', 100), (11, 'eleven', 110)");
+            assertThat(sql("SELECT id, name, score FROM " + initialOneName + " ORDER BY id"))
+                    .isEqualTo("[[10, ten, 100], [11, eleven, 110]]");
+
+            sql("UPDATE " + initialOneName + " SET name = 'ten-updated', score = 101 WHERE id = 10");
+            assertThat(sql("SELECT id, name, score FROM " + initialOneName + " ORDER BY id"))
+                    .isEqualTo("[[10, ten-updated, 101], [11, eleven, 110]]");
+            sql("DELETE FROM " + initialOneName + " WHERE id = 11");
+            assertThat(sql("SELECT id, name, score FROM " + initialOneName + " ORDER BY id"))
+                    .isEqualTo("[[10, ten-updated, 101]]");
+            sql("MERGE INTO " + initialOneName + " t "
+                    + "USING (VALUES (10, 'ten-final', 102), (12, 'twelve', 120)) "
+                    + "AS s(id, name, score) ON (t.id = s.id) "
+                    + "WHEN MATCHED THEN UPDATE SET name = s.name, score = s.score "
+                    + "WHEN NOT MATCHED THEN INSERT (id, name, score) VALUES (s.id, s.name, s.score)");
+            assertThat(sql("SELECT id, name, score FROM " + initialOneName + " ORDER BY id"))
+                    .isEqualTo("[[10, ten-final, 102], [12, twelve, 120]]");
+            assertPaimonTableHasCommittedFiles(initialOneTable);
+
+            sql("CREATE TABLE " + initialTwoName + " ("
+                    + "ds varchar, id integer, name varchar, score integer) WITH ("
+                    + "partitioned_by = ARRAY['ds'], primary_key = ARRAY['ds', 'id'], bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2', "
+                    + "dynamic_bucket_initial_buckets = '2')");
+            sql("INSERT INTO " + initialTwoName + " VALUES "
+                    + "('a', 1, 'a-one', 10), ('a', 2, 'a-two', 20), "
+                    + "('b', 1, 'b-one', 30), ('b', 2, 'b-two', 40)");
+            assertThat(sql("SELECT ds, id, name, score FROM " + initialTwoName + " ORDER BY ds, id"))
+                    .isEqualTo("[[a, 1, a-one, 10], [a, 2, a-two, 20], [b, 1, b-one, 30], [b, 2, b-two, 40]]");
+
+            sql("UPDATE " + initialTwoName + " SET name = 'a-one-updated', score = 11 WHERE ds = 'a' AND id = 1");
+            assertThat(sql("SELECT ds, id, name, score FROM " + initialTwoName + " ORDER BY ds, id"))
+                    .isEqualTo("[[a, 1, a-one-updated, 11], [a, 2, a-two, 20], [b, 1, b-one, 30], [b, 2, b-two, 40]]");
+            sql("DELETE FROM " + initialTwoName + " WHERE ds = 'b' AND id = 2");
+            assertThat(sql("SELECT ds, id, name, score FROM " + initialTwoName + " ORDER BY ds, id"))
+                    .isEqualTo("[[a, 1, a-one-updated, 11], [a, 2, a-two, 20], [b, 1, b-one, 30]]");
+            sql("MERGE INTO " + initialTwoName + " t "
+                    + "USING (VALUES ('a', 1, 'a-one-final', 12), ('b', 3, 'b-three', 50)) "
+                    + "AS s(ds, id, name, score) ON (t.ds = s.ds AND t.id = s.id) "
+                    + "WHEN MATCHED THEN UPDATE SET name = s.name, score = s.score "
+                    + "WHEN NOT MATCHED THEN INSERT (ds, id, name, score) VALUES (s.ds, s.id, s.name, s.score)");
+            assertThat(sql("SELECT ds, id, name, score FROM " + initialTwoName + " ORDER BY ds, id"))
+                    .isEqualTo("[[a, 1, a-one-final, 12], [a, 2, a-two, 20], [b, 1, b-one, 30], [b, 3, b-three, 50]]");
+
+            getQueryRunner().execute(overwriteSession,
+                    "INSERT INTO " + initialTwoName + " VALUES ('b', 4, 'b-four', 60)");
+            assertThat(sql("SELECT ds, id, name, score FROM " + initialTwoName + " ORDER BY ds, id"))
+                    .isEqualTo("[[a, 1, a-one-final, 12], [a, 2, a-two, 20], [b, 4, b-four, 60]]");
+            assertPaimonTableHasCommittedFiles(initialTwoTable);
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS " + initialTwoName);
+            sql("DROP TABLE IF EXISTS " + initialOneName);
+        }
+    }
+
+    private void assertPaimonTableHasCommittedFiles(String tableName)
+            throws IOException
+    {
+        java.nio.file.Path tablePath = java.nio.file.Path.of(java.net.URI.create(warehouse))
+                .resolve(DB + ".db")
+                .resolve(tableName);
+        try (var files = Files.walk(tablePath)) {
+            List<String> fileNames = files.filter(Files::isRegularFile)
+                    .map(path -> path.getFileName().toString())
+                    .toList();
+            assertThat(fileNames.stream().anyMatch(name -> name.startsWith("data-")))
+                    .as("Paimon table %s should contain a committed data file", tableName)
+                    .isTrue();
+            assertThat(fileNames.stream().anyMatch(name -> name.startsWith("index-")))
+                    .as("Paimon table %s should contain a committed index file", tableName)
+                    .isTrue();
+            assertThat(fileNames.stream().anyMatch(name -> name.startsWith("manifest-")))
+                    .as("Paimon table %s should contain a committed manifest file", tableName)
+                    .isTrue();
+        }
     }
 
     @Test
