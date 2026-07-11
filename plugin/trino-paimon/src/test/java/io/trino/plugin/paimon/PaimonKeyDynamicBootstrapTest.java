@@ -45,6 +45,25 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class PaimonKeyDynamicBootstrapTest
 {
     @Test
+    void testLocalFilesystemSupportsAtomicCommitValidation()
+            throws Exception
+    {
+        java.nio.file.Path directory = Files.createTempDirectory("paimon-key-dynamic-capability");
+        Path tablePath = new Path(directory.toUri().toString());
+        RowType rowType = new RowType(List.of(new DataField(0, "a", new IntType())));
+        new SchemaManager(LocalFileIO.create(), tablePath).createTable(new Schema(
+                rowType.getFields(),
+                Collections.emptyList(),
+                Collections.singletonList("a"),
+                Map.of("bucket", "1"),
+                ""));
+        FileStoreTable table = FileStoreTableFactory.create(LocalFileIO.create(), tablePath);
+
+        assertThatCode(() -> PaimonKeyDynamicBootstrap.validateAtomicCommitCapability(table))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void testKeyFingerprintSameKeyAndDisjointKey()
     {
         PaimonKeyDynamicBootstrap.KeyFingerprint fingerprint = PaimonKeyDynamicBootstrap.KeyFingerprint.empty();

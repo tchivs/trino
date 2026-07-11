@@ -17,6 +17,7 @@ import jakarta.annotation.Nullable;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.CommitValidationException;
+import org.apache.paimon.catalog.SnapshotCommit;
 import org.apache.paimon.crosspartition.IndexBootstrap;
 import org.apache.paimon.crosspartition.KeyPartPartitionKeyExtractor;
 import org.apache.paimon.data.BinaryRow;
@@ -91,6 +92,34 @@ final class PaimonKeyDynamicBootstrap
     private static final int MAX_SNAPSHOT_VALIDATION_RETRIES = 3;
 
     private PaimonKeyDynamicBootstrap() {}
+
+    /**
+     * Check the actual Paimon snapshot commit implementation before generating worker bootstrap
+     * files. The commit path repeats this check through the validator API because planning and
+     * commit happen at different lifecycle points.
+     */
+    static void validateAtomicCommitCapability(FileStoreTable table)
+            throws Exception
+    {
+        requireNonNull(table, "table is null");
+        SnapshotCommit snapshotCommit = table.catalogEnvironment().snapshotCommit(table.snapshotManager());
+        if (snapshotCommit == null) {
+            throw unsupportedAtomicCommit(table);
+        }
+        try (snapshotCommit) {
+            if (!snapshotCommit.supportsAtomicCommitValidation()) {
+                throw unsupportedAtomicCommit(table);
+            }
+        }
+    }
+
+    private static UnsupportedOperationException unsupportedAtomicCommit(FileStoreTable table)
+    {
+        return new UnsupportedOperationException(
+                "Paimon KEY_DYNAMIC writes require an atomic snapshot validator boundary for table "
+                        + table.name()
+                        + "; configure a Paimon catalog lock for object-store tables and use a validator-capable commit path");
+    }
 
     static Artifact open(
             FileStoreTable table,

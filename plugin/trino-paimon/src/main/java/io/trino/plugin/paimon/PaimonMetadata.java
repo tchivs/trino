@@ -387,9 +387,10 @@ public final class PaimonMetadata
         if (storeTable.bucketMode() != BucketMode.KEY_DYNAMIC) {
             return tableHandle;
         }
-        PaimonTableHandle planned = tableHandle.withKeyDynamicBootstrapSnapshot(
-                PaimonKeyDynamicBootstrap.latestSnapshot(storeTable));
         try {
+            PaimonKeyDynamicBootstrap.validateAtomicCommitCapability(storeTable);
+            PaimonTableHandle planned = tableHandle.withKeyDynamicBootstrapSnapshot(
+                    PaimonKeyDynamicBootstrap.latestSnapshot(storeTable));
             PaimonKeyDynamicBootstrap.prepare(
                     storeTable,
                     queryId,
@@ -401,11 +402,11 @@ public final class PaimonMetadata
                             storeTable,
                             PaimonKeyDynamicBootstrap.snapshotFor(planned),
                             planned.getDynamicBucketAssignerParallelism().orElseThrow()));
+            return planned;
         }
         catch (Exception e) {
             throw PaimonPageSink.wrapWriteException(e);
         }
-        return planned;
     }
 
     private PaimonTableHandle planWriteWithKeyDynamicSlot(
