@@ -452,16 +452,14 @@ public final class PaimonMetadata
         if (!keyDynamic || !(table instanceof FileStoreTable storeTable)) {
             return tableHandle;
         }
-        try {
-            if (storeTable.bucketMode() != BucketMode.KEY_DYNAMIC) {
-                return tableHandle;
-            }
-            return tableHandle.withKeyDynamicBootstrapSnapshot(PaimonKeyDynamicBootstrap.latestSnapshot(storeTable));
-        }
-        catch (UnsupportedOperationException ignored) {
-            // Some metadata-only table implementations do not expose storage snapshots.
+        if (storeTable.bucketMode() != BucketMode.KEY_DYNAMIC) {
             return tableHandle;
         }
+
+        // CTAS has just created an empty table, so there is no existing routing state to read.
+        // Pin the empty snapshot explicitly so the commit path cannot silently skip the
+        // KEY_DYNAMIC validator when a storage implementation does not expose a snapshot yet.
+        return tableHandle.withKeyDynamicBootstrapSnapshot(OptionalLong.empty());
     }
 
     private static OptionalInt dynamicBucketAssignerParallelism(Optional<ConnectorTableLayout> layout)

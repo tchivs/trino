@@ -1519,8 +1519,13 @@ public class PaimonMetadataTableModeTest
                 Map.of("bucket", "-2"));
 
         ConnectorTableLayout keyDynamicLayout = metadata.getNewTableLayout(SESSION, keyDynamicTable).orElseThrow();
-        assertThat(metadata.beginCreateTable(SESSION, keyDynamicTable, Optional.of(keyDynamicLayout),
-                RetryMode.NO_RETRIES)).isNotNull();
+        PaimonTableHandle outputHandle = (PaimonTableHandle) metadata.beginCreateTable(
+                SESSION,
+                keyDynamicTable,
+                Optional.of(keyDynamicLayout),
+                RetryMode.NO_RETRIES);
+        assertThat(outputHandle.isKeyDynamicBootstrapSnapshotPlanned()).isTrue();
+        assertThat(outputHandle.getKeyDynamicBootstrapSnapshot()).isEmpty();
         assertThat(catalog.createdSchema).isNotNull();
         assertThat(catalog.createdSchema.partitionKeys()).containsExactly("dt");
         assertThat(catalog.createdSchema.primaryKeys()).containsExactly("id");
