@@ -545,6 +545,35 @@ public class TrinoPartitioningHandleTest
         fail("test data did not exercise a dynamic-bucket.initial-buckets routing difference");
     }
 
+    @Test
+    public void testKeyDynamicShuffleUsesFullPrimaryKeyHash()
+            throws Exception
+    {
+        TableSchema schema = keyDynamicSchema(Map.of(
+                CoreOptions.DYNAMIC_BUCKET_INITIAL_BUCKETS.key(), "1",
+                CoreOptions.DYNAMIC_BUCKET_ASSIGNER_PARALLELISM.key(), "2"));
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(
+                InstantiationUtil.serializeObject(schema), false, OptionalInt.of(2));
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(new TestingNodeManager(List.of(
+                node("node-a", "127.0.0.1"),
+                node("node-b", "127.0.0.2"))));
+
+        assertThat(provider.getBucketNodeMapping(null, null, handle)).get()
+                .extracting(mapping -> mapping.getBucketCount())
+                .isEqualTo(2);
+
+        BucketFunction bucketFunction = provider.getBucketFunction(null, null, handle, List.of(BIGINT), 2);
+        Page page = new Page(1, writeNativeValue(BIGINT, 11L));
+        Page fullRowPage = new Page(
+                1,
+                writeNativeValue(BIGINT, 20260711L),
+                writeNativeValue(BIGINT, 11L));
+        PaimonRow fullRow = new PaimonRow(fullRowPage, 0, RowKind.INSERT,
+                List.of(BIGINT, BIGINT), List.of(DataTypes.BIGINT(), DataTypes.BIGINT()));
+        assertThat(bucketFunction.getBucket(page, 0))
+                .isEqualTo(Math.abs(new RowPartitionKeyExtractor(schema).trimmedPrimaryKey(fullRow).hashCode() % 2));
+    }
+
     private void testRoundTrip(PaimonPartitioningHandle expected)
     {
         String json = codec.toJson(expected);
@@ -596,6 +625,18 @@ public class TrinoPartitioningHandleTest
                         DataTypes.FIELD(1, "id", DataTypes.BIGINT())).getFields(),
                 List.of("dt"),
                 List.of("dt", "id"),
+                mergeOptions(Map.of(CoreOptions.BUCKET.key(), "-1"), options),
+                ""));
+    }
+
+    private static TableSchema keyDynamicSchema(Map<String, String> options)
+    {
+        return TableSchema.create(1, new Schema(
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "dt", DataTypes.BIGINT()),
+                        DataTypes.FIELD(1, "id", DataTypes.BIGINT())).getFields(),
+                List.of("dt"),
+                List.of("id"),
                 mergeOptions(Map.of(CoreOptions.BUCKET.key(), "-1"), options),
                 ""));
     }

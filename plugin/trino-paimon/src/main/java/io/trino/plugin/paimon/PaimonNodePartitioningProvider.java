@@ -32,6 +32,8 @@ import java.util.Optional;
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerNodes;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.keyDynamicAssignerNodes;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.keyDynamicAssignerParallelism;
 import static io.trino.spi.connector.ConnectorBucketNodeMap.createBucketNodeMap;
 import static java.util.Objects.requireNonNull;
 
@@ -66,6 +68,16 @@ public class PaimonNodePartitioningProvider
                     nodeManager,
                     new CoreOptions(schema.options()))));
         }
+        if (bucketMode(schema) == BucketMode.KEY_DYNAMIC) {
+            if (paimonPartitioningHandle.dynamicBucketAssignerParallelism().isPresent()) {
+                return Optional.of(createBucketNodeMap(dynamicBucketAssignerNodes(
+                        nodeManager,
+                        paimonPartitioningHandle.dynamicBucketAssignerParallelism().getAsInt())));
+            }
+            return Optional.of(createBucketNodeMap(keyDynamicAssignerNodes(
+                    nodeManager,
+                    new CoreOptions(schema.options()))));
+        }
         return Optional.empty();
     }
 
@@ -86,6 +98,15 @@ public class PaimonNodePartitioningProvider
                     .orElseGet(() -> dynamicBucketAssignerParallelism(new CoreOptions(schema.options()), bucketCount));
             checkArgument(assignerCount <= bucketCount,
                     "Paimon HASH_DYNAMIC assigner parallelism %s exceeds Trino bucket count %s",
+                    assignerCount,
+                    bucketCount);
+            return new DynamicBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, assignerCount);
+        }
+        if (bucketMode(schema) == BucketMode.KEY_DYNAMIC) {
+            int assignerCount = paimonPartitioningHandle.dynamicBucketAssignerParallelism()
+                    .orElseGet(() -> keyDynamicAssignerParallelism(new CoreOptions(schema.options()), bucketCount));
+            checkArgument(assignerCount <= bucketCount,
+                    "Paimon KEY_DYNAMIC assigner parallelism %s exceeds Trino bucket count %s",
                     assignerCount,
                     bucketCount);
             return new DynamicBucketTableShuffleFunction(partitionChannelTypes, paimonPartitioningHandle, assignerCount);

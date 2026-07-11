@@ -1481,9 +1481,8 @@ public class PaimonMetadataTableModeTest
                 List.of(new ColumnMetadata("id", INTEGER)),
                 Map.of("bucket", "-2"));
 
-        assertTrinoError(() -> metadata.getNewTableLayout(SESSION, keyDynamicTable),
-                NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: KEY_DYNAMIC for Paimon new table layout. Key-dynamic tables require a global key-to-bucket index, which is not implemented by this Trino connector");
+        ConnectorTableLayout keyDynamicLayout = metadata.getNewTableLayout(SESSION, keyDynamicTable).orElseThrow();
+        assertThat(keyDynamicLayout.getPartitionColumns()).containsExactly("id");
         assertTrinoError(() -> metadata.getNewTableLayout(SESSION, postponeTable),
                 NOT_SUPPORTED.toErrorCode(),
                 "Unsupported table bucket mode: POSTPONE_MODE for Paimon new table layout");
@@ -1493,7 +1492,17 @@ public class PaimonMetadataTableModeTest
     @Test
     public void testBeginCreateTableRejectsUnsupportedBucketModesBeforeCreatingTable()
     {
-        CapturingDdlCatalog catalog = new CapturingDdlCatalog();
+        org.apache.paimon.types.RowType keyDynamicRowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "dt", DataTypes.INT()),
+                DataTypes.FIELD(1, "id", DataTypes.INT()));
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(
+                BucketMode.KEY_DYNAMIC,
+                new AtomicBoolean(),
+                keyDynamicRowType,
+                keyDynamicRowType,
+                List.of("dt"),
+                List.of("id"),
+                "id"));
         PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
         ConnectorTableMetadata keyDynamicTable = new ConnectorTableMetadata(
                 new SchemaTableName("schema", "table"),
@@ -1509,17 +1518,18 @@ public class PaimonMetadataTableModeTest
                 List.of(new ColumnMetadata("id", INTEGER)),
                 Map.of("bucket", "-2"));
 
-        assertTrinoError(() -> metadata.beginCreateTable(SESSION, keyDynamicTable, Optional.empty(),
-                        RetryMode.NO_RETRIES),
-                NOT_SUPPORTED.toErrorCode(),
-                "Unsupported table bucket mode: KEY_DYNAMIC for Paimon create table. Key-dynamic tables require a global key-to-bucket index, which is not implemented by this Trino connector");
-        assertThat(catalog.createdSchema).isNull();
+        ConnectorTableLayout keyDynamicLayout = metadata.getNewTableLayout(SESSION, keyDynamicTable).orElseThrow();
+        assertThat(metadata.beginCreateTable(SESSION, keyDynamicTable, Optional.of(keyDynamicLayout),
+                RetryMode.NO_RETRIES)).isNotNull();
+        assertThat(catalog.createdSchema).isNotNull();
+        assertThat(catalog.createdSchema.partitionKeys()).containsExactly("dt");
+        assertThat(catalog.createdSchema.primaryKeys()).containsExactly("id");
 
         assertTrinoError(() -> metadata.beginCreateTable(SESSION, postponeTable, Optional.empty(),
                         RetryMode.NO_RETRIES),
                 NOT_SUPPORTED.toErrorCode(),
                 "Unsupported table bucket mode: POSTPONE_MODE for Paimon create table");
-        assertThat(catalog.createdSchema).isNull();
+        assertThat(catalog.createdSchema).isNotNull();
     }
 
     @Test

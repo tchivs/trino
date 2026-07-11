@@ -32,6 +32,7 @@ import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.disk.IOManagerImpl;
+import org.apache.paimon.lookup.rocksdb.RocksDBOptions;
 import org.apache.paimon.memory.MemoryOwner;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
@@ -97,14 +98,25 @@ public class PaimonPageSinkProviderTest
                 .doesNotThrowAnyException();
         assertThatCode(() -> PaimonPageSinkProvider.validateWriteBucketMode(fileStoreTable(BucketMode.HASH_DYNAMIC)))
                 .doesNotThrowAnyException();
+        assertThatCode(() -> PaimonPageSinkProvider.validateWriteBucketMode(fileStoreTable(BucketMode.KEY_DYNAMIC)))
+                .doesNotThrowAnyException();
         assertThatCode(() -> PaimonPageSinkProvider.validateWriteBucketMode(fileStoreTable(BucketMode.BUCKET_UNAWARE)))
                 .doesNotThrowAnyException();
     }
 
     @Test
+    public void testKeyDynamicMemoryUsageReservesIndexState()
+    {
+        FileStoreTable table = fileStoreTable(BucketMode.KEY_DYNAMIC);
+        Options options = new Options(table.options());
+        long expected = options.get(RocksDBOptions.BLOCK_CACHE_SIZE).getBytes() + table.coreOptions().writeBufferSize();
+
+        assertThat(PaimonPageSinkProvider.keyDynamicMemoryUsage(table)).isEqualTo(expected);
+    }
+
+    @Test
     public void testUnsupportedWriteBucketModesFailFast()
     {
-        assertUnsupportedWriteBucketMode(BucketMode.KEY_DYNAMIC);
         assertUnsupportedWriteBucketMode(BucketMode.POSTPONE_MODE);
     }
 
@@ -115,9 +127,10 @@ public class PaimonPageSinkProviderTest
                 .doesNotThrowAnyException();
         assertThatCode(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(BucketMode.HASH_DYNAMIC)))
                 .doesNotThrowAnyException();
+        assertThatCode(() -> PaimonPageSinkProvider.validateMergeBucketMode(fileStoreTable(BucketMode.KEY_DYNAMIC)))
+                .doesNotThrowAnyException();
 
         assertUnsupportedMergeBucketMode(BucketMode.BUCKET_UNAWARE);
-        assertUnsupportedMergeBucketMode(BucketMode.KEY_DYNAMIC);
         assertUnsupportedMergeBucketMode(BucketMode.POSTPONE_MODE);
     }
 

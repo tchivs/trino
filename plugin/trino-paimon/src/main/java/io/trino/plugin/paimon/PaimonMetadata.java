@@ -125,6 +125,8 @@ import java.util.stream.IntStream;
 
 import static io.trino.plugin.paimon.PaimonColumnHandle.TRINO_ROW_ID_NAME;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketWritePartitionColumns;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.keyDynamicAssignerParallelism;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.keyDynamicWritePartitionColumns;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_COMMIT_ERROR;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_METADATA_ERROR;
 import static io.trino.plugin.paimon.PaimonSchemaProperties.COMMENT_PROPERTY;
@@ -258,6 +260,20 @@ public record PaimonMetadata(PaimonCatalog catalog,
                             format("Failed to prepare Paimon %s for table '%s'", operation, tableName),
                             e);
                 }
+            case KEY_DYNAMIC :
+                try {
+                    return Optional.of(new ConnectorTableLayout(
+                            new PaimonPartitioningHandle(
+                                    InstantiationUtil.serializeObject(tableSchema),
+                                    false,
+                                    dynamicBucketAssignerParallelism(tableSchema)),
+                            keyDynamicWritePartitionColumns(tableSchema), false));
+                }
+                catch (IOException e) {
+                    throw new TrinoException(PAIMON_METADATA_ERROR,
+                            format("Failed to prepare Paimon %s for table '%s'", operation, tableName),
+                            e);
+                }
             case BUCKET_UNAWARE :
                 return Optional.empty();
             default :
@@ -291,21 +307,25 @@ public record PaimonMetadata(PaimonCatalog catalog,
     private OptionalInt dynamicBucketAssignerParallelism(TableSchema tableSchema)
     {
         requireNonNull(tableSchema, "tableSchema is null");
-        if (bucketMode(tableSchema) != BucketMode.HASH_DYNAMIC) {
-            return OptionalInt.empty();
-        }
-        return OptionalInt.of(PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism(
-                new CoreOptions(tableSchema.options()),
-                dynamicBucketWorkerCountSupplier.getAsInt()));
+        CoreOptions coreOptions = new CoreOptions(tableSchema.options());
+        return switch (bucketMode(tableSchema)) {
+            case HASH_DYNAMIC -> OptionalInt.of(PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism(
+                    coreOptions,
+                    dynamicBucketWorkerCountSupplier.getAsInt()));
+            case KEY_DYNAMIC -> OptionalInt.of(keyDynamicAssignerParallelism(
+                    coreOptions,
+                    dynamicBucketWorkerCountSupplier.getAsInt()));
+            default -> OptionalInt.empty();
+        };
     }
 
     private OptionalInt dynamicBucketAssignerParallelism(FileStoreTable storeTable)
     {
         requireNonNull(storeTable, "storeTable is null");
-        if (storeTable.bucketMode() != BucketMode.HASH_DYNAMIC) {
-            return OptionalInt.empty();
-        }
-        return dynamicBucketAssignerParallelism(storeTable.schema());
+        return switch (storeTable.bucketMode()) {
+            case HASH_DYNAMIC, KEY_DYNAMIC -> dynamicBucketAssignerParallelism(storeTable.schema());
+            default -> OptionalInt.empty();
+        };
     }
 
     private static OptionalInt dynamicBucketAssignerParallelism(Optional<ConnectorTableLayout> layout)
@@ -872,7 +892,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         FileStoreTable storeTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, operation);
         BucketMode bucketMode = storeTable.bucketMode();
-        if (bucketMode != BucketMode.HASH_FIXED && bucketMode != BucketMode.HASH_DYNAMIC) {
+        if (bucketMode != BucketMode.HASH_FIXED
+                && bucketMode != BucketMode.HASH_DYNAMIC
+                && bucketMode != BucketMode.KEY_DYNAMIC) {
             throw PaimonTableSupport.unsupportedBucketMode(operation, bucketMode);
         }
         PaimonTableSupport.validateRowLevelDelete(storeTable, operation);
@@ -883,7 +905,9 @@ public record PaimonMetadata(PaimonCatalog catalog,
     {
         requireNonNull(storeTable, "storeTable is null");
         BucketMode bucketMode = storeTable.bucketMode();
-        if (bucketMode != BucketMode.HASH_FIXED && bucketMode != BucketMode.HASH_DYNAMIC) {
+        if (bucketMode != BucketMode.HASH_FIXED
+                && bucketMode != BucketMode.HASH_DYNAMIC
+                && bucketMode != BucketMode.KEY_DYNAMIC) {
             throw PaimonTableSupport.unsupportedBucketMode(operation, bucketMode);
         }
         PaimonTableSupport.validateRowLevelDelete(storeTable, operation);

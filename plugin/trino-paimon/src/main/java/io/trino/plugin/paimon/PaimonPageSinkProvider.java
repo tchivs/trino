@@ -33,14 +33,19 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.crosspartition.GlobalIndexAssigner;
+import org.apache.paimon.crosspartition.IndexBootstrap;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.index.BucketAssigner;
 import org.apache.paimon.index.HashBucketAssigner;
 import org.apache.paimon.index.SimpleHashBucketAssigner;
+import org.apache.paimon.lookup.rocksdb.RocksDBOptions;
 import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.reader.RecordReader;
+import org.apache.paimon.reader.RecordReader.RecordIterator;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -65,7 +70,9 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.paimon.ClassLoaderUtils.runWithContextClassLoader;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketAssignerParallelism;
 import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.dynamicBucketNumAssigners;
+import static io.trino.plugin.paimon.PaimonDynamicBucketUtils.keyDynamicAssignerParallelism;
 import static io.trino.plugin.paimon.PaimonErrorCode.PAIMON_WRITER_DATA_ERROR;
+import static io.trino.plugin.paimon.PaimonLongUtils.saturatedAdd;
 import static java.util.Arrays.fill;
 import static java.util.Objects.requireNonNull;
 import static org.apache.paimon.utils.DefaultValueUtils.convertDefaultValue;
@@ -122,6 +129,7 @@ public class PaimonPageSinkProvider
         switch (mode) {
             case HASH_FIXED :
             case HASH_DYNAMIC :
+            case KEY_DYNAMIC :
             case BUCKET_UNAWARE :
                 break;
             default :
@@ -135,6 +143,7 @@ public class PaimonPageSinkProvider
         switch (mode) {
             case HASH_FIXED :
             case HASH_DYNAMIC :
+            case KEY_DYNAMIC :
                 break;
             default :
                 throw PaimonTableSupport.unsupportedBucketMode("merge writes", mode);
@@ -467,6 +476,28 @@ public class PaimonPageSinkProvider
                                 dynamicBucketWorkerCountSupplier.getAsInt()),
                         memoryPoolFactory, ioManager);
             }
+            if (table.bucketMode() == BucketMode.KEY_DYNAMIC) {
+                PaimonPageSink.KeyDynamicWriter keyDynamicWriter = null;
+                try {
+                    keyDynamicWriter = keyDynamicWriter(
+                            table,
+                            write,
+                            ioManager,
+                            pageSinkId,
+                            dynamicBucketAssignerParallelism,
+                            dynamicBucketWorkerCountSupplier.getAsInt());
+                    return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
+                            writeLayout.inputChannels(), writeLayout.defaultValues(), null, keyDynamicWriter,
+                            memoryPoolFactory, ioManager, keyDynamicMemoryUsage(table));
+                }
+                catch (Exception e) {
+                    RuntimeException failure = PaimonPageSink.wrapWriteException(e);
+                    if (keyDynamicWriter != null) {
+                        failure = PaimonPageSink.closeKeyDynamicWriter(keyDynamicWriter, failure);
+                    }
+                    throw failure;
+                }
+            }
             return new PaimonPageSink(write, writeLayout.columnTypes(), writeLayout.logicalTypes(),
                     writeLayout.inputChannels(), writeLayout.defaultValues(), null, memoryPoolFactory, ioManager);
         }
@@ -478,6 +509,83 @@ public class PaimonPageSinkProvider
             failure = PaimonPageSink.closeIoManager(ioManager, failure);
             throw failure;
         }
+    }
+
+    static PaimonPageSink.KeyDynamicWriter keyDynamicWriter(
+            FileStoreTable table,
+            BatchTableWrite writer,
+            IOManager ioManager,
+            ConnectorPageSinkId pageSinkId,
+            OptionalInt plannedAssignerParallelism,
+            int workerCount)
+            throws Exception
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(writer, "writer is null");
+        requireNonNull(ioManager, "ioManager is null");
+        CoreOptions coreOptions = table.coreOptions();
+        int assignerParallelism = requireNonNull(plannedAssignerParallelism, "plannedAssignerParallelism is null")
+                .orElseGet(() -> keyDynamicAssignerParallelism(coreOptions, workerCount));
+        checkArgument(workerCount > 0, "workerCount must be positive: %s", workerCount);
+        checkArgument(assignerParallelism <= workerCount,
+                "Paimon KEY_DYNAMIC assigner parallelism %s exceeds available workers %s",
+                assignerParallelism,
+                workerCount);
+        int assignId = pageSinkTaskPartitionId(pageSinkId);
+        if (assignId >= assignerParallelism) {
+            throw new IllegalStateException(
+                    "Paimon KEY_DYNAMIC writer task partition %s is outside assigner parallelism %s"
+                            .formatted(assignId, assignerParallelism));
+        }
+
+        GlobalIndexAssigner assigner = new GlobalIndexAssigner(table);
+        try {
+            PaimonPageSink.KeyDynamicWriter keyDynamicWriter = new PaimonPageSink.KeyDynamicWriter(writer, assigner);
+            assigner.open(0, ioManager, assignerParallelism, assignId, keyDynamicWriter::writeAssignedRow);
+            // IndexBootstrap's bucket filter is only the first stage of Paimon's two-stage
+            // topology. Paimon subsequently shuffles every bootstrap record by primary-key hash
+            // before it reaches the assigner. Trino has no connector-owned second shuffle, so
+            // every assigner must bootstrap the complete visible index to avoid treating a key
+            // from another bucket residue as a new key.
+            try (RecordReader<org.apache.paimon.data.InternalRow> reader =
+                    new IndexBootstrap(table).bootstrap(1, 0)) {
+                RecordIterator<org.apache.paimon.data.InternalRow> batch;
+                while ((batch = reader.readBatch()) != null) {
+                    try {
+                        org.apache.paimon.data.InternalRow row;
+                        while ((row = batch.next()) != null) {
+                            assigner.bootstrapKey(row);
+                        }
+                    }
+                    finally {
+                        batch.releaseBatch();
+                    }
+                }
+            }
+            assigner.endBoostrap(true);
+            return keyDynamicWriter;
+        }
+        catch (Exception e) {
+            try {
+                assigner.close();
+            }
+            catch (Exception closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw e;
+        }
+    }
+
+    static long keyDynamicMemoryUsage(FileStoreTable table)
+    {
+        requireNonNull(table, "table is null");
+        Options options = new Options(table.options());
+        long blockCacheSize = options.get(RocksDBOptions.BLOCK_CACHE_SIZE).getBytes();
+        // GlobalIndexAssigner owns a RocksDB block cache and two bootstrap buffers outside the
+        // normal Paimon writer memory pool. Reserve the configured cache plus one write-buffer
+        // budget so Trino does not undercount native/index memory during bootstrap.
+        return saturatedAdd(blockCacheSize, table.coreOptions().writeBufferSize(),
+                "Paimon KEY_DYNAMIC memory reservation");
     }
 
     private static void validateTrinoManagedFileFormatWriteType(FileStoreTable table)

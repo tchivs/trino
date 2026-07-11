@@ -19,6 +19,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.type.Type;
 import jakarta.annotation.Nullable;
+import org.apache.paimon.crosspartition.GlobalIndexAssigner;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Blob;
@@ -82,6 +83,9 @@ public class PaimonPageSink
     private final IOManager ioManager;
     @Nullable
     private final DynamicBucketWriter dynamicBucketWriter;
+    @Nullable
+    private final KeyDynamicWriter keyDynamicWriter;
+    private final long additionalMemoryUsage;
     private final AtomicBoolean closed = new AtomicBoolean();
     private long completedBytes;
 
@@ -120,6 +124,24 @@ public class PaimonPageSink
             int[] inputChannels, Object[] defaultValues, @Nullable DynamicBucketWriter dynamicBucketWriter,
             @Nullable MemoryPoolFactory memoryPoolFactory, @Nullable IOManager ioManager)
     {
+        this(writer, columnTypes, logicalTypes, inputChannels, defaultValues, dynamicBucketWriter, null,
+                memoryPoolFactory, ioManager);
+    }
+
+    public PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes,
+            int[] inputChannels, Object[] defaultValues, @Nullable DynamicBucketWriter dynamicBucketWriter,
+            @Nullable KeyDynamicWriter keyDynamicWriter, @Nullable MemoryPoolFactory memoryPoolFactory,
+            @Nullable IOManager ioManager)
+    {
+        this(writer, columnTypes, logicalTypes, inputChannels, defaultValues, dynamicBucketWriter,
+                keyDynamicWriter, memoryPoolFactory, ioManager, 0);
+    }
+
+    PaimonPageSink(BatchTableWrite writer, List<Type> columnTypes, List<DataType> logicalTypes,
+            int[] inputChannels, Object[] defaultValues, @Nullable DynamicBucketWriter dynamicBucketWriter,
+            @Nullable KeyDynamicWriter keyDynamicWriter, @Nullable MemoryPoolFactory memoryPoolFactory,
+            @Nullable IOManager ioManager, long additionalMemoryUsage)
+    {
         this.writer = requireNonNull(writer, "writer is null");
         this.columnTypes = copyColumnTypes(columnTypes);
         this.logicalTypes = copyLogicalTypes(logicalTypes);
@@ -141,6 +163,11 @@ public class PaimonPageSink
         this.memoryPoolFactory = memoryPoolFactory;
         this.ioManager = ioManager;
         this.dynamicBucketWriter = dynamicBucketWriter;
+        this.keyDynamicWriter = keyDynamicWriter;
+        checkArgument(additionalMemoryUsage >= 0, "additionalMemoryUsage must be non-negative: %s", additionalMemoryUsage);
+        this.additionalMemoryUsage = additionalMemoryUsage;
+        checkArgument(dynamicBucketWriter == null || keyDynamicWriter == null,
+                "dynamic bucket writers are mutually exclusive");
     }
 
     private static List<Type> copyColumnTypes(List<Type> columnTypes)
@@ -235,10 +262,8 @@ public class PaimonPageSink
     @Override
     public long getMemoryUsage()
     {
-        if (memoryPoolFactory == null) {
-            return 0;
-        }
-        return memoryPoolFactory.usedBufferSize();
+        long memoryUsage = memoryPoolFactory == null ? 0 : memoryPoolFactory.usedBufferSize();
+        return saturatedAdd(memoryUsage, additionalMemoryUsage, "additional memory usage");
     }
 
     @Override
@@ -265,11 +290,14 @@ public class PaimonPageSink
             validatePageShape(page);
             for (int i = 0; i < page.getPositionCount(); i++) {
                 InternalRow row = row(page, i, rowKind);
-                if (dynamicBucketWriter == null) {
+                if (dynamicBucketWriter == null && keyDynamicWriter == null) {
                     writer.write(row);
                 }
-                else {
+                else if (dynamicBucketWriter != null) {
                     dynamicBucketWriter.write(writer, row);
+                }
+                else {
+                    keyDynamicWriter.write(row);
                 }
             }
             completedBytes = saturatedAdd(completedBytes, page.getSizeInBytes(), "completed bytes");
@@ -362,8 +390,31 @@ public class PaimonPageSink
         if (!closed.compareAndSet(false, true)) {
             return failure;
         }
+        failure = closeKeyDynamicWriter(keyDynamicWriter, failure);
         failure = closeWriter(writer, failure);
         failure = closeIoManager(ioManager, failure);
+        return failure;
+    }
+
+    @Nullable
+    static RuntimeException closeKeyDynamicWriter(@Nullable KeyDynamicWriter keyDynamicWriter,
+            @Nullable RuntimeException failure)
+    {
+        if (keyDynamicWriter == null) {
+            return failure;
+        }
+        try {
+            keyDynamicWriter.close();
+        }
+        catch (Exception e) {
+            RuntimeException closeFailure = wrapWriterCloseException(e);
+            if (failure != null) {
+                failure.addSuppressed(closeFailure);
+            }
+            else {
+                failure = closeFailure;
+            }
+        }
         return failure;
     }
 
@@ -546,6 +597,40 @@ public class PaimonPageSink
         void prepareCommit()
         {
             bucketAssigner.prepareCommit(BatchWriteBuilder.COMMIT_IDENTIFIER);
+        }
+    }
+
+    static final class KeyDynamicWriter
+    {
+        private final BatchTableWrite writer;
+        private final GlobalIndexAssigner assigner;
+
+        KeyDynamicWriter(BatchTableWrite writer, GlobalIndexAssigner assigner)
+        {
+            this.writer = requireNonNull(writer, "writer is null");
+            this.assigner = requireNonNull(assigner, "assigner is null");
+        }
+
+        void write(InternalRow row)
+                throws Exception
+        {
+            assigner.processInput(row);
+        }
+
+        void writeAssignedRow(InternalRow row, int bucket)
+        {
+            try {
+                writer.write(row, bucket);
+            }
+            catch (Exception e) {
+                throw new RuntimeException("Failed to write a row assigned by Paimon KEY_DYNAMIC index", e);
+            }
+        }
+
+        void close()
+                throws Exception
+        {
+            assigner.close();
         }
     }
 

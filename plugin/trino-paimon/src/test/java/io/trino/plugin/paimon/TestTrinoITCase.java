@@ -1177,6 +1177,69 @@ public class TestTrinoITCase
     }
 
     @Test
+    public void testKeyDynamicCrossPartitionInsertDeleteUpdateAndMerge()
+    {
+        String tableName = "key_dynamic_mutations_" + UUID.randomUUID().toString().replace('-', '_');
+        String table = "paimon.default." + tableName;
+        try {
+            sql("CREATE TABLE " + table + " ("
+                    + "dt integer, id integer, name varchar, score integer) WITH ("
+                    + "partitioned_by = ARRAY['dt'], primary_key = ARRAY['id'], bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2', dynamic_bucket_initial_buckets = '2', "
+                    + "cross_partition_upsert_bootstrap_parallelism = '1')");
+            sql("INSERT INTO " + table + " VALUES "
+                    + "(10, 1, 'one', 10), (20, 2, 'two', 20)");
+
+            // The same primary key moves from partition 10 to partition 30. The global index
+            // must emit a delete in the old partition and exactly one new visible row.
+            sql("INSERT INTO " + table + " VALUES (30, 1, 'one-moved', 11), (20, 3, 'three', 30)");
+            assertThat(sql("SELECT dt, id, name, score FROM " + table + " ORDER BY id"))
+                    .isEqualTo("[[30, 1, one-moved, 11], [20, 2, two, 20], [20, 3, three, 30]]");
+
+            sql("DELETE FROM " + table + " WHERE id = 2");
+            sql("UPDATE " + table + " SET name = 'one-updated', score = 12 WHERE id = 1");
+            sql("MERGE INTO " + table + " t "
+                    + "USING (VALUES (40, 1, 'one-final', 13), (50, 4, 'four', 40)) "
+                    + "AS s(dt, id, name, score) ON (t.id = s.id) "
+                    + "WHEN MATCHED THEN UPDATE SET dt = s.dt, name = s.name, score = s.score "
+                    + "WHEN NOT MATCHED THEN INSERT (dt, id, name, score) VALUES (s.dt, s.id, s.name, s.score)");
+
+            assertThat(sql("SELECT dt, id, name, score FROM " + table + " ORDER BY id"))
+                    .isEqualTo("[[40, 1, one-final, 13], [20, 3, three, 30], [50, 4, four, 40]]");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
+    public void testKeyDynamicInsertOverwrite()
+    {
+        String tableName = "key_dynamic_overwrite_" + UUID.randomUUID().toString().replace('-', '_');
+        String table = "paimon.default." + tableName;
+        try {
+            sql("CREATE TABLE " + table + " ("
+                    + "dt integer, id integer, name varchar) WITH ("
+                    + "partitioned_by = ARRAY['dt'], primary_key = ARRAY['id'], bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2', dynamic_bucket_initial_buckets = '2', "
+                    + "cross_partition_upsert_bootstrap_parallelism = '1')");
+            sql("INSERT INTO " + table + " VALUES (10, 1, 'old'), (20, 2, 'stale')");
+
+            Session overwriteSession = Session.builder(getSession())
+                    .setCatalogSessionProperty(CATALOG, PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR, "overwrite")
+                    .build();
+            getQueryRunner().execute(overwriteSession,
+                    "INSERT INTO " + table + " VALUES (10, 3, 'new'), (20, 4, 'fresh')");
+
+            assertThat(sql("SELECT dt, id, name FROM " + table + " ORDER BY id"))
+                    .isEqualTo("[[10, 3, new], [20, 4, fresh]]");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
     public void testHashDynamicInsertOverwrite()
     {
         sql("CREATE TABLE paimon.default.hash_dynamic_overwrite ("

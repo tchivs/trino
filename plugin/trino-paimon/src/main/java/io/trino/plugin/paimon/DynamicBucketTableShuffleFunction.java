@@ -17,6 +17,7 @@ import io.trino.spi.Page;
 import io.trino.spi.connector.BucketFunction;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
+import jakarta.annotation.Nullable;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.codegen.CodeGenUtils;
 import org.apache.paimon.codegen.Projection;
@@ -43,7 +44,9 @@ public class DynamicBucketTableShuffleFunction
 {
     private final int assignerChannelCount;
     private final int numAssigners;
+    private final boolean keyDynamic;
     private final boolean isRowId;
+    @Nullable
     private final ThreadLocal<Projection> partitionProjectionContext;
     private final ThreadLocal<Projection> trimmedPrimaryKeyProjectionContext;
     private final List<Type> paimonRowTypes;
@@ -57,11 +60,14 @@ public class DynamicBucketTableShuffleFunction
         requireNonNull(partitioningHandle, "partitioningHandle is null");
         checkArgument(assignerCount > 0, "assignerCount must be positive: %s", assignerCount);
         TableSchema schema = partitioningHandle.getOriginalSchema();
+        this.keyDynamic = schema.crossPartitionUpdate();
         this.isRowId = partitionChannelTypes.size() == 1 && partitionChannelTypes.get(0) instanceof RowType;
         if (isRowId) {
             validateRowIdType((RowType) partitionChannelTypes.get(0), schema);
         }
-        List<String> inputFields = isRowId ? schema.primaryKeys() : dynamicBucketWritePartitionColumns(schema);
+        List<String> inputFields = isRowId
+                ? schema.primaryKeys()
+                : keyDynamic ? schema.primaryKeys() : dynamicBucketWritePartitionColumns(schema);
         if (!isRowId) {
             checkArgument(partitionChannelTypes.size() == inputFields.size(),
                     "partitionChannelTypes size (%s) must match dynamic bucket input field count (%s)",
@@ -72,29 +78,36 @@ public class DynamicBucketTableShuffleFunction
         this.paimonLogicalTypes = projectedTypes(schema, inputFields);
         verify(paimonLogicalTypes.size() == paimonRowTypes.size(), "Paimon row type metadata size mismatch");
         org.apache.paimon.types.RowType inputType = schema.projectedLogicalRowType(inputFields);
-        this.partitionProjectionContext = ThreadLocal.withInitial(() ->
-                CodeGenUtils.newProjection(inputType, projection(inputFields, schema.partitionKeys(), "partition key")));
+        this.partitionProjectionContext = keyDynamic
+                ? null
+                : ThreadLocal.withInitial(() ->
+                        CodeGenUtils.newProjection(inputType, projection(inputFields, schema.partitionKeys(), "partition key")));
         this.trimmedPrimaryKeyProjectionContext = ThreadLocal.withInitial(() ->
                 CodeGenUtils.newProjection(inputType,
-                        projection(inputFields, schema.trimmedPrimaryKeys(), "trimmed primary key")));
+                        projection(inputFields,
+                                keyDynamic ? schema.primaryKeys() : schema.trimmedPrimaryKeys(),
+                                keyDynamic ? "primary key" : "trimmed primary key")));
         this.assignerChannelCount = assignerCount;
-        this.numAssigners = dynamicBucketNumAssigners(new CoreOptions(schema.options()), assignerCount);
+        this.numAssigners = keyDynamic
+                ? assignerCount
+                : dynamicBucketNumAssigners(new CoreOptions(schema.options()), assignerCount);
     }
 
     @Override
     public int getBucket(Page page, int position)
     {
-        // HASH_DYNAMIC uses Trino's partition bucket as Paimon's assigner id. This mirrors
-        // DynamicBucketSink's shuffle by key hash before HashBucketAssignerOperator. The global
-        // index topology is for KEY_DYNAMIC and is intentionally not emulated here.
         if (isRowId) {
             page = rowIdFieldPage(page);
         }
 
         PaimonRow paimonRow = PaimonRow.fromTrustedTypeLists(page, position, RowKind.INSERT, paimonRowTypes,
                 paimonLogicalTypes);
-        BinaryRow partition = partitionProjectionContext.get().apply(paimonRow);
         BinaryRow trimmedPrimaryKey = trimmedPrimaryKeyProjectionContext.get().apply(paimonRow);
+        if (keyDynamic) {
+            // GlobalDynamicBucketSink's KeyPartRowChannelComputer hashes the full primary key.
+            return Math.abs(trimmedPrimaryKey.hashCode() % assignerChannelCount);
+        }
+        BinaryRow partition = partitionProjectionContext.get().apply(paimonRow);
         return BucketAssigner.computeAssigner(
                 partition.hashCode(),
                 trimmedPrimaryKey.hashCode(),
