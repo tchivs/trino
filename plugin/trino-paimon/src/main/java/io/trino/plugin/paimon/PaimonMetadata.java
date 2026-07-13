@@ -1696,23 +1696,25 @@ public final class PaimonMetadata
             return TableStatistics.empty();
         }
         if (statistics.isPresent()) {
-            return toTableStatistics(table, statistics.get());
+            return fallbackTableStatistics(table, toTableStatistics(table, statistics.get()));
         }
-        return fallbackTableStatistics(table);
+        return fallbackTableStatistics(table, TableStatistics.empty());
     }
 
-    private static TableStatistics fallbackTableStatistics(Table table)
+    private static TableStatistics fallbackTableStatistics(Table table, TableStatistics tableStatistics)
     {
-        if (!(table instanceof FileStoreTable fileStoreTable)) {
-            return TableStatistics.empty();
+        if (!tableStatistics.getRowCount().isUnknown() || !(table instanceof FileStoreTable fileStoreTable)) {
+            return tableStatistics;
         }
 
         try {
             OptionalLong rowCount = visibleRowCount(fileStoreTable);
             if (rowCount.isEmpty()) {
-                return TableStatistics.empty();
+                return tableStatistics;
             }
-            return TableStatistics.builder().setRowCount(Estimate.of(rowCount.getAsLong())).build();
+            TableStatistics.Builder builder = TableStatistics.builder().setRowCount(Estimate.of(rowCount.getAsLong()));
+            tableStatistics.getColumnStatistics().forEach(builder::setColumnStatistics);
+            return builder.build();
         }
         catch (TrinoException e) {
             throw e;
@@ -1722,7 +1724,7 @@ public final class PaimonMetadata
             if (mappedFailure.isPresent()) {
                 throw mappedFailure.get();
             }
-            return TableStatistics.empty();
+            return tableStatistics;
         }
     }
 

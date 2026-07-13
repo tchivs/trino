@@ -634,6 +634,29 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testTableStatisticsFallsBackWhenPaimonStatsHaveNoUsableRowCount()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+        for (Long rowCount : Arrays.asList(null, -1L)) {
+            Statistics statistics = new Statistics(7, 3, rowCount, 4096L, Map.of(
+                    "id", ColStats.newColStats(0, 2L, 1L, 5L, 0L, 8L, 8L)));
+            FileStoreTable table = statisticsFallbackFileStoreTable(
+                    rowType,
+                    List.of(testingSplit(2, OptionalLong.empty()), testingSplit(3, OptionalLong.empty())),
+                    List.of(),
+                    Optional.of(statistics));
+            PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+
+            TableStatistics tableStatistics = metadata.getTableStatistics(SESSION,
+                    new PaimonTableHandle("schema", "table", Map.of()));
+
+            assertThat(tableStatistics.getRowCount().getValue()).isEqualTo(5);
+            assertThat(tableStatistics.getColumnStatistics())
+                    .containsKey(PaimonColumnHandle.of("id", DataTypes.BIGINT()));
+        }
+    }
+
+    @Test
     public void testTableStatisticsFallbackReturnsUnknownWhenVisibleSplitRowCountIsNotExact()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
@@ -9071,6 +9094,15 @@ public class PaimonMetadataTableModeTest
             List<Split> splits,
             List<String> primaryKeys)
     {
+        return statisticsFallbackFileStoreTable(rowType, splits, primaryKeys, Optional.empty());
+    }
+
+    private static FileStoreTable statisticsFallbackFileStoreTable(
+            org.apache.paimon.types.RowType rowType,
+            List<Split> splits,
+            List<String> primaryKeys,
+            Optional<Statistics> statistics)
+    {
         ReadBuilder readBuilder = readBuilder(splits, rowType);
         return (FileStoreTable) Proxy.newProxyInstance(
                 PaimonMetadataTableModeTest.class.getClassLoader(),
@@ -9078,9 +9110,10 @@ public class PaimonMetadataTableModeTest
                 (proxy, method, args) -> switch (method.getName()) {
                     case "copy", "copyWithLatestSchema" -> proxy;
                     case "rowType" -> rowType;
-                    case "statistics" -> Optional.empty();
+                    case "statistics" -> statistics;
                     case "newReadBuilder" -> readBuilder;
                     case "primaryKeys" -> primaryKeys;
+                    case "coreOptions" -> new CoreOptions(new Options());
                     case "toString" -> "statistics-fallback-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
