@@ -33,6 +33,8 @@ public class PaimonConfig
     private String warehouse;
     private String metastore;
     private String uri;
+    private String jdbcUser;
+    private String jdbcPassword;
     private String tableType;
     private Boolean lockEnabled;
     private String lockType;
@@ -144,6 +146,31 @@ public class PaimonConfig
     public PaimonConfig setUri(String uri)
     {
         this.uri = uri;
+        return this;
+    }
+
+    public String getJdbcUser()
+    {
+        return jdbcUser;
+    }
+
+    @Config("jdbc.user")
+    public PaimonConfig setJdbcUser(String jdbcUser)
+    {
+        this.jdbcUser = jdbcUser;
+        return this;
+    }
+
+    public String getJdbcPassword()
+    {
+        return jdbcPassword;
+    }
+
+    @Config("jdbc.password")
+    @ConfigSecuritySensitive
+    public PaimonConfig setJdbcPassword(String jdbcPassword)
+    {
+        this.jdbcPassword = jdbcPassword;
         return this;
     }
 
@@ -1099,6 +1126,8 @@ public class PaimonConfig
         }
         putIfPresentTrimmed(options, "metastore", metastore);
         putIfPresent(options, "uri", uri);
+        putIfPresent(options, "jdbc.user", jdbcUser);
+        putIfPresent(options, "jdbc.password", jdbcPassword);
         putIfPresentTrimmed(options, "table.type", tableType);
         putIfPresent(options, "lock.enabled", lockEnabled);
         putIfPresentTrimmed(options, "lock.type", lockType);

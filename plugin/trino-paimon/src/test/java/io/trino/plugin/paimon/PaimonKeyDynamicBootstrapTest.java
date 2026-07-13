@@ -13,7 +13,9 @@
  */
 package io.trino.plugin.paimon;
 
+import org.apache.paimon.crosspartition.KeyPartPartitionKeyExtractor;
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.schema.Schema;
@@ -24,6 +26,7 @@ import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.InnerTableCommit;
 import org.apache.paimon.table.sink.InnerTableWrite;
+import org.apache.paimon.table.sink.RowPartitionKeyExtractor;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.RowType;
@@ -44,6 +47,32 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PaimonKeyDynamicBootstrapTest
 {
+    @Test
+    void testFullRowAndKeyPartExtractorsProduceSameTrimmedPrimaryKey()
+            throws Exception
+    {
+        java.nio.file.Path directory = Files.createTempDirectory("paimon-key-dynamic-key-layout");
+        Path tablePath = new Path(directory.toUri().toString());
+        RowType rowType = new RowType(List.of(
+                new DataField(0, "dt", new IntType()),
+                new DataField(1, "id", new IntType()),
+                new DataField(2, "value", new VarCharType())));
+        new SchemaManager(LocalFileIO.create(), tablePath).createTable(new Schema(
+                rowType.getFields(),
+                List.of("dt"),
+                List.of("id"),
+                Map.of("bucket", "-1"),
+                ""));
+        FileStoreTable table = FileStoreTableFactory.create(LocalFileIO.create(), tablePath);
+
+        BinaryRow writerKey = new RowPartitionKeyExtractor(table.schema())
+                .trimmedPrimaryKey(GenericRow.of(41, 2_000_000_001, fromString("value")));
+        BinaryRow validatorKey = new KeyPartPartitionKeyExtractor(table.schema())
+                .trimmedPrimaryKey(GenericRow.of(2_000_000_001, 41));
+
+        assertThat(writerKey).isEqualTo(validatorKey);
+    }
+
     @Test
     void testLocalFilesystemSupportsAtomicCommitValidation()
             throws Exception

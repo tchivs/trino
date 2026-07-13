@@ -60,6 +60,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -90,6 +91,9 @@ final class PaimonKeyDynamicBootstrap
     private static final int KEY_FINGERPRINT_WORDS = KEY_FINGERPRINT_BITS / Long.SIZE;
     private static final int KEY_FINGERPRINT_DIGEST_BYTES = 32;
     private static final int MAX_SNAPSHOT_VALIDATION_RETRIES = 3;
+    private static final AtomicLong VALIDATION_SCAN_BYTES = new AtomicLong();
+    private static final AtomicLong VALIDATION_SCAN_FILES = new AtomicLong();
+    private static final AtomicLong VALIDATION_SCAN_NANOS = new AtomicLong();
 
     private PaimonKeyDynamicBootstrap() {}
 
@@ -335,6 +339,7 @@ final class PaimonKeyDynamicBootstrap
             KeyFingerprint inputKeys)
             throws IOException
     {
+        long startNanos = System.nanoTime();
         long startSnapshot = start == null ? Snapshot.FIRST_SNAPSHOT_ID - 1 : start;
         Map<String, String> scanOptions = new HashMap<>();
         scanOptions.put(INCREMENTAL_BETWEEN.key(), startSnapshot + "," + end);
@@ -350,28 +355,52 @@ final class PaimonKeyDynamicBootstrap
         ReadBuilder readBuilder = scanTable.newReadBuilder().withProjection(keyAndPartitionProjection);
         DataTableScan tableScan = (DataTableScan) readBuilder.newScan();
         List<Split> splits = tableScan.withLevelFilter(level -> true).plan().splits();
+        VALIDATION_SCAN_FILES.addAndGet(splits.stream()
+                .map(DataSplit.class::cast)
+                .mapToLong(split -> split.dataFiles().size())
+                .sum());
+        VALIDATION_SCAN_BYTES.addAndGet(splits.stream()
+                .map(DataSplit.class::cast)
+                .flatMap(split -> split.dataFiles().stream())
+                .mapToLong(org.apache.paimon.io.DataFileMeta::fileSize)
+                .sum());
         TableRead read = readBuilder.newRead();
         KeyPartPartitionKeyExtractor keyExtractor = new KeyPartPartitionKeyExtractor(scanTable.schema());
-        for (Split split : splits) {
-            try (RecordReader<InternalRow> reader = read.createReader(split)) {
-                RecordIterator<InternalRow> batch;
-                while ((batch = reader.readBatch()) != null) {
-                    try {
-                        InternalRow row;
-                        while ((row = batch.next()) != null) {
-                            if (inputKeys.mightContain(keyExtractor.trimmedPrimaryKey(row))) {
-                                return true;
+        try {
+            for (Split split : splits) {
+                try (RecordReader<InternalRow> reader = read.createReader(split)) {
+                    RecordIterator<InternalRow> batch;
+                    while ((batch = reader.readBatch()) != null) {
+                        try {
+                            InternalRow row;
+                            while ((row = batch.next()) != null) {
+                                if (inputKeys.mightContain(keyExtractor.trimmedPrimaryKey(row))) {
+                                    return true;
+                                }
                             }
                         }
-                    }
-                    finally {
-                        batch.releaseBatch();
+                        finally {
+                            batch.releaseBatch();
+                        }
                     }
                 }
             }
+            return false;
         }
-        return false;
+        finally {
+            VALIDATION_SCAN_NANOS.addAndGet(System.nanoTime() - startNanos);
+        }
     }
+
+    static ValidationScanMetrics validationScanMetrics()
+    {
+        return new ValidationScanMetrics(
+                VALIDATION_SCAN_BYTES.get(),
+                VALIDATION_SCAN_FILES.get(),
+                VALIDATION_SCAN_NANOS.get());
+    }
+
+    record ValidationScanMetrics(long bytes, long files, long nanos) {}
 
     private static KeyFingerprint readKeyFingerprints(
             FileStoreTable table,

@@ -71,6 +71,8 @@ public class TestPaimonMinioSmokeTest
                         .put("warehouse", "s3://%s/%s".formatted(bucketName, WAREHOUSE_PREFIX))
                         .put("fs.hadoop.enabled", "false")
                         .put("fs.native-s3.enabled", "true")
+                        .put("lock.enabled", "true")
+                        .put("lock.type", "trino-test")
                         .put("fs.s3a.access.key", MINIO_ACCESS_KEY)
                         .put("fs.s3a.secret.key", MINIO_SECRET_KEY)
                         .put("fs.s3a.endpoint.region", MINIO_REGION)
@@ -304,6 +306,52 @@ public class TestPaimonMinioSmokeTest
         finally {
             assertUpdate("DROP TABLE IF EXISTS " + qualifiedPartitionedTable);
             assertUpdate("DROP TABLE IF EXISTS " + qualifiedUnpartitionedTable);
+            assertUpdate("DROP SCHEMA IF EXISTS " + qualifiedSchemaName);
+        }
+    }
+
+    @Test
+    public void testMinioKeyDynamicAtomicWriteSmoke()
+    {
+        String tableName = "key_dynamic_atomic_" + randomNameSuffix();
+        String qualifiedSchemaName = CATALOG + "." + SCHEMA;
+        String qualifiedTableName = qualifiedSchemaName + "." + tableName;
+
+        assertUpdate("CREATE SCHEMA " + qualifiedSchemaName);
+        try {
+            assertUpdate("CREATE TABLE " + qualifiedTableName + " ("
+                    + "dt integer, "
+                    + "id integer, "
+                    + "value varchar) WITH ("
+                    + "partitioned_by = ARRAY['dt'], "
+                    + "primary_key = ARRAY['id'], "
+                    + "bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2', "
+                    + "dynamic_bucket_initial_buckets = '2', "
+                    + "cross_partition_upsert_bootstrap_parallelism = '2')");
+
+            assertUpdate("INSERT INTO " + qualifiedTableName
+                    + " SELECT CAST(n % 16 AS INTEGER), CAST(n AS INTEGER), "
+                    + "CAST('initial-' || CAST(n AS VARCHAR) AS VARCHAR) "
+                    + "FROM UNNEST(sequence(1, 10000)) AS t(n)", 10000);
+
+            assertUpdate("INSERT INTO " + qualifiedTableName
+                    + " SELECT CAST((n + 7) % 32 AS INTEGER), CAST(n AS INTEGER), "
+                    + "CAST('updated-' || CAST(n AS VARCHAR) AS VARCHAR) "
+                    + "FROM UNNEST(sequence(1, 1000)) AS t(n)"
+                    + " UNION ALL SELECT CAST((n + 7) % 32 AS INTEGER), CAST(n AS INTEGER), "
+                    + "CAST('new-' || CAST(n AS VARCHAR) AS VARCHAR) "
+                    + "FROM UNNEST(sequence(10001, 11000)) AS t(n)", 2000);
+
+            assertQuery("SELECT count(*) FROM " + qualifiedTableName, "VALUES CAST(11000 AS BIGINT)");
+            assertQuery("SELECT count(DISTINCT id) FROM " + qualifiedTableName, "VALUES CAST(11000 AS BIGINT)");
+            assertQuery(
+                    "SELECT dt, id, value FROM " + qualifiedTableName + " WHERE id IN (1, 10001) ORDER BY id",
+                    "VALUES (CAST(8 AS INTEGER), 1, CAST('updated-1' AS VARCHAR)), "
+                            + "(CAST(24 AS INTEGER), 10001, CAST('new-10001' AS VARCHAR))");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + qualifiedTableName);
             assertUpdate("DROP SCHEMA IF EXISTS " + qualifiedSchemaName);
         }
     }

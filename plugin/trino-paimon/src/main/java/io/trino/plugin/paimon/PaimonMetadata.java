@@ -509,6 +509,22 @@ public final class PaimonMetadata
                     Collections.emptyMap()));
             Catalog sessionCatalog = catalog.forSession(session);
             Table table = tableHandle.tableWithWriteDynamicOptions(sessionCatalog);
+            if (keyDynamic) {
+                if (!(table instanceof FileStoreTable storeTable)) {
+                    throw new UnsupportedOperationException(
+                            "Paimon KEY_DYNAMIC CTAS requires a FileStoreTable with atomic snapshot validation; got "
+                                    + table.getClass().getName());
+                }
+                // Probe after creation but before returning the output handle. CTAS has no existing
+                // snapshot to bootstrap, but unsupported catalog commit paths must still fail before
+                // Trino schedules any workers for the write.
+                try {
+                    PaimonKeyDynamicBootstrap.validateAtomicCommitCapability(storeTable);
+                }
+                catch (Exception e) {
+                    throw PaimonPageSink.wrapWriteException(e);
+                }
+            }
             Map<String, DataField> createdFieldsByLowerName = createdTableFieldsByLowerName(table.rowType().getFields(),
                     tableMetadata.getTable());
             String createTableOperation = replace
@@ -3545,6 +3561,7 @@ public final class PaimonMetadata
                 keyDynamicWriteCoordinator.acquire(session.getQueryId(), fileStoreTable.name());
                 // Refresh after taking the local slot so the bootstrap snapshot and commit use one schema view.
                 fileStoreTable = latestWriteFileStoreTable(paimonTableHandle, sessionCatalog, operation);
+                PaimonKeyDynamicBootstrap.validateAtomicCommitCapability(fileStoreTable);
             }
             FileStoreTable operationTable = fileStoreTable;
             Optional<List<Map<String, String>>> validatedDeletePartitionSpecs = deletePartitionSpecs

@@ -20,7 +20,6 @@ import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.type.Type;
 import jakarta.annotation.Nullable;
 import org.apache.paimon.crosspartition.GlobalIndexAssigner;
-import org.apache.paimon.crosspartition.KeyPartPartitionKeyExtractor;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Blob;
@@ -632,7 +631,7 @@ public class PaimonPageSink
         KeyDynamicWriter(
                 BatchTableWrite writer,
                 GlobalIndexAssigner assigner,
-                @Nullable KeyPartPartitionKeyExtractor keyExtractor,
+                @Nullable RowPartitionKeyExtractor keyExtractor,
                 @Nullable PaimonKeyDynamicBootstrap.KeyFingerprintWriter keyFingerprintWriter)
         {
             this.writer = requireNonNull(writer, "writer is null");
@@ -642,7 +641,7 @@ public class PaimonPageSink
         }
 
         @Nullable
-        private final KeyPartPartitionKeyExtractor keyExtractor;
+        private final RowPartitionKeyExtractor keyExtractor;
         @Nullable
         private final PaimonKeyDynamicBootstrap.KeyFingerprintWriter keyFingerprintWriter;
 

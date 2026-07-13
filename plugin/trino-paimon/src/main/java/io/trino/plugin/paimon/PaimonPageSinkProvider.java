@@ -34,7 +34,6 @@ import io.trino.spi.type.TypeManager;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.crosspartition.GlobalIndexAssigner;
-import org.apache.paimon.crosspartition.KeyPartPartitionKeyExtractor;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.index.BucketAssigner;
@@ -573,7 +572,7 @@ public class PaimonPageSinkProvider
         PaimonKeyDynamicBootstrap.Artifact bootstrapArtifact = null;
         PaimonKeyDynamicBootstrap.KeyFingerprintWriter keyFingerprintWriter = null;
         GlobalIndexAssigner assigner = new GlobalIndexAssigner(table);
-        KeyPartPartitionKeyExtractor keyExtractor = new KeyPartPartitionKeyExtractor(table.schema());
+        RowPartitionKeyExtractor keyExtractor = new RowPartitionKeyExtractor(table.schema());
         PaimonPageSink.KeyDynamicWriter keyDynamicWriter = null;
         try {
             // A newly created CTAS table has no snapshot and therefore no existing keys to bootstrap.

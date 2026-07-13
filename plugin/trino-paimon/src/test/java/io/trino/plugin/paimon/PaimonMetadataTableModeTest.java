@@ -59,10 +59,12 @@ import io.trino.spi.type.VarbinaryType;
 import io.trino.testing.TestingConnectorSession;
 import io.trino.type.TypeDeserializer;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Database;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.catalog.PropertyChange;
+import org.apache.paimon.catalog.SnapshotCommit;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.LocalZoneTimestamp;
@@ -73,6 +75,7 @@ import org.apache.paimon.io.DataIncrement;
 import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.partition.Partition;
+import org.apache.paimon.partition.PartitionStatistics;
 import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
@@ -100,6 +103,7 @@ import org.apache.paimon.table.system.SystemTableLoader;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.SnapshotManager;
 import org.apache.paimon.view.View;
 import org.apache.paimon.view.ViewImpl;
 import org.junit.jupiter.api.Test;
@@ -8064,7 +8068,34 @@ public class PaimonMetadataTableModeTest
                         yield fileStoreTable(bucketMode, copiedWithLatestSchema, latestRowType, latestRowType,
                                 partitionKeys, primaryKeys, bucketKey, options);
                     }
+                    case "snapshotManager" -> null;
                     case "copy", "copyWithoutTimeTravel" -> proxy;
+                    case "catalogEnvironment" -> new org.apache.paimon.table.CatalogEnvironment(
+                            null, null, null, null, null, null, false, false) {
+                        @Override
+                        public SnapshotCommit snapshotCommit(SnapshotManager ignored)
+                        {
+                            return new SnapshotCommit()
+                            {
+                                @Override
+                                public boolean commit(Snapshot snapshot, String branch, List<PartitionStatistics> statistics)
+                                {
+                                    return true;
+                                }
+
+                                @Override
+                                public boolean supportsAtomicCommitValidation()
+                                {
+                                    return true;
+                                }
+
+                                @Override
+                                public void close()
+                                {
+                                }
+                            };
+                        }
+                    };
                     case "toString" -> "testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
