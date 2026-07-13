@@ -603,6 +603,59 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testTableStatisticsFallsBackToVisibleSplitRowCountWhenPaimonStatsAreMissing()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+        FileStoreTable table = statisticsFallbackFileStoreTable(
+                rowType,
+                List.of(testingSplit(2, OptionalLong.empty()), testingSplit(3, OptionalLong.empty())),
+                List.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+
+        TableStatistics tableStatistics = metadata.getTableStatistics(SESSION,
+                new PaimonTableHandle("schema", "table", Map.of()));
+
+        assertThat(tableStatistics.getRowCount().getValue()).isEqualTo(5);
+        assertThat(tableStatistics.getColumnStatistics()).isEmpty();
+    }
+
+    @Test
+    public void testTableStatisticsFallbackUsesMergedSplitRowCountForPrimaryKeyTables()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+        FileStoreTable table = statisticsFallbackFileStoreTable(
+                rowType,
+                List.of(testingSplit(100, OptionalLong.of(2)), testingSplit(100, OptionalLong.of(3))),
+                List.of("id"));
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(table), TESTING_TYPE_MANAGER);
+
+        assertThat(metadata.getTableStatistics(SESSION, new PaimonTableHandle("schema", "table", Map.of()))
+                .getRowCount().getValue()).isEqualTo(5);
+    }
+
+    @Test
+    public void testTableStatisticsFallbackReturnsUnknownWhenVisibleSplitRowCountIsNotExact()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+
+        FileStoreTable primaryKeyTable = statisticsFallbackFileStoreTable(
+                rowType,
+                List.of(testingSplit(10, OptionalLong.empty())),
+                List.of("id"));
+        PaimonMetadata primaryKeyMetadata = new PaimonMetadata(new TestingPaimonCatalog(primaryKeyTable), TESTING_TYPE_MANAGER);
+        assertThat(primaryKeyMetadata.getTableStatistics(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
+                .isEqualTo(TableStatistics.empty());
+
+        FileStoreTable invalidRowCountTable = statisticsFallbackFileStoreTable(
+                rowType,
+                List.of(testingSplit(-1, OptionalLong.empty())),
+                List.of());
+        PaimonMetadata invalidRowCountMetadata = new PaimonMetadata(new TestingPaimonCatalog(invalidRowCountTable), TESTING_TYPE_MANAGER);
+        assertThat(invalidRowCountMetadata.getTableStatistics(SESSION, new PaimonTableHandle("schema", "table", Map.of())))
+                .isEqualTo(TableStatistics.empty());
+    }
+
+    @Test
     public void testTableStatisticsPreservesMappedTrinoFailures()
     {
         org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
@@ -9009,6 +9062,26 @@ public class PaimonMetadataTableModeTest
                     case "rowType" -> rowType;
                     case "statistics" -> throw failure;
                     case "toString" -> "failing-statistics-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static FileStoreTable statisticsFallbackFileStoreTable(
+            org.apache.paimon.types.RowType rowType,
+            List<Split> splits,
+            List<String> primaryKeys)
+    {
+        ReadBuilder readBuilder = readBuilder(splits, rowType);
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy", "copyWithLatestSchema" -> proxy;
+                    case "rowType" -> rowType;
+                    case "statistics" -> Optional.empty();
+                    case "newReadBuilder" -> readBuilder;
+                    case "primaryKeys" -> primaryKeys;
+                    case "toString" -> "statistics-fallback-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

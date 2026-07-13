@@ -1695,7 +1695,59 @@ public final class PaimonMetadata
             }
             return TableStatistics.empty();
         }
-        return statistics.map(value -> toTableStatistics(table, value)).orElse(TableStatistics.empty());
+        if (statistics.isPresent()) {
+            return toTableStatistics(table, statistics.get());
+        }
+        return fallbackTableStatistics(table);
+    }
+
+    private static TableStatistics fallbackTableStatistics(Table table)
+    {
+        if (!(table instanceof FileStoreTable fileStoreTable)) {
+            return TableStatistics.empty();
+        }
+
+        try {
+            OptionalLong rowCount = visibleRowCount(fileStoreTable);
+            if (rowCount.isEmpty()) {
+                return TableStatistics.empty();
+            }
+            return TableStatistics.builder().setRowCount(Estimate.of(rowCount.getAsLong())).build();
+        }
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (RuntimeException e) {
+            Optional<TrinoException> mappedFailure = nestedTrinoException(e);
+            if (mappedFailure.isPresent()) {
+                throw mappedFailure.get();
+            }
+            return TableStatistics.empty();
+        }
+    }
+
+    private static OptionalLong visibleRowCount(FileStoreTable fileStoreTable)
+    {
+        long rowCount = 0;
+        List<Split> splits = fileStoreTable.newReadBuilder().dropStats().newScan().plan().splits();
+        for (Split split : splits) {
+            OptionalLong mergedRowCount = split.mergedRowCount();
+            long splitRowCount;
+            if (mergedRowCount.isPresent()) {
+                splitRowCount = mergedRowCount.getAsLong();
+            }
+            else if (fileStoreTable.primaryKeys().isEmpty()) {
+                splitRowCount = split.rowCount();
+            }
+            else {
+                return OptionalLong.empty();
+            }
+            if (splitRowCount < 0 || Long.MAX_VALUE - rowCount < splitRowCount) {
+                return OptionalLong.empty();
+            }
+            rowCount += splitRowCount;
+        }
+        return OptionalLong.of(rowCount);
     }
 
     private static Optional<TrinoException> nestedTrinoException(RuntimeException exception)
