@@ -24,6 +24,7 @@ JMX             <connector/jmx>
 Kafka           <connector/kafka>
 Kinesis         <connector/kinesis>
 Kudu            <connector/kudu>
+Paimon          <connector/paimon>
 Local File      <connector/localfile>
 MariaDB         <connector/mariadb>
 Memory          <connector/memory>
