@@ -128,6 +128,10 @@ key route.
 * - `s3.endpoint`, `s3.region`, `s3.path-style-access`
   - Native S3 endpoint, region, and path-style setting forwarded to Paimon.
   -
+* - `s3.access-key`, `s3.secret-key`
+  - Access credentials for S3-compatible object storage. The secret key is a
+    sensitive catalog property.
+  -
 * - `write.spill-path`
   - Local directory used by spillable Paimon writers.
   -
@@ -175,6 +179,95 @@ key route.
   - Maximum time split generation waits for dynamic filters.
   - `0s`
 :::
+
+## Table properties
+
+Use the `WITH` clause of `CREATE TABLE` or `ALTER TABLE SET PROPERTIES` to
+define Paimon option properties. The connector exposes the documented Paimon 1.5
+`CoreOptions` as string-valued properties, converting periods and hyphens in a
+Paimon option name to underscores. For example, Paimon's `file.format` and
+`merge-engine` options are `file_format` and `merge_engine` in Trino. Scan and
+other runtime-only Paimon options are not table properties; use the catalog
+session properties instead.
+
+In addition to Paimon options, the connector provides these structural table
+properties:
+
+:::{list-table} Paimon structural table properties
+:widths: 30, 20, 50
+:header-rows: 1
+
+* - Property name
+  - Type
+  - Description
+* - `primary_key`
+  - `array(varchar)`
+  - Columns that form the primary key. Omit the property for append-only
+    tables. This property is set when the table is created.
+* - `partitioned_by`
+  - `array(varchar)`
+  - Columns used to partition the table. This property is set when the table
+    is created.
+:::
+
+For example:
+
+```sql
+CREATE TABLE paimon.sales.orders (
+    order_id BIGINT,
+    order_date DATE,
+    customer_id BIGINT,
+    total_amount DECIMAL(12, 2)
+)
+WITH (
+    primary_key = ARRAY['order_id', 'order_date'],
+    partitioned_by = ARRAY['order_date'],
+    bucket = '4',
+    file_format = 'PARQUET',
+    merge_engine = 'DEDUPLICATE'
+);
+```
+
+Consult the Paimon 1.5 documentation for the valid values and semantics of
+forwarded Paimon options such as `bucket`, `file_format`, `merge_engine`,
+`changelog_producer`, and snapshot-retention settings.
+
+## Type mapping
+
+The connector maps Paimon logical types to Trino types as follows. The file
+format restrictions described below still apply when a table is read or written
+through a Trino format provider.
+
+:::{list-table} Paimon to Trino type mapping
+:widths: 45, 55
+:header-rows: 1
+
+* - Paimon type
+  - Trino type
+* - `BOOLEAN`, `TINYINT`, `SMALLINT`, `INT`, `BIGINT`, `FLOAT`, `DOUBLE`
+  - Corresponding Trino scalar type (`INT` maps to `INTEGER` and `FLOAT` to
+    `REAL`).
+* - `DECIMAL(p, s)`, `CHAR(n)`, `VARCHAR(n)`, `STRING`
+  - Corresponding `DECIMAL`, `CHAR`, or `VARCHAR` type.
+* - `BINARY`, `VARBINARY`, `BLOB`
+  - `VARBINARY`
+* - `DATE`, `TIME(p)`, `TIMESTAMP(p)`
+  - Corresponding `DATE`, `TIME(min(p, 3))`, or `TIMESTAMP(p)` type.
+* - `TIMESTAMP WITH LOCAL TIME ZONE(p)`
+  - `TIMESTAMP(p) WITH TIME ZONE`
+* - `ARRAY(T)`, `MAP(K, V)`, `ROW(...)`
+  - Corresponding Trino collection or row type.
+* - `VARIANT`
+  - `JSON`
+* - `VECTOR(T)`, `MULTISET(T)`
+  - `ARRAY(T)` and `MAP(T, INTEGER)`, respectively.
+:::
+
+When creating tables, Trino maps `INTEGER` to Paimon `INT`, `REAL` to
+`FLOAT`, unbounded `VARCHAR` to `STRING`, `VARBINARY` to `VARBINARY`, and
+`TIMESTAMP WITH TIME ZONE` to `TIMESTAMP WITH LOCAL TIME ZONE`. Trino `JSON`
+creates Paimon `VARIANT`. Paimon stores time values with millisecond precision,
+so writes of `TIME(p)` require `p` to be at most `3`.
 
 ## SQL support
 
