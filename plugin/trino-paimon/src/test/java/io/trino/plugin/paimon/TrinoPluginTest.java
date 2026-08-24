@@ -40,4 +40,27 @@ public class TrinoPluginTest
                 new TestingConnectorContext());
         assertThat(connector).isNotNull();
     }
+
+    @Test
+    void testTrinoFormatFactoriesAreRegistered()
+    {
+        // The connector must register TrinoPaimonParquetFileFormatFactory and
+        // TrinoPaimonOrcFileFormatFactory as FileFormatFactory service providers.
+        // This is a regression guard for the ServiceLoader conflict where
+        // paimon-bundle's native factories (requiring Hadoop) shadow the Trino
+        // no-Hadoop factories.
+        java.util.List<org.apache.paimon.format.FileFormatFactory> factories = java.util.ServiceLoader.load(
+                org.apache.paimon.format.FileFormatFactory.class,
+                PaimonPlugin.class.getClassLoader())
+                .stream()
+                .map(java.util.ServiceLoader.Provider::get)
+                .toList();
+        assertThat(factories).isNotEmpty();
+        assertThat(factories.stream().map(f -> f.getClass().getName()))
+                .as("Trino no-Hadoop parquet factory must be discoverable")
+                .contains("io.trino.plugin.paimon.format.TrinoPaimonParquetFileFormatFactory");
+        assertThat(factories.stream().map(f -> f.getClass().getName()))
+                .as("Trino no-Hadoop orc factory must be discoverable")
+                .contains("io.trino.plugin.paimon.format.TrinoPaimonOrcFileFormatFactory");
+    }
 }

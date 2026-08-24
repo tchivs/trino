@@ -314,6 +314,44 @@
                 </configuration>
             </plugin>
 
+            <!--
+                The paimon-bundle jar ships its own META-INF/services/org.apache.paimon.format.FileFormatFactory
+                that registers Paimon's native ParquetFileFormatFactory and OrcFileFormatFactory.
+                These native factories require Hadoop Configuration, which is absent from the
+                no-Hadoop connector build. When both Paimon's native factories and the Trino
+                no-Hadoop format factories (registered in this jar) are discoverable via ServiceLoader,
+                Paimon's FormatFactoryUtil may pick the native one first, causing writes to fail
+                with ClassNotFoundException: org.apache.hadoop.conf.Configuration.
+
+                This step strips the native parquet/orc factory entries from the paimon-bundle
+                jar in the local Maven repository so only the Trino no-Hadoop factories are
+                discovered at runtime. The bundle is a SNAPSHOT artifact owned by this build
+                graph, so in-place modification is safe.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>strip-paimon-native-format-factories</id>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <phase>prepare-package</phase>
+                        <configuration>
+                            <target>
+                                <property name="bundle.jar" value="${org.apache.paimon:paimon-bundle:jar}" />
+                                <tempfile deleteonexit="true" destdir="${project.build.directory}" prefix="paimon-bundle-strip-" property="bundle.tmp.dir" />
+                                <unzip dest="${bundle.tmp.dir}" src="${bundle.jar}" />
+                                <replaceregexp file="${bundle.tmp.dir}/META-INF/services/org.apache.paimon.format.FileFormatFactory" flags="gm" match="org\.apache\.paimon\.format\.(parquet\.ParquetFileFormatFactory|orc\.OrcFileFormatFactory)\n?" replace="" />
+                                <zip basedir="${bundle.tmp.dir}" destfile="${bundle.jar}" />
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>

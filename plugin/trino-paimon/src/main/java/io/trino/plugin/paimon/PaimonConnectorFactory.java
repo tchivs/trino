@@ -55,6 +55,7 @@ import javax.xml.parsers.DocumentBuilderFactory;
 
 import java.io.File;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -187,6 +188,7 @@ public class PaimonConnectorFactory
         }
 
         ClassLoader classLoader = PaimonConnectorFactory.class.getClassLoader();
+        verifyTrinoFormatFactories(classLoader);
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             Bootstrap app = new Bootstrap(new EventModule(), new MBeanModule(),
                     new ConnectorObjectNameGeneratorModule("org.apache.paimon.trino", "paimon.trino"), new JsonModule(),
@@ -225,6 +227,43 @@ public class PaimonConnectorFactory
                     new ClassLoaderSafeConnectorPageSinkProvider(paimonPageSinkProvider, classLoader),
                     paimonNodePartitioningProvider, paimonMetadata.catalog(), paimonSchemaProperties, paimonTableOptions,
                     paimonSessionProperties, connectorTableFunctions, functionProvider);
+        }
+    }
+
+    /**
+     * Verify that the Trino no-Hadoop format factories are discoverable for the
+     * parquet and orc identifiers. If Paimon's native factories (which require
+     * Hadoop) are also registered and would shadow the Trino factories, log a
+     * warning so the deployment issue is visible before write failures occur.
+     */
+    private static void verifyTrinoFormatFactories(ClassLoader classLoader)
+    {
+        try {
+            List<org.apache.paimon.format.FileFormatFactory> factories =
+                    org.apache.paimon.factories.FactoryUtil.discoverFactories(
+                            classLoader, org.apache.paimon.format.FileFormatFactory.class);
+            java.util.Set<String> trinoIdentifiers = java.util.Set.of("parquet", "orc");
+            java.util.Set<String> found = new java.util.HashSet<>();
+            for (org.apache.paimon.format.FileFormatFactory factory : factories) {
+                found.add(factory.identifier());
+                if (trinoIdentifiers.contains(factory.identifier())
+                        && !factory.getClass().getName().startsWith("io.trino.")) {
+                    LOG.warn("Native Paimon %s format factory %s is registered alongside "
+                            + "the Trino no-Hadoop factory. The paimon-bundle jar may not have "
+                            + "been stripped of conflicting service entries. Writes may fail "
+                            + "with ClassNotFoundException for Hadoop Configuration.",
+                            factory.identifier(), factory.getClass().getName());
+                }
+            }
+            for (String expected : trinoIdentifiers) {
+                if (!found.contains(expected)) {
+                    LOG.warn("Trino no-Hadoop format factory for '%s' was not discovered. "
+                            + "Check that the connector jar is on the plugin classpath.", expected);
+                }
+            }
+        }
+        catch (Throwable t) {
+            LOG.warn(t, "Failed to verify Trino format factory registration");
         }
     }
 

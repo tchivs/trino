@@ -327,3 +327,19 @@ estimate.
 optimizer. Paimon column NDV statistics are required for join-output estimates;
 without them Trino intentionally keeps the join output unknown while retaining
 the exact input cardinalities.
+
+## Known limitations
+
+- `ALTER SCHEMA RENAME` is not supported. Paimon's catalog API does not expose a
+  schema rename primitive.
+- `COMMENT ON COLUMN view.col` is not supported. Paimon `ViewChange` does not
+  expose view column comment mutations.
+- Query retries are not supported.
+- Partial partition `DELETE` is not supported. Only complete partition deletes
+  are optimized through Paimon `truncatePartitions`.
+- Materialized views are not supported.
+- Role-based access control (`GRANT`/`REVOKE`) is not implemented.
+- Views are only supported on JDBC and Hive catalogs, not on the filesystem
+  catalog.
+- The connector does not support compatibility with `trinodb/trino:master`.
+  Porting to Trino master is tracked separately.
