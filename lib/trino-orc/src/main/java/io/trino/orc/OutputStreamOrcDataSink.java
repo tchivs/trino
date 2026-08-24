@@ -41,6 +41,11 @@ public class OutputStreamOrcDataSink
         return new OutputStreamOrcDataSink(outputFile.create(memoryContext), memoryContext);
     }
 
+    public static OutputStreamOrcDataSink create(OutputStream outputStream)
+    {
+        return new OutputStreamOrcDataSink(outputStream, newSimpleAggregatedMemoryContext());
+    }
+
     private OutputStreamOrcDataSink(OutputStream outputStream, AggregatedMemoryContext memoryContext)
     {
         this.output = new OutputStreamSliceOutput(requireNonNull(outputStream, "outputStream is null"));

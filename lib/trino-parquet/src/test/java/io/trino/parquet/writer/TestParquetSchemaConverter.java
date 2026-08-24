@@ -33,6 +33,7 @@ import static io.trino.spi.type.RowType.field;
 import static io.trino.spi.type.RowType.rowType;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
 import static io.trino.spi.type.TimestampType.createTimestampType;
+import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.StructuralTestUtil.arrayType;
 import static io.trino.testing.StructuralTestUtil.mapType;
@@ -44,6 +45,7 @@ import static org.apache.parquet.schema.Type.Repetition.OPTIONAL;
 import static org.apache.parquet.schema.Type.Repetition.REPEATED;
 import static org.apache.parquet.schema.Type.Repetition.REQUIRED;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestParquetSchemaConverter
 {
@@ -210,5 +212,40 @@ public class TestParquetSchemaConverter
                     .isEqualTo(PrimitiveType.PrimitiveTypeName.INT96);
             assertThat(primitiveType.getLogicalTypeAnnotation()).isNull();
         }
+    }
+
+    @Test
+    public void testTimestampWithTimeZone()
+    {
+        for (int precision = 0; precision <= 6; precision++) {
+            ParquetSchemaConverter schemaConverter = new ParquetSchemaConverter(
+                    ImmutableList.of(createTimestampWithTimeZoneType(precision)),
+                    ImmutableList.of("test"),
+                    false,
+                    false);
+            PrimitiveType primitiveType = schemaConverter.getMessageType().getType(0).asPrimitiveType();
+            assertThat(primitiveType.getPrimitiveTypeName())
+                    .isEqualTo(PrimitiveType.PrimitiveTypeName.INT64);
+            if (precision <= 3) {
+                assertThat(primitiveType.getLogicalTypeAnnotation())
+                        .isEqualTo(timestampType(true, MILLIS));
+            }
+            else {
+                assertThat(primitiveType.getLogicalTypeAnnotation())
+                        .isEqualTo(timestampType(true, MICROS));
+            }
+        }
+    }
+
+    @Test
+    public void testHighPrecisionTimestampWithTimeZoneIsUnsupported()
+    {
+        assertThatThrownBy(() -> new ParquetSchemaConverter(
+                ImmutableList.of(createTimestampWithTimeZoneType(7)),
+                ImmutableList.of("test"),
+                false,
+                false))
+                .isInstanceOfSatisfying(RuntimeException.class, exception -> assertThat(exception)
+                        .hasMessageContaining("Unsupported primitive type: timestamp(7) with time zone"));
     }
 }
