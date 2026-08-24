@@ -185,7 +185,7 @@ public class PaimonConnectorFactory
                     readHadoopXml(hadoopXml, config, protectedConfigKeys);
                 }
                 catch (Exception e) {
-                    LOG.warn("Failed to read hadoop xml file " + hadoopXml + ", skipping this file.", e);
+                    LOG.warn("Failed to read hadoop xml file {}, skipping this file.", hadoopXml, e);
                 }
             }
         }

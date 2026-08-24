@@ -13,7 +13,9 @@
  */
 package io.trino.plugin.paimon.format;
 
+import io.trino.plugin.paimon.PaimonErrorCode;
 import io.trino.plugin.paimon.PaimonTypeUtils;
+import io.trino.spi.TrinoException;
 import io.trino.spi.type.Type;
 import org.apache.paimon.format.FileFormat;
 import org.apache.paimon.format.FileFormatFactory.FormatContext;
@@ -85,7 +87,9 @@ public class TrinoPaimonFileFormat
         if (PARQUET.equals(formatIdentifier) || ORC.equals(formatIdentifier)) {
             return;
         }
-        throw new UnsupportedOperationException("Unsupported Trino Paimon file format: " + formatIdentifier);
+        throw new TrinoException(PaimonErrorCode.PAIMON_BAD_DATA,
+                "Unsupported Trino Paimon file format: " + formatIdentifier
+                + ". Only Parquet and ORC are supported with the Trino no-Hadoop format provider.");
     }
 
     @Override
