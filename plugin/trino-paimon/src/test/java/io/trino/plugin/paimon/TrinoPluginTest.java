@@ -17,11 +17,14 @@ import io.trino.spi.Plugin;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
+import org.apache.paimon.format.FileFormatFactory;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.List;
 import java.util.Map;
+import java.util.ServiceLoader;
 import java.util.UUID;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
@@ -49,11 +52,11 @@ public class TrinoPluginTest
         // This is a regression guard for the ServiceLoader conflict where
         // paimon-bundle's native factories (requiring Hadoop) shadow the Trino
         // no-Hadoop factories.
-        java.util.List<org.apache.paimon.format.FileFormatFactory> factories = java.util.ServiceLoader.load(
-                org.apache.paimon.format.FileFormatFactory.class,
+        List<FileFormatFactory> factories = ServiceLoader.load(
+                FileFormatFactory.class,
                 PaimonPlugin.class.getClassLoader())
                 .stream()
-                .map(java.util.ServiceLoader.Provider::get)
+                .map(ServiceLoader.Provider::get)
                 .toList();
         assertThat(factories).isNotEmpty();
         assertThat(factories.stream().map(f -> f.getClass().getName()))

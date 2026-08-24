@@ -44,6 +44,8 @@ import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.function.FunctionProvider;
 import io.trino.spi.function.table.ConnectorTableFunction;
 import io.trino.spi.type.TypeManager;
+import org.apache.paimon.factories.FactoryUtil;
+import org.apache.paimon.format.FileFormatFactory;
 import org.apache.paimon.utils.StringUtils;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -55,6 +57,7 @@ import javax.xml.parsers.DocumentBuilderFactory;
 
 import java.io.File;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -239,12 +242,10 @@ public class PaimonConnectorFactory
     private static void verifyTrinoFormatFactories(ClassLoader classLoader)
     {
         try {
-            List<org.apache.paimon.format.FileFormatFactory> factories =
-                    org.apache.paimon.factories.FactoryUtil.discoverFactories(
-                            classLoader, org.apache.paimon.format.FileFormatFactory.class);
-            java.util.Set<String> trinoIdentifiers = java.util.Set.of("parquet", "orc");
-            java.util.Set<String> found = new java.util.HashSet<>();
-            for (org.apache.paimon.format.FileFormatFactory factory : factories) {
+            List<FileFormatFactory> factories = FactoryUtil.discoverFactories(classLoader, FileFormatFactory.class);
+            Set<String> trinoIdentifiers = Set.of("parquet", "orc");
+            Set<String> found = new HashSet<>();
+            for (FileFormatFactory factory : factories) {
                 found.add(factory.identifier());
                 if (trinoIdentifiers.contains(factory.identifier())
                         && !factory.getClass().getName().startsWith("io.trino.")) {
