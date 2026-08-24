@@ -44,6 +44,7 @@ public class PaimonModule
         binder.bind(PaimonSplitManager.class).in(SINGLETON);
         binder.bind(PaimonPageSourceProvider.class).in(SINGLETON);
         binder.bind(PaimonPageSinkProvider.class).in(SINGLETON);
+        binder.bind(PaimonConnectorStats.class).in(SINGLETON);
         binder.bind(PaimonNodePartitioningProvider.class).in(SINGLETON);
         binder.bind(PaimonSessionProperties.class).in(SINGLETON);
         binder.bind(PaimonSchemaProperties.class).in(SINGLETON);

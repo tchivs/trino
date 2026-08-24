@@ -402,7 +402,7 @@ public class PaimonPageSinkProviderTest
                                 CoreOptions.BUCKET.key(), "-1",
                                 CoreOptions.DYNAMIC_BUCKET_ASSIGNER_PARALLELISM.key(), "4"),
                         List.of("id"),
-                        BucketMode.HASH_DYNAMIC)), TestingIoManager::new, () -> 4);
+                        BucketMode.HASH_DYNAMIC)), TestingIoManager::new, () -> 4, new PaimonConnectorStats());
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of())
                 .withWriteColumns(List.of(PaimonColumnHandle.of("id", DataTypes.INT())))
                 .withDynamicBucketAssignerParallelism(OptionalInt.of(4));

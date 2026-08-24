@@ -55,11 +55,13 @@ public class PaimonSplitManager
         ConnectorSplitManager
 {
     private final PaimonCatalog paimonCatalog;
+    private final PaimonConnectorStats stats;
 
     @Inject
-    public PaimonSplitManager(PaimonMetadataFactory paimonMetadataFactory)
+    public PaimonSplitManager(PaimonMetadataFactory paimonMetadataFactory, PaimonConnectorStats stats)
     {
         this.paimonCatalog = requireNonNull(paimonMetadataFactory, "trinoMetadataFactory is null").create().catalog();
+        this.stats = requireNonNull(stats, "stats is null");
     }
 
     @PreDestroy
@@ -167,12 +169,18 @@ public class PaimonSplitManager
                     !tableHandle.usesHistoricalReadSchema(session));
             ReadBuilder readBuilder = table.newReadBuilder();
             pushPredicate(readBuilder, table, predicate);
-            pushLimit(readBuilder, tableHandle);
             List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
-
             double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
-            PaimonSplitSource splitSource = new PaimonSplitSource(toPaimonSplits(splits, minimumSplitWeight), tableHandle.getLimit());
+            List<PaimonSplit> paimonSplits = toPaimonSplits(splits, minimumSplitWeight);
+            PaimonSplitSource splitSource = new PaimonSplitSource(paimonSplits, tableHandle.getLimit());
 
+            stats.incrementSplitCount();
+            for (PaimonSplit paimonSplit : paimonSplits) {
+                stats.addSplitRowCount(paimonSplit.rowCount() != null ? paimonSplit.rowCount() : 0);
+                if (paimonSplit.weight() != null) {
+                    stats.addSplitWeight(paimonSplit.weight());
+                }
+            }
             return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
         }
         catch (UnsupportedOperationException e) {

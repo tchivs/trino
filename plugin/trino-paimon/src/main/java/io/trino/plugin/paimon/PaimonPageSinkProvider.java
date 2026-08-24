@@ -83,21 +83,22 @@ public class PaimonPageSinkProvider
     private final TypeManager typeManager;
     private final Supplier<IOManager> ioManagerFactory;
     private final IntSupplier dynamicBucketWorkerCountSupplier;
+    private final PaimonConnectorStats stats;
 
     @Inject
     public PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, PaimonConfig config,
-            NodeManager nodeManager)
+            NodeManager nodeManager, PaimonConnectorStats stats)
     {
         this(paimonMetadataFactory, () -> createIoManager(requireNonNull(config, "config is null")
                 .getWriteSpillPath()), () -> requireNonNull(nodeManager, "nodeManager is null")
                         .getRequiredWorkerNodes()
-                        .size());
+                        .size(), stats);
     }
 
     public PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, PaimonConfig config)
     {
         this(paimonMetadataFactory, () -> createIoManager(requireNonNull(config, "config is null")
-                .getWriteSpillPath()), () -> 1);
+                .getWriteSpillPath()), () -> 1, new PaimonConnectorStats());
     }
 
     public PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory)
@@ -107,11 +108,11 @@ public class PaimonPageSinkProvider
 
     PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, Supplier<IOManager> ioManagerFactory)
     {
-        this(paimonMetadataFactory, ioManagerFactory, () -> 1);
+        this(paimonMetadataFactory, ioManagerFactory, () -> 1, new PaimonConnectorStats());
     }
 
     PaimonPageSinkProvider(PaimonMetadataFactory paimonMetadataFactory, Supplier<IOManager> ioManagerFactory,
-            IntSupplier dynamicBucketWorkerCountSupplier)
+            IntSupplier dynamicBucketWorkerCountSupplier, PaimonConnectorStats stats)
     {
         requireNonNull(paimonMetadataFactory, "trinoMetadataFactory is null");
         this.paimonCatalog = paimonMetadataFactory.create().catalog();
@@ -119,6 +120,7 @@ public class PaimonPageSinkProvider
         this.ioManagerFactory = requireNonNull(ioManagerFactory, "ioManagerFactory is null");
         this.dynamicBucketWorkerCountSupplier = requireNonNull(dynamicBucketWorkerCountSupplier,
                 "dynamicBucketWorkerCountSupplier is null");
+        this.stats = requireNonNull(stats, "stats is null");
     }
 
     static void validateWriteBucketMode(Table table)

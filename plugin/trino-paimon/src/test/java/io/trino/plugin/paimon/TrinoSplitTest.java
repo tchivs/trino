@@ -1045,7 +1045,7 @@ public class TrinoSplitTest
                 }
                 return super.create();
             }
-        });
+        }, new PaimonConnectorStats());
     }
 
     private static Table table()

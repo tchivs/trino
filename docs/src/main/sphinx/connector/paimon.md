@@ -79,6 +79,40 @@ snapshot-commit path. Catalog and lock combinations that cannot provide that
 atomic validation fail before the write instead of accepting a potentially stale
 key route.
 
+### Hive metastore catalog
+
+For a Hive metastore catalog, configure the Hive metastore URI or Hive
+configuration directory. The connector reads and writes data through Trino's
+native file system (no Hadoop required), while table metadata is managed by
+the Hive metastore.
+
+```properties
+connector.name=paimon
+warehouse=hdfs://nameservice/warehouse
+metastore=hive
+uri=thrift://hive-metastore.example.net:9083
+
+fs.native-s3.enabled=true
+fs.hadoop.enabled=false
+s3.region=us-east-1
+```
+
+Alternatively, provide the Hive configuration directory:
+
+```properties
+connector.name=paimon
+metastore=hive
+hive-conf-dir=/etc/hive/conf
+```
+
+When using a Hive metastore catalog, set `hive.config.resources` to the
+paths of Hadoop XML configuration files (such as `core-site.xml` and
+`hdfs-site.xml`) so that the Paimon catalog can resolve HDFS paths:
+
+```properties
+hive.config.resources=/etc/hadoop/conf/core-site.xml,/etc/hadoop/conf/hdfs-site.xml
+```
+
 ## Configuration properties
 
 :::{list-table} Paimon configuration properties
