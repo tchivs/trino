@@ -35,6 +35,7 @@ import org.apache.paimon.types.RowType;
 import javax.annotation.Nullable;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -186,9 +187,20 @@ public class TrinoPaimonFileFormat
         requireNonNull(formatIdentifier, "formatIdentifier is null");
         requireNonNull(type, "type is null");
         validateSupportedWriteType(type);
-        if (ORC.equals(formatIdentifier) && containsTimeType(type)) {
+        if (containsTimeType(type)) {
+            // Trino writes TIME with microsecond precision while Paimon stores milliseconds, and the Trino Parquet
+            // writer rejects TIME outright, so neither managed writer can store a Paimon TIME column the way Paimon
+            // reads it back. Paimon's own format factories are not visible through the Trino no-Hadoop provider.
             throw new UnsupportedOperationException(
-                    "Trino Paimon ORC writer does not support Paimon TIME columns; use Parquet or Paimon's native writer for ORC TIME data");
+                    ("Trino Paimon %s writer cannot write Paimon TIME columns: Trino stores TIME with microsecond "
+                            + "precision, which Paimon cannot read back as millisecond TIME. Write TIME data with a "
+                            + "Paimon writer from another engine instead.")
+                                    .formatted(formatIdentifier.toUpperCase(Locale.ROOT)));
+        }
+        if (PARQUET.equals(formatIdentifier) && containsNanosecondTimestampWithTimeZone(type)) {
+            throw new UnsupportedOperationException(
+                    "Trino Paimon PARQUET writer cannot write Paimon TIMESTAMP(9) WITH LOCAL TIME ZONE columns; "
+                            + "use file_format 'ORC' for those columns");
         }
     }
 
@@ -200,6 +212,27 @@ public class TrinoPaimonFileFormat
             throw new UnsupportedOperationException(
                     "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes");
         }
+    }
+
+    private static boolean containsNanosecondTimestampWithTimeZone(RowType rowType)
+    {
+        return rowType.getFields().stream()
+                .map(field -> field.type())
+                .anyMatch(TrinoPaimonFileFormat::containsNanosecondTimestampWithTimeZone);
+    }
+
+    private static boolean containsNanosecondTimestampWithTimeZone(DataType type)
+    {
+        requireNonNull(type, "type is null");
+        if (type.getTypeRoot() == DataTypeRoot.TIMESTAMP_WITH_LOCAL_TIME_ZONE
+                && DataTypeChecks.getPrecision(type) > 6) {
+            return true;
+        }
+        return switch (type.getTypeRoot()) {
+            case ARRAY, MAP, MULTISET, ROW, VECTOR -> DataTypeChecks.getNestedTypes(type).stream()
+                    .anyMatch(TrinoPaimonFileFormat::containsNanosecondTimestampWithTimeZone);
+            default -> false;
+        };
     }
 
     private static boolean containsTimeType(RowType rowType)

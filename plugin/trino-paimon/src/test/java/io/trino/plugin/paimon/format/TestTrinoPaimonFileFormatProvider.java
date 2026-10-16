@@ -366,7 +366,7 @@ public class TestTrinoPaimonFileFormatProvider
     }
 
     @Test
-    void testTrinoOrcWriterRejectsTimeColumnsWithActionableMessage()
+    void testTrinoWriterRejectsTimeColumnsWithActionableMessage()
     {
         RowType rowType = DataTypes.ROW(
                 DataTypes.FIELD(0, "id", DataTypes.INT()),
@@ -374,11 +374,40 @@ public class TestTrinoPaimonFileFormatProvider
                 DataTypes.FIELD(2, "nested", DataTypes.ROW(
                         DataTypes.FIELD(3, "nested_time", DataTypes.TIME(3)))));
 
-        assertThatThrownBy(() -> FileFormat.fromIdentifier("orc", trinoFormatOptions()).createWriterFactory(rowType))
+        // Trino stores TIME with microsecond precision while Paimon stores milliseconds, and the Trino Parquet
+        // writer rejects TIME, so neither managed writer can store the column the way Paimon reads it back
+        for (String format : List.of("orc", "parquet")) {
+            assertThatThrownBy(() -> FileFormat.fromIdentifier(format, trinoFormatOptions()).createWriterFactory(rowType))
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessageContaining("Trino Paimon %s writer cannot write Paimon TIME columns".formatted(format.toUpperCase(java.util.Locale.ROOT)))
+                    .hasMessageContaining("Write TIME data with a Paimon writer from another engine instead.");
+        }
+    }
+
+    @Test
+    void testTrinoParquetWriterRejectsNanosecondTimestampWithTimeZone()
+    {
+        RowType rowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "event_time", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(9)),
+                DataTypes.FIELD(2, "nested", DataTypes.ARRAY(DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(9))),
+                DataTypes.FIELD(3, "micros", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6)));
+
+        assertThatThrownBy(() -> FileFormat.fromIdentifier("parquet", trinoFormatOptions()).createWriterFactory(rowType))
                 .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessage("Trino Paimon ORC writer does not support Paimon TIME columns; use Parquet or Paimon's native writer for ORC TIME data");
-        assertThatCode(() -> FileFormat.fromIdentifier("parquet", trinoFormatOptions()).createWriterFactory(rowType))
+                .hasMessage("Trino Paimon PARQUET writer cannot write Paimon TIMESTAMP(9) WITH LOCAL TIME ZONE columns; "
+                        + "use file_format 'ORC' for those columns");
+
+        // The ORC writer stores nanosecond timestamps with time zone
+        assertThatCode(() -> FileFormat.fromIdentifier("orc", trinoFormatOptions()).createWriterFactory(rowType))
                 .doesNotThrowAnyException();
+
+        // A microsecond timestamp with time zone is supported by both writers
+        RowType microsRowType = DataTypes.ROW(DataTypes.FIELD(0, "event_time", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6)));
+        for (String format : List.of("orc", "parquet")) {
+            assertThatCode(() -> FileFormat.fromIdentifier(format, trinoFormatOptions()).createWriterFactory(microsRowType))
+                    .doesNotThrowAnyException();
+        }
     }
 
     @Test

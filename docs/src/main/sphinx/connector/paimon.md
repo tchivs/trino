@@ -427,8 +427,31 @@ require an atomic-capable Paimon catalog lock as described in the JDBC example.
 
 The connector reads and writes Paimon Parquet and ORC tables through Trino's
 format providers. Paimon `BLOB`, `VARIANT`, `VECTOR`, and `MULTISET` values are
-not supported by these providers. ORC writes with Paimon `TIME` columns are
-rejected; use Parquet or Paimon's native writer for such tables.
+not supported by these providers.
+
+The Trino format providers do not implement every Paimon type in every format,
+and the Paimon format providers are not visible from Trino, so a table with an
+unsupported column cannot be written from Trino at all. The connector rejects
+such a write when it creates the sink, before any row is read:
+
+| Column type | `file_format` `ORC` | `file_format` `PARQUET` |
+| ----------- | ------------------- | ----------------------- |
+| `TIME` | rejected | rejected |
+| `TIMESTAMP(9) WITH LOCAL TIME ZONE` | supported | rejected |
+| `TIMESTAMP(9)` | supported, except pre-epoch | supported |
+| `BLOB`, `VARIANT`, `VECTOR`, `MULTISET` | rejected | rejected |
+
+Notes:
+
+- `TIME` is rejected in both formats because Trino stores `TIME` with
+  microsecond precision while Paimon stores milliseconds, and the Trino Parquet
+  writer does not support `TIME` at all. Write `TIME` data with a Paimon writer
+  from another engine.
+- `TIMESTAMP(9) WITH LOCAL TIME ZONE` needs the ORC format, because Trino's
+  Parquet writer does not support nanosecond timestamps with time zone.
+- The ORC format rejects a pre-epoch timestamp that carries a fractional
+  second, for example `1969-12-31 23:59:59.999`, for every timestamp precision.
+  See `Known limitations`_.
 
 ## Statistics and performance
 

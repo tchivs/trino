@@ -88,7 +88,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class PaimonPageSinkProviderTest
 {
     private static final String UNSUPPORTED_FORMAT_WRITE_MESSAGE = "Trino Paimon file format does not support Paimon BLOB, VARIANT, VECTOR, or MULTISET writes";
-    private static final String ORC_TIME_WRITE_MESSAGE = "Trino Paimon ORC writer does not support Paimon TIME columns; use Parquet or Paimon's native writer for ORC TIME data";
+    private static final String TIME_WRITE_MESSAGE = "Trino Paimon ORC writer cannot write Paimon TIME columns: Trino stores TIME with microsecond precision, which Paimon cannot read back as millisecond TIME. Write TIME data with a Paimon writer from another engine instead.";
     private static final RowType ID_ROW_TYPE = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT()));
 
     @Test
@@ -1571,9 +1571,9 @@ public class PaimonPageSinkProviderTest
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
                     assertThat(exception).hasMessage("Paimon write uses features which are not supported by the Trino connector: "
-                            + ORC_TIME_WRITE_MESSAGE);
+                            + TIME_WRITE_MESSAGE);
                     assertThat(exception.getCause()).isInstanceOf(UnsupportedOperationException.class)
-                            .hasMessage(ORC_TIME_WRITE_MESSAGE);
+                            .hasMessage(TIME_WRITE_MESSAGE);
                 });
         assertThat(writeIoManager.get()).isNull();
     }

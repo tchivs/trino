@@ -1726,6 +1726,63 @@ public class TestTrinoITCase
     }
 
     @Test
+    public void testTrinoManagedWriterRejectsTypesItCannotStore()
+    {
+        // Trino writes TIME with microsecond precision and the Parquet writer rejects TIME, so neither managed
+        // writer stores a Paimon TIME column the way Paimon reads it back
+        for (String format : List.of("ORC", "PARQUET")) {
+            String timeTable = "managed_time_" + format.toLowerCase(java.util.Locale.ROOT);
+            sql("CREATE TABLE paimon.default." + timeTable + " (id integer, t time(3)) WITH (file_format = '" + format + "')");
+            try {
+                assertQueryFails(
+                        "INSERT INTO paimon.default." + timeTable + " VALUES (1, TIME '03:04:05.123')",
+                        ".*Trino Paimon " + format + " writer cannot write Paimon TIME columns.*");
+            }
+            finally {
+                sql("DROP TABLE IF EXISTS paimon.default." + timeTable);
+            }
+        }
+
+        // The Parquet writer cannot store nanosecond timestamps with time zone, the ORC writer can
+        String parquetTable = "managed_parquet_tz9";
+        sql("CREATE TABLE paimon.default." + parquetTable
+                + " (id integer, ts timestamp(9) with time zone) WITH (file_format = 'PARQUET')");
+        try {
+            assertQueryFails(
+                    "INSERT INTO paimon.default." + parquetTable + " VALUES (1, TIMESTAMP '2020-01-02 03:04:05.123456789 UTC')",
+                    ".*Trino Paimon PARQUET writer cannot write Paimon TIMESTAMP\\(9\\) WITH LOCAL TIME ZONE columns; use file_format 'ORC' for those columns.*");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS paimon.default." + parquetTable);
+        }
+
+        // The check covers nested columns as well, and runs when the sink is created rather than at DDL time
+        String nestedTable = "managed_parquet_nested_tz9";
+        sql("CREATE TABLE paimon.default." + nestedTable
+                + " (id integer, ts array(timestamp(9) with time zone)) WITH (file_format = 'PARQUET')");
+        try {
+            assertQueryFails(
+                    "INSERT INTO paimon.default." + nestedTable + " VALUES (1, ARRAY[TIMESTAMP '2020-01-02 03:04:05.123456789 UTC'])",
+                    ".*Trino Paimon PARQUET writer cannot write Paimon TIMESTAMP\\(9\\) WITH LOCAL TIME ZONE columns.*");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS paimon.default." + nestedTable);
+        }
+
+        String orcTable = "managed_orc_tz9";
+        sql("CREATE TABLE paimon.default." + orcTable
+                + " (id integer, ts timestamp(9) with time zone) WITH (file_format = 'ORC')");
+        try {
+            sql("INSERT INTO paimon.default." + orcTable + " VALUES (1, TIMESTAMP '2020-01-02 03:04:05.123456789 UTC')");
+            assertThat(sql("SELECT count(*) FROM paimon.default." + orcTable
+                    + " WHERE ts = TIMESTAMP '2020-01-02 03:04:05.123456789 UTC'")).isEqualTo("[[1]]");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS paimon.default." + orcTable);
+        }
+    }
+
+    @Test
     public void testAllType()
     {
         assertThat(sql("SELECT boolean, tinyint, smallint,int,bigint,float,double,char,varchar, date,timestamp_0, "
@@ -1747,7 +1804,7 @@ public class TestTrinoITCase
                 .isThrownBy(() -> sql("INSERT INTO paimon.default.time_orc_values VALUES "
                         + "(1, TIME '00:00:12.345'), "
                         + "(2, TIME '23:59:59.999')"))
-                .withMessageContaining("Trino Paimon ORC writer does not support Paimon TIME columns");
+                .withMessageContaining("Trino Paimon ORC writer cannot write Paimon TIME columns");
     }
 
     @Test
