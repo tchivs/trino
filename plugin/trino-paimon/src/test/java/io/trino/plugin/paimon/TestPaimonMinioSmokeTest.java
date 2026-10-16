@@ -390,4 +390,55 @@ public class TestPaimonMinioSmokeTest
             assertUpdate("DROP SCHEMA IF EXISTS " + qualifiedSchemaName);
         }
     }
+
+    @Test
+    public void testMinioTimestampPrecisionSmoke()
+    {
+        String parquetTable = "timestamp_precision_" + randomNameSuffix();
+        String orcTable = "timestamp_precision_orc_" + randomNameSuffix();
+        String qualifiedSchemaName = CATALOG + "." + SCHEMA;
+        String qualifiedParquetTable = qualifiedSchemaName + "." + parquetTable;
+        String qualifiedOrcTable = qualifiedSchemaName + "." + orcTable;
+
+        assertUpdate("CREATE SCHEMA " + qualifiedSchemaName);
+        try {
+            assertUpdate("CREATE TABLE " + qualifiedParquetTable + " ("
+                    + "id integer, "
+                    + "ts timestamp(9))");
+            assertUpdate("INSERT INTO " + qualifiedParquetTable + " VALUES "
+                    + "(1, TIMESTAMP '1969-12-31 23:59:59.999999999'), "
+                    + "(2, TIMESTAMP '1970-01-01 00:00:00.000000001'), "
+                    + "(3, TIMESTAMP '2026-10-17 12:34:56.123456789')", 3);
+
+            assertQuery(
+                    "SELECT id, ts FROM " + qualifiedParquetTable + " ORDER BY id",
+                    "VALUES "
+                            + "(1, TIMESTAMP '1969-12-31 23:59:59.999999999'), "
+                            + "(2, TIMESTAMP '1970-01-01 00:00:00.000000001'), "
+                            + "(3, TIMESTAMP '2026-10-17 12:34:56.123456789')");
+            assertQuery(
+                    "SELECT id FROM " + qualifiedParquetTable + " WHERE ts = TIMESTAMP '2026-10-17 12:34:56.123456789'",
+                    "VALUES 3");
+
+            assertUpdate("CREATE TABLE " + qualifiedOrcTable + " ("
+                    + "id integer, "
+                    + "ts timestamp(9)) WITH (file_format = 'ORC')");
+            assertUpdate("INSERT INTO " + qualifiedOrcTable + " VALUES "
+                    + "(1, TIMESTAMP '2026-10-17 12:34:56.123456789')", 1);
+            assertQuery(
+                    "SELECT id, ts FROM " + qualifiedOrcTable,
+                    "VALUES (1, TIMESTAMP '2026-10-17 12:34:56.123456789')");
+
+            // Trino's ORC writer stores pre-epoch timestamps with a fractional second one second off
+            assertQueryFails(
+                    "INSERT INTO " + qualifiedOrcTable + " VALUES (2, TIMESTAMP '1969-12-31 23:59:59.999')",
+                    ".*Trino Paimon ORC writer cannot write pre-epoch timestamp value 1969-12-31T23:59:59.999 with sub-second precision.*");
+            assertQuery("SELECT count(*) FROM " + qualifiedOrcTable, "VALUES CAST(1 AS BIGINT)");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + qualifiedParquetTable);
+            assertUpdate("DROP TABLE IF EXISTS " + qualifiedOrcTable);
+            assertUpdate("DROP SCHEMA IF EXISTS " + qualifiedSchemaName);
+        }
+    }
 }
