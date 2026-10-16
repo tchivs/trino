@@ -310,6 +310,34 @@ public class TrinoSplitTest
     }
 
     @Test
+    public void testSplitStatsCountSplitsWithUnknownRowCountWithoutZeroSamples()
+    {
+        PaimonConnectorStats stats = new PaimonConnectorStats();
+
+        PaimonSplitManager.recordSplitStats(stats, List.of(
+                PaimonSplit.fromSplit(new TestingSplit(100), 0.1),
+                PaimonSplit.fromSplit(new TestingSplit(200), 0.2)));
+
+        assertThat(stats.getSplitCount()).isEqualTo(2);
+        assertThat(stats.getSplitRowCount().getAllTime().getCount()).isEqualTo(2);
+
+        // A split deserialized from a payload without a row count, such as one written by an older connector
+        PaimonSplit knownRowCount = PaimonSplit.fromSplit(new TestingSplit(100), 0.1);
+        PaimonSplit unknownRowCount = new PaimonSplit(knownRowCount.splitSerialized(), 0.2);
+        assertThat(unknownRowCount.rowCount()).isNull();
+
+        PaimonConnectorStats partialStats = new PaimonConnectorStats();
+        PaimonSplitManager.recordSplitStats(partialStats, List.of(knownRowCount, unknownRowCount));
+
+        // A split with an unknown row count is still a split, but it must not add a zero sample
+        assertThat(partialStats.getSplitCount()).isEqualTo(2);
+        assertThat(partialStats.getSplitWeight().getAllTime().getCount()).isEqualTo(2);
+        assertThat(partialStats.getSplitRowCount().getAllTime().getCount()).isEqualTo(1);
+        assertThat(partialStats.getSplitRowCount().getAllTime().getMax()).isEqualTo(100);
+        assertThat(partialStats.getSplitRowCount().getAllTime().getMin()).isEqualTo(100);
+    }
+
+    @Test
     public void testSplitPlanningPushesLimitToPaimonReadBuilder()
             throws Exception
     {

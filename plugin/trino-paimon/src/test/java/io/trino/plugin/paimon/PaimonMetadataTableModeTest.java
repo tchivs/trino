@@ -93,6 +93,7 @@ import org.apache.paimon.table.Table;
 import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.table.iceberg.IcebergTable;
 import org.apache.paimon.table.lance.LanceTable;
+import org.apache.paimon.table.object.ObjectTable;
 import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessageImpl;
@@ -109,6 +110,7 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.SnapshotManager;
 import org.apache.paimon.view.View;
 import org.apache.paimon.view.ViewImpl;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -2692,10 +2694,36 @@ public class PaimonMetadataTableModeTest
         PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table",
                 Map.of(CoreOptions.SCAN_VERSION.key(), "1"));
 
-        assertThatThrownBy(() -> metadata.getTableStatistics(SESSION, tableHandle))
+        assertUnsupportedHistoricalRead(() -> metadata.getTableStatistics(SESSION, tableHandle),
+                "Paimon table 'schema.table' of type");
+
+        // Listing the metadata of a selected version resolves the same handle and must be fenced as well
+        assertUnsupportedHistoricalRead(() -> metadata.getTableMetadata(SESSION, tableHandle));
+
+        // Object tables (a remote path, for example) also accept the scan options and ignore them
+        PaimonMetadata objectTableMetadata = new PaimonMetadata(
+                new TestingPaimonCatalog(proxyTable(ObjectTable.class)), TESTING_TYPE_MANAGER);
+        assertUnsupportedHistoricalRead(() -> objectTableMetadata.getTableMetadata(SESSION, tableHandle));
+
+        // A session level selector reaches the same fences as an explicit table option
+        ConnectorSession historicalSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(PaimonSessionProperties.SCAN_SNAPSHOT, 1L))
+                .build();
+        assertUnsupportedHistoricalRead(() -> metadata.getTableMetadata(historicalSession,
+                new PaimonTableHandle("schema", "table", Map.of())));
+        assertUnsupportedHistoricalRead(() -> metadata.getTableStatistics(historicalSession,
+                new PaimonTableHandle("schema", "table", Map.of())));
+    }
+
+    private static void assertUnsupportedHistoricalRead(ThrowingCallable call, String... expectedMessageParts)
+    {
+        assertThatThrownBy(call)
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
-                    assertThat(exception).hasMessageContaining("Paimon table 'schema.table' of type");
+                    for (String expectedMessagePart : expectedMessageParts) {
+                        assertThat(exception).hasMessageContaining(expectedMessagePart);
+                    }
                     assertThat(exception).hasMessageContaining("does not support version, tag or timestamp selectors");
                 });
     }

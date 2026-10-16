@@ -17,17 +17,21 @@ import io.airlift.units.Duration;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.source.RawFile;
 import org.apache.paimon.table.source.ReadBuilder;
+import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.TableScan;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
@@ -36,6 +40,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -969,6 +974,106 @@ public class DynamicFilteringTrinoSplitSourceTest
                     case "toString" -> "blocking-dynamic-planning-read-builder";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    @Test
+    public void testDynamicPlanningPushesLimitForBoundedReadsOnly()
+            throws Exception
+    {
+        List<Integer> pushedLimits = new ArrayList<>();
+        RecordingCatalog catalog = new RecordingCatalog(false, recordingTable(pushedLimits, List.of(new TestingSplit(100), new TestingSplit(100))));
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .build();
+
+        // A bounded read pushes the LIMIT into Paimon and stops split delivery on the physical row count
+        PaimonTableHandle limited = new PaimonTableHandle("schema", "table", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.of(5));
+        DynamicFilteringTrinoSplitSource bounded = new DynamicFilteringTrinoSplitSource(
+                limited, session, catalog, dynamicFilter(TupleDomain.all(), false), new Duration(0, MILLISECONDS));
+
+        assertThat(bounded.getNextBatch(10).get().getSplits()).hasSize(1);
+        assertThat(pushedLimits).containsExactly(5);
+
+        // An incremental read leaves the LIMIT to Trino, so both physical splits are delivered
+        pushedLimits.clear();
+        PaimonTableHandle incremental = new PaimonTableHandle("schema", "table",
+                Map.of(CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.of(5));
+        DynamicFilteringTrinoSplitSource unbounded = new DynamicFilteringTrinoSplitSource(
+                incremental, session, catalog, dynamicFilter(TupleDomain.all(), false), new Duration(0, MILLISECONDS));
+
+        assertThat(unbounded.getNextBatch(10).get().getSplits()).hasSize(2);
+        assertThat(pushedLimits).isEmpty();
+    }
+
+    private static Table recordingTable(List<Integer> pushedLimits, List<Split> splits)
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+        return (Table) Proxy.newProxyInstance(
+                DynamicFilteringTrinoSplitSourceTest.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
+                    case "newReadBuilder" -> recordingReadBuilder(rowType, pushedLimits, splits);
+                    case "rowType" -> rowType;
+                    case "toString" -> "testing-recording-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder recordingReadBuilder(org.apache.paimon.types.RowType rowType, List<Integer> pushedLimits, List<Split> splits)
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                DynamicFilteringTrinoSplitSourceTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "dropStats", "withFilter" -> proxy;
+                    case "withLimit" -> {
+                        pushedLimits.add((Integer) args[0]);
+                        yield proxy;
+                    }
+                    case "newScan" -> tableScan(splits);
+                    case "readType" -> rowType;
+                    case "tableName" -> "testing-table";
+                    case "toString" -> "testing-recording-read-builder";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static TableScan tableScan(List<Split> splits)
+    {
+        return (TableScan) Proxy.newProxyInstance(
+                DynamicFilteringTrinoSplitSourceTest.class.getClassLoader(),
+                new Class<?>[] {TableScan.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "plan" -> new TableScan.Plan()
+                    {
+                        @Override
+                        public List<org.apache.paimon.table.source.Split> splits()
+                        {
+                            return splits;
+                        }
+                    };
+                    case "toString" -> "testing-recording-table-scan";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private record TestingSplit(long rowCount)
+            implements org.apache.paimon.table.source.Split
+    {
+        @Override
+        public OptionalLong mergedRowCount()
+        {
+            return OptionalLong.empty();
+        }
+
+        @Override
+        public Optional<List<RawFile>> convertToRawFiles()
+        {
+            return Optional.empty();
+        }
     }
 
     private static TableScan tableScan()
