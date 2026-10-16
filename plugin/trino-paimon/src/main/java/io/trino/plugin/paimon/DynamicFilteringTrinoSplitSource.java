@@ -48,7 +48,7 @@ public class DynamicFilteringTrinoSplitSource
     private final PaimonCatalog paimonCatalog;
     private final DynamicFilter dynamicFilter;
     private final Duration dynamicFilteringWaitTimeout;
-    private final long dynamicFilteringWaitStartMillis;
+    private final long dynamicFilteringWaitStartNanos;
 
     @GuardedBy("this")
     private boolean splitsPlanningStarted;
@@ -70,7 +70,7 @@ public class DynamicFilteringTrinoSplitSource
         this.paimonCatalog = requireNonNull(paimonCatalog, "paimonCatalog is null");
         this.dynamicFilter = requireNonNull(dynamicFilter, "dynamicFilter is null");
         this.dynamicFilteringWaitTimeout = requireNonNull(dynamicFilteringWaitTimeout, "dynamicFilteringWaitTimeout is null");
-        this.dynamicFilteringWaitStartMillis = System.currentTimeMillis();
+        this.dynamicFilteringWaitStartNanos = System.nanoTime();
     }
 
     @Override
@@ -175,11 +175,13 @@ public class DynamicFilteringTrinoSplitSource
 
     private long computeTimeLeft()
     {
-        if (dynamicFilteringWaitTimeout.toMillis() == 0) {
+        long timeoutMillis = dynamicFilteringWaitTimeout.toMillis();
+        if (timeoutMillis == 0) {
             return 0;
         }
-        long elapsedMillis = System.currentTimeMillis() - dynamicFilteringWaitStartMillis;
-        return Math.max(0, dynamicFilteringWaitTimeout.toMillis() - elapsedMillis);
+        // Deadline stays monotonic: a wall-clock jump must not extend the configured maximum wait.
+        long elapsedMillis = (System.nanoTime() - dynamicFilteringWaitStartNanos) / 1_000_000;
+        return Math.max(0, timeoutMillis - elapsedMillis);
     }
 
     private PaimonSplitSource planSplits()

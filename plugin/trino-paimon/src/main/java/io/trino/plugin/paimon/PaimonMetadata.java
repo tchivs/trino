@@ -502,9 +502,11 @@ public final class PaimonMetadata
         if (keyDynamic) {
             keyDynamicWriteCoordinator.acquire(session.getQueryId(), tableMetadata.getTable().toString());
         }
+        boolean tableCreated = false;
         try {
             createTable(session, tableMetadata,
                     replace ? io.trino.spi.connector.SaveMode.REPLACE : io.trino.spi.connector.SaveMode.FAIL);
+            tableCreated = true;
             PaimonTableHandle tableHandle = requireNonNull(getTableHandle(session, tableMetadata.getTable(),
                     Collections.emptyMap()));
             Catalog sessionCatalog = catalog.forSession(session);
@@ -545,7 +547,29 @@ public final class PaimonMetadata
         }
         catch (RuntimeException e) {
             keyDynamicWriteCoordinator.releaseQuery(session.getQueryId());
+            if (tableCreated && !replace) {
+                dropTableCreatedByFailedCreateTableAsSelect(session, tableMetadata.getTable(), e);
+            }
             throw e;
+        }
+    }
+
+    /**
+     * Best-effort removal of the table created by a CREATE TABLE AS SELECT that failed before the write
+     * started. Without it the failed query leaves an empty table behind and the retry fails with
+     * TABLE_ALREADY_EXISTS. CREATE OR REPLACE has already replaced the previous table, so that table is left
+     * in place and only the original failure is rethrown.
+     */
+    private void dropTableCreatedByFailedCreateTableAsSelect(
+            ConnectorSession session,
+            SchemaTableName table,
+            RuntimeException failure)
+    {
+        try {
+            catalog.forSession(session).dropTable(Identifier.create(table.getSchemaName(), table.getTableName()), false);
+        }
+        catch (Exception dropFailure) {
+            failure.addSuppressed(dropFailure);
         }
     }
 

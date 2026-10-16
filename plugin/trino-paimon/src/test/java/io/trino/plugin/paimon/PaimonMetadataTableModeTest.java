@@ -1618,6 +1618,38 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testBeginCreateTableDropsTableWhenSetupFailsAfterCreation()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(Optional.empty());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata table = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("id", INTEGER)));
+
+        assertThatThrownBy(() -> metadata.beginCreateTable(SESSION, table, Optional.empty(), RetryMode.NO_RETRIES))
+                .isInstanceOf(NullPointerException.class);
+        assertThat(catalog.createdSchema).isNotNull();
+        assertThat(catalog.droppedTable).isEqualTo(new Identifier("schema", "table"));
+        assertThat(catalog.droppedTableIgnoreIfNotExists).isFalse();
+    }
+
+    @Test
+    public void testBeginCreateTableKeepsReplacedTableWhenSetupFailsAfterReplacement()
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(Optional.empty());
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata table = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("id", INTEGER)));
+
+        assertThatThrownBy(() -> metadata.beginCreateTable(SESSION, table, Optional.empty(), RetryMode.NO_RETRIES, true))
+                .isInstanceOf(NullPointerException.class);
+        assertThat(catalog.replacedTable).isEqualTo(new Identifier("schema", "table"));
+        // CREATE OR REPLACE already removed the previous table, so the replacement is never dropped
+        assertThat(catalog.droppedTable).isNull();
+    }
+
+    @Test
     public void testInsertLayoutIgnoresSessionScanSnapshotAndHandleStartupSelections()
     {
         AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
@@ -9451,6 +9483,7 @@ public class PaimonMetadataTableModeTest
         private boolean renamedIgnoreIfNotExists;
         private Identifier droppedTable;
         private boolean droppedTableIgnoreIfNotExists;
+        private Identifier replacedTable;
 
         private CapturingDdlCatalog()
         {
@@ -9543,6 +9576,13 @@ public class PaimonMetadataTableModeTest
             renamedFromTable = fromTable;
             renamedToTable = toTable;
             renamedIgnoreIfNotExists = ignoreIfNotExists;
+        }
+
+        @Override
+        public void replaceTable(Identifier identifier, Schema newSchema, boolean ignoreIfNotExists)
+        {
+            assertThat(identifier.getFullName()).isEqualTo("schema.table");
+            this.replacedTable = identifier;
         }
 
         @Override

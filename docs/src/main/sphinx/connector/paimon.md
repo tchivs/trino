@@ -153,8 +153,9 @@ hive.config.resources=/etc/hadoop/conf/core-site.xml,/etc/hadoop/conf/hdfs-site.
   - Maximum interval between catalog-lock checks.
   - Paimon default
 * - `fs.native-s3.enabled`
-  - Enable Trino native S3 access for the Paimon warehouse.
-  - `false`
+  - Enable Trino native S3 access for the Paimon warehouse. Unset by default,
+    which leaves file system selection to Paimon.
+  - Paimon default
 * - `fs.hadoop.enabled`
   - Enable Paimon Hadoop file system support. Set to `false` when using Trino
     native S3.
@@ -166,14 +167,66 @@ hive.config.resources=/etc/hadoop/conf/core-site.xml,/etc/hadoop/conf/hdfs-site.
   - Access credentials for S3-compatible object storage. The secret key is a
     sensitive catalog property.
   -
+* - `s3.signer-type`, `s3.signing-algorithm`, `s3.endpoint.region`
+  - Additional native S3 settings forwarded to Paimon.
+  -
+* - `s3a.*`, `fs.s3a.*`
+  - Aliases of the `s3.*` settings above for S3A-compatible configurations.
+    When several aliases of the same setting are configured, `s3.*` wins, then
+    `s3a.*`, then `fs.s3a.*`.
+  -
+* - `table.type`
+  - Paimon table type, such as `MANAGED` or `EXTERNAL`.
+  - Paimon default
+* - `case-sensitive`, `allow-upper-case`
+  - Paimon catalog identifier matching rules.
+  - Paimon default
+* - `sync-all-properties`
+  - Forward table properties to Paimon as table options.
+  - Paimon default
+* - `format-table.enabled`
+  - Expose Paimon format tables where the selected catalog supports them.
+  - Paimon default
+* - `resolving-file-io.enabled`, `file-io.allow-cache`
+  - Paimon resolving FileIO selection and FileIO caching.
+  - Paimon default
+* - `cache-enabled`, `cache.*`
+  - Paimon catalog and table caches, such as `cache.expire-after-access`,
+    `cache.manifest.max-memory`, or `cache.snapshot.max-num-per-table`.
+  - Paimon default
+* - `local-cache.enabled`, `local-cache.dir`, `local-cache.max-size`,
+    `local-cache.block-size`, `local-cache.whitelist`
+  - Paimon local disk cache.
+  - Paimon default
+* - `client-pool-size`, `client-pool-cache.keys`,
+    `client-pool-cache.eviction-interval-ms`
+  - JDBC and Hive metastore client pool settings.
+  - Paimon default
+* - `hive-conf-dir`, `hadoop-conf-dir`, `metastore.client.class`,
+    `location-in-properties`, `hive.skip-update-stats`
+  - Hive metastore catalog settings.
+  - Paimon default
+* - `lock-key-max-length`
+  - Maximum length of a Paimon catalog lock key.
+  - Paimon default
+* - `alter-table-cascade`
+  - Cascade Paimon table alterations.
+  - Paimon default
 * - `write.spill-path`
   - Local directory used by spillable Paimon writers.
-  -
+  - JVM temporary directory
 * - `catalog.session-cache.maximum-size`
   - Maximum number of session-specific Paimon catalog instances retained by the
     connector.
   - `1000`
 :::
+
+Except for `write.spill-path` and `catalog.session-cache.maximum-size`, every
+property in this table is forwarded to the Paimon catalog as an option with the
+same name. Unlisted Paimon catalog options can be set the same way.
+
+`hive.config.resources` is resolved by the connector before the Paimon catalog is
+created, so it is not a Paimon catalog option and is not part of this table.
 
 ## Catalog session properties
 
@@ -374,6 +427,9 @@ The connector publishes runtime counters to JMX under the object name
 
 ## Known limitations
 
+- Column and field names are matched case-insensitively. A table with two
+  columns that differ only by case cannot be used as a write target, and schema
+  changes for such a column are rejected as ambiguous.
 - `ALTER SCHEMA RENAME` is not supported. Paimon's catalog API does not expose a
   schema rename primitive.
 - `COMMENT ON COLUMN view.col` is not supported. Paimon `ViewChange` does not
