@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import io.trino.spi.TrinoException;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.types.DataTypes;
@@ -22,6 +23,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
+import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -29,6 +31,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class PaimonTableOptionUtilsTest
 {
+    @Test
+    public void testBuildOptionMapRejectsUnparsableOptionValue()
+    {
+        assertThat(PaimonTableOptionUtils.buildOptionMap(Map.of("bucket", "4"))).containsEntry("bucket", "4");
+
+        assertThatThrownBy(() -> PaimonTableOptionUtils.buildOptionMap(Map.of("bucket", "not-an-int")))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_TABLE_PROPERTY.toErrorCode());
+                    assertThat(exception).hasMessageContaining("Invalid value for Paimon table option 'bucket'");
+                });
+    }
+
     @Test
     public void testLatestFileFormatOptionsArePassedThroughAsStrings()
     {

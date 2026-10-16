@@ -816,14 +816,14 @@ public class PaimonTableHandle
     public PaimonTableHandle copy(TupleDomain<PaimonColumnHandle> filter)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit, Optional.empty(), createTableOperation, dynamicBucketAssignerParallelism,
+                limit, deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism,
                 keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
 
     public PaimonTableHandle copy(Optional<List<ColumnHandle>> projectedColumns)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter,
-                toPaimonColumnHandles(projectedColumns), writeColumns, limit, Optional.empty(),
+                toPaimonColumnHandles(projectedColumns), writeColumns, limit, deletePartitionSpecs,
                 createTableOperation, dynamicBucketAssignerParallelism,
                 keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
@@ -833,7 +833,7 @@ public class PaimonTableHandle
         requireNonNull(writeColumns, "writeColumns is null");
         checkArgument(!writeColumns.isEmpty(), "writeColumns is empty");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns,
-                Optional.of(toPaimonColumnHandles(writeColumns)), limit, Optional.empty(), createTableOperation,
+                Optional.of(toPaimonColumnHandles(writeColumns)), limit, deletePartitionSpecs, createTableOperation,
                 dynamicBucketAssignerParallelism, keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
 
@@ -877,7 +877,7 @@ public class PaimonTableHandle
     public PaimonTableHandle copy(OptionalLong limit)
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit, Optional.empty(), createTableOperation, dynamicBucketAssignerParallelism,
+                limit, deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism,
                 keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
     }
 

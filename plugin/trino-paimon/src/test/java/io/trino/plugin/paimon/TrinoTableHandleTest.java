@@ -955,6 +955,10 @@ public class TrinoTableHandleTest
 
         assertThat(handle.getTableHandle()).isEqualTo(tableHandle);
         assertThat(handle.isMetadataDeleteFallback()).isTrue();
+        // The wrapper carries plan state, so a round trip must produce an equal handle
+        assertThat(handle).isEqualTo(PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle));
+        assertThat(handle.hashCode()).isEqualTo(PaimonMergeTableHandle.forMetadataDeleteFallback(tableHandle).hashCode());
+        assertThat(handle).isNotEqualTo(new PaimonMergeTableHandle(tableHandle));
     }
 
     @Test

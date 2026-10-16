@@ -17,6 +17,7 @@ import io.airlift.slice.Slice;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.Assignment;
+import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
@@ -184,6 +185,9 @@ public final class PaimonMetadata
     private static final String OVERWRITE_OPERATION = "OVERWRITE";
     private static final String PAIMON_SNAPSHOT_OPERATION_CLASS_NAME = "org.apache.paimon.Snapshot$Operation";
     private static final String TRINO_SCHEMA_OWNER_TYPE_PROPERTY = "trino.owner-type";
+    private static final String TRINO_VIEW_CATALOG_PROPERTY = "trino.default-catalog";
+    private static final String TRINO_VIEW_SCHEMA_PROPERTY = "trino.default-schema";
+    private static final String TRINO_VIEW_PATH_PROPERTY = "trino.default-path";
     private static final Set<String> PAIMON_OPTION_UPDATES_REQUIRING_EXISTING_OPTIONS = Set.of(
             CoreOptions.BUCKET.key(),
             CoreOptions.DELETION_VECTORS_ENABLED.key(),
@@ -2019,6 +2023,7 @@ public final class PaimonMetadata
             if (value.isPresent()) {
                 // Set the property to the specified value
                 String optionValue = PaimonTableOptionUtils.normalizeOptionValue(propertyName, key, value.get());
+                PaimonTableOptionUtils.validateOptionValues(Map.of(key, optionValue));
                 if (requiresExistingOptionsForPaimonOptionUpdate(key)) {
                     tableOptionSnapshot = tableOptionSnapshot.or(() ->
                             getPaimonTableOptionSnapshotIfAvailable(sessionCatalog, paimonTableHandle));
@@ -4036,6 +4041,17 @@ public final class PaimonMetadata
         Map<String, String> options = new HashMap<>();
         definition.getComment().ifPresent(c -> options.put("comment", c));
         definition.getOwner().ifPresent(owner -> options.put(OWNER_PROPERTY, owner));
+        // Trino resolves the stored SQL with the creating session's defaults, so the definition must
+        // carry them; without them an unqualified relation binds to the session reading the view.
+        definition.getCatalog().ifPresent(catalog -> options.put(TRINO_VIEW_CATALOG_PROPERTY, catalog));
+        definition.getSchema().ifPresent(schema -> options.put(TRINO_VIEW_SCHEMA_PROPERTY, schema));
+        if (!definition.getPath().isEmpty()) {
+            // CatalogSchemaName is not serializable, so persist the path as a list of name pairs.
+            List<List<String>> encodedPath = definition.getPath().stream()
+                    .map(name -> List.of(name.getCatalogName(), name.getSchemaName()))
+                    .collect(toList());
+            options.put(TRINO_VIEW_PATH_PROPERTY, EncodingUtils.encodeObjectToString(new ArrayList<>(encodedPath)));
+        }
 
         return new org.apache.paimon.view.ViewImpl(identifier, fields, definition.getOriginalSql(), dialects,
                 definition.getComment().orElse(null), options);
@@ -4145,18 +4161,44 @@ public final class PaimonMetadata
 
         // Convert Paimon View to Trino ConnectorViewDefinition
         List<ConnectorViewDefinition.ViewColumn> columns = paimonView.rowType().getFields().stream()
-                .map(field -> new ConnectorViewDefinition.ViewColumn(field.name(),
-                        PaimonTypeUtils.fromPaimonType(field.type(), typeManager).getTypeId(),
-                        Optional.ofNullable(field.description()).filter(comment -> !comment.isEmpty())))
+                .map(field -> toViewColumn(field, viewName))
                 .collect(toList());
 
         String originalSql = paimonView.dialects().get("trino");
-        return Optional.of(new ConnectorViewDefinition(originalSql, Optional.empty(), // catalog
-                Optional.empty(), // schema
+        Optional<String> owner = Optional.ofNullable(paimonView.options().get(OWNER_PROPERTY));
+        return Optional.of(new ConnectorViewDefinition(originalSql,
+                Optional.ofNullable(paimonView.options().get(TRINO_VIEW_CATALOG_PROPERTY)), // catalog
+                Optional.ofNullable(paimonView.options().get(TRINO_VIEW_SCHEMA_PROPERTY)), // schema
                 columns, paimonView.comment(), // comment
-                Optional.ofNullable(paimonView.options().get(OWNER_PROPERTY)), // owner
-                false, // runAsInvoker
-                List.of())); // path
+                owner,
+                // A view without an owner has no definer identity, which is how Trino represents a
+                // run-as-invoker view, so it must not be reported as a definer view.
+                owner.isEmpty(),
+                decodeViewPath(paimonView.options().get(TRINO_VIEW_PATH_PROPERTY)))); // path
+    }
+
+    private ConnectorViewDefinition.ViewColumn toViewColumn(DataField field, SchemaTableName viewName)
+    {
+        try {
+            return new ConnectorViewDefinition.ViewColumn(field.name(),
+                    PaimonTypeUtils.fromPaimonType(field.type(), typeManager).getTypeId(),
+                    Optional.ofNullable(field.description()).filter(comment -> !comment.isEmpty()));
+        }
+        catch (UnsupportedOperationException e) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    format("Unsupported Paimon view column type for view '%s': %s", viewName, e.getMessage()), e);
+        }
+    }
+
+    private static List<CatalogSchemaName> decodeViewPath(@Nullable String encodedPath)
+    {
+        if (encodedPath == null) {
+            return List.of();
+        }
+        List<List<String>> decodedPath = EncodingUtils.decodeStringToObject(encodedPath);
+        return decodedPath.stream()
+                .map(name -> new CatalogSchemaName(name.get(0), name.get(1)))
+                .collect(toList());
     }
 
     private Optional<org.apache.paimon.view.View> getPaimonView(Catalog sessionCatalog, SchemaTableName viewName)

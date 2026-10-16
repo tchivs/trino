@@ -3139,6 +3139,24 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDeletePartitionSpecsSurviveHandleCopies()
+    {
+        PaimonColumnHandle column = PaimonColumnHandle.of("dt", DataTypes.STRING());
+        List<Map<String, String>> partitionSpecs = List.of(Map.of("dt", "2026-06-26"));
+        PaimonTableHandle handle = new PaimonTableHandle(
+                "schema", "table", Map.of(), TupleDomain.all(), Optional.empty(), Optional.empty(),
+                OptionalLong.empty())
+                .withDeletePartitionSpecs(partitionSpecs);
+
+        // A copy must not silently drop the validated delete scope
+        assertThat(handle.copy(TupleDomain.withColumnDomains(Map.of(column, Domain.singleValue(VARCHAR, Slices.utf8Slice("x")))))
+                .getDeletePartitionSpecs()).contains(partitionSpecs);
+        assertThat(handle.copy(OptionalLong.of(10)).getDeletePartitionSpecs()).contains(partitionSpecs);
+        assertThat(handle.copy(Optional.of(List.of(column))).getDeletePartitionSpecs()).contains(partitionSpecs);
+        assertThat(handle.withWriteColumns(List.of(column)).getDeletePartitionSpecs()).contains(partitionSpecs);
+    }
+
+    @Test
     public void testDynamicBucketAssignerParallelismHandleJsonRoundTrip()
     {
         PaimonTableHandle handle = new PaimonTableHandle(

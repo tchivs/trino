@@ -13,9 +13,11 @@
  */
 package io.trino.plugin.paimon;
 
+import io.trino.spi.TrinoException;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.annotation.Documentation.ExcludeFromDocumentation;
 import org.apache.paimon.options.ConfigOption;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -36,6 +38,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
@@ -91,6 +94,7 @@ public class PaimonTableOptionUtils
             indexOptionInfosByPaimonKey(buildAllOptionInfos());
     private static final Map<String, OptionInfo> OPTION_INFO_BY_TRINO_KEY = indexOptionInfosByTrinoKey(OPTION_INFOS);
     private static final Map<String, OptionInfo> OPTION_INFO_BY_PAIMON_KEY = indexOptionInfosByPaimonKey(OPTION_INFOS);
+    private static final Map<String, ConfigOption<?>> CONFIG_OPTION_BY_PAIMON_KEY = indexConfigOptionsByPaimonKey();
 
     private PaimonTableOptionUtils()
     {
@@ -114,6 +118,7 @@ public class PaimonTableOptionUtils
                 options.put(optionInfo.paimonOptionKey, normalizeOptionValue(optionInfo, entry.getValue()));
             }
         }
+        validateOptionValues(options);
         return options;
     }
 
@@ -280,6 +285,39 @@ public class PaimonTableOptionUtils
         }
         validateOptionInfos(optionInfos);
         return List.copyOf(optionInfos);
+    }
+
+    private static Map<String, ConfigOption<?>> indexConfigOptionsByPaimonKey()
+    {
+        Map<String, ConfigOption<?>> configOptions = new LinkedHashMap<>();
+        for (OptionWithMetaInfo optionWithMetaInfo : extractConfigOptions(CoreOptions.class)) {
+            configOptions.putIfAbsent(optionWithMetaInfo.option.key(), optionWithMetaInfo.option);
+        }
+        return Map.copyOf(configOptions);
+    }
+
+    /**
+     * Parse each provided option value with the Paimon option that owns it. Paimon parses table
+     * options lazily, when a reader or writer first asks for them, so an unparsable value would
+     * otherwise be stored in the table schema and fail later without pointing at the table property.
+     */
+    static void validateOptionValues(Map<String, String> optionMap)
+    {
+        requireNonNull(optionMap, "optionMap is null");
+        Options options = new Options(optionMap);
+        optionMap.forEach((key, value) -> {
+            ConfigOption<?> configOption = CONFIG_OPTION_BY_PAIMON_KEY.get(key);
+            if (configOption == null) {
+                return;
+            }
+            try {
+                options.getOptional(configOption);
+            }
+            catch (IllegalArgumentException e) {
+                throw new TrinoException(INVALID_TABLE_PROPERTY,
+                        "Invalid value for Paimon table option '%s': %s".formatted(key, e.getMessage()), e);
+            }
+        });
     }
 
     private static Map<String, OptionInfo> indexOptionInfosByTrinoKey(List<OptionInfo> optionInfos)

@@ -19,6 +19,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 
+import java.util.Objects;
+
 import static java.util.Objects.requireNonNull;
 
 public class PaimonMergeTableHandle
@@ -63,6 +65,24 @@ public class PaimonMergeTableHandle
     PaimonTableHandle paimonTableHandle()
     {
         return tableHandle;
+    }
+
+    @Override
+    public boolean equals(Object object)
+    {
+        if (this == object) {
+            return true;
+        }
+        if (!(object instanceof PaimonMergeTableHandle that)) {
+            return false;
+        }
+        return metadataDeleteFallback == that.metadataDeleteFallback && tableHandle.equals(that.tableHandle);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return Objects.hash(tableHandle, metadataDeleteFallback);
     }
 
     @JsonProperty

@@ -130,6 +130,79 @@ public class PaimonMetadataViewTest
     }
 
     @Test
+    public void testGetViewReportsOwnerlessViewAsInvoker()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(Map.of("trino", "SELECT id FROM trino_table"))),
+                TESTING_TYPE_MANAGER);
+
+        ConnectorViewDefinition view = metadata.getView(SESSION, VIEW_NAME).orElseThrow();
+
+        // A view without an owner has no definer identity, so it must run as the invoker
+        assertThat(view.getOwner()).isEmpty();
+        assertThat(view.isRunAsInvoker()).isTrue();
+    }
+
+    @Test
+    public void testGetViewReportsOwnedViewAsDefiner()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(view(
+                        Map.of("trino", "SELECT id FROM trino_table"),
+                        Map.of(OWNER_PROPERTY, "view_owner"))),
+                TESTING_TYPE_MANAGER);
+
+        ConnectorViewDefinition view = metadata.getView(SESSION, VIEW_NAME).orElseThrow();
+
+        assertThat(view.getOwner()).contains("view_owner");
+        assertThat(view.isRunAsInvoker()).isFalse();
+    }
+
+    @Test
+    public void testCreateViewRoundTripsBindingContext()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(null);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorViewDefinition definition = new ConnectorViewDefinition(
+                "SELECT id FROM unqualified_table",
+                Optional.of("paimon"),
+                Optional.of("test_schema"),
+                List.of(new ConnectorViewDefinition.ViewColumn("id", BIGINT.getTypeId(), Optional.empty())),
+                Optional.of("view comment"),
+                Optional.empty(),
+                true,
+                List.of(new CatalogSchemaName("other_catalog", "other_schema")));
+
+        metadata.createView(SESSION, VIEW_NAME, definition, false);
+        ConnectorViewDefinition roundTripped = metadata.getView(SESSION, VIEW_NAME).orElseThrow();
+
+        assertThat(roundTripped.getCatalog()).contains("paimon");
+        assertThat(roundTripped.getSchema()).contains("test_schema");
+        assertThat(roundTripped.getPath()).containsExactly(new CatalogSchemaName("other_catalog", "other_schema"));
+        assertThat(roundTripped.isRunAsInvoker()).isTrue();
+    }
+
+    @Test
+    public void testGetViewRejectsUnsupportedColumnTypeAsNotSupported()
+    {
+        View view = new ViewImpl(
+                new Identifier(VIEW_NAME.getSchemaName(), VIEW_NAME.getTableName()),
+                List.of(DataTypes.FIELD(0, "id", org.apache.paimon.types.DataTypes.CHAR(
+                        io.trino.spi.type.CharType.MAX_LENGTH + 1))),
+                "SELECT id FROM canonical_table",
+                Map.of("trino", "SELECT id FROM canonical_table"),
+                null,
+                Map.of());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(view), TESTING_TYPE_MANAGER);
+
+        assertThatThrownBy(() -> metadata.getView(SESSION, VIEW_NAME))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessageContaining("Unsupported Paimon view column type for view 'test_schema.test_view'");
+                });
+    }
+
+    @Test
     public void testSystemSchemaViewReadsAreEmpty()
     {
         SystemSchemaRejectingViewCatalog catalog = new SystemSchemaRejectingViewCatalog();
