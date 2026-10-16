@@ -17,6 +17,8 @@ import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
+import com.google.inject.TypeLiteral;
+import com.google.inject.name.Names;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.event.client.EventModule;
 import io.airlift.json.JsonModule;
@@ -188,7 +190,19 @@ public class PaimonConnectorFactory
                     LOG.warn("Failed to read hadoop xml file {}, skipping this file.", hadoopXml, e);
                 }
             }
+            config.remove(HADOOP_CONF_FILES_KEY);
         }
+        // Hadoop properties are Paimon catalog options, not connector configuration. Airlift fails
+        // connector creation for configuration properties that no config class consumes, so they are
+        // moved out of the binder map and bound for the catalog instead.
+        Map<String, String> hadoopOptions = new HashMap<>();
+        config.entrySet().removeIf(entry -> {
+            if (!entry.getKey().startsWith(HADOOP_CONF_PREFIX)) {
+                return false;
+            }
+            hadoopOptions.put(entry.getKey(), entry.getValue());
+            return true;
+        });
 
         ClassLoader classLoader = PaimonConnectorFactory.class.getClassLoader();
         verifyTrinoFormatFactories(classLoader);
@@ -207,6 +221,8 @@ public class PaimonConnectorFactory
                         binder.bind(CatalogHandle.class).toInstance(context.getCatalogHandle());
                         binder.bind(CatalogName.class).toInstance(new CatalogName(catalogName));
                         binder.bind(PageSorter.class).toInstance(context.getPageSorter());
+                        binder.bind(Key.get(new TypeLiteral<Map<String, String>>() {}, Names.named(PaimonModule.PAIMON_HADOOP_OPTIONS)))
+                                .toInstance(Map.copyOf(hadoopOptions));
                     }, module);
 
             Injector injector = app.doNotInitializeLogging().setRequiredConfigurationProperties(config).initialize();

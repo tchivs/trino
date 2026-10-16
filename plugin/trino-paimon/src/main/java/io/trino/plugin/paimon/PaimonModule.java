@@ -18,6 +18,7 @@ import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
+import com.google.inject.name.Named;
 import io.trino.plugin.hive.orc.OrcReaderConfig;
 import io.trino.plugin.hive.orc.OrcWriterConfig;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
@@ -29,6 +30,8 @@ import io.trino.spi.function.FunctionProvider;
 import io.trino.spi.function.table.ConnectorTableFunction;
 import org.apache.paimon.options.Options;
 
+import java.util.Map;
+
 import static com.google.inject.Scopes.SINGLETON;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
@@ -38,6 +41,8 @@ public class PaimonModule
         implements
         Module
 {
+    public static final String PAIMON_HADOOP_OPTIONS = "paimon.hadoop.options";
+
     @Override
     public void configure(Binder binder)
     {
@@ -67,13 +72,16 @@ public class PaimonModule
     }
 
     /**
-     * Provides Paimon Options object by converting from PaimonConfig.
-     * This method is called by Guice to create the Options bean.
+     * Paimon catalog options from the connector configuration plus the Hadoop configuration properties
+     * the connector factory resolved from {@code hive.config.resources}. Connector properties win.
      */
     @Provides
     @Singleton
-    public Options provideOptions(PaimonConfig config)
+    public Options provideOptions(PaimonConfig config,
+            @Named(PAIMON_HADOOP_OPTIONS) Map<String, String> hadoopOptions)
     {
-        return config.toOptions();
+        Options options = new Options(hadoopOptions);
+        config.toOptions().toMap().forEach(options::set);
+        return options;
     }
 }

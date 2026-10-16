@@ -67,6 +67,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -91,6 +92,7 @@ public class PaimonCatalog
     private final int sessionCatalogCacheMaximumSize;
 
     private final java.util.function.Function<ConnectorSession, Catalog> sessionCatalogFactory;
+    private final AtomicBoolean resolvingFileIoWarning = new AtomicBoolean();
 
     private final PaimonConnectorStats stats;
 
@@ -217,6 +219,13 @@ public class PaimonCatalog
             Map<String, String> catalogOptionMap = new HashMap<>(options.toMap());
             catalogOptionMap.put("hadoop-load-default-config", "false");
             Options catalogOptions = Options.fromMap(catalogOptionMap);
+            if (catalogOptions.get(RESOLVING_FILE_IO_ENABLED)) {
+                // The connector always reaches the warehouse through Trino FileIO, so a configured
+                // resolving FileIO cannot take effect. Say so instead of overriding it silently.
+                if (resolvingFileIoWarning.compareAndSet(false, true)) {
+                    LOG.warn("Ignoring Paimon resolving-file-io.enabled=true: the Trino connector always uses Trino FileIO");
+                }
+            }
             catalogOptions.set(RESOLVING_FILE_IO_ENABLED, false);
             CatalogContext catalogContext = CatalogContext.create(catalogOptions,
                     fileIOLoader, null);

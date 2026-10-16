@@ -1112,6 +1112,15 @@ public class PaimonConfig
         return PaimonWriteSpillPaths.hasValidEntries(writeSpillPath);
     }
 
+    @AssertTrue(message = "uri must be set when metastore is jdbc")
+    public boolean isUriSetForJdbcMetastore()
+    {
+        if (metastore == null || !metastore.trim().equalsIgnoreCase("jdbc")) {
+            return true;
+        }
+        return uri != null && !uri.isBlank();
+    }
+
     /**
      * Convert this configuration to Paimon Options. This method creates a Map of
      * all non-null configuration properties and returns it as a Paimon Options

@@ -67,6 +67,29 @@ public class TrinoConnectorFactoryTest
     }
 
     @Test
+    public void testCreateConnectorForwardsHadoopConfiguration()
+            throws Exception
+    {
+        Path hiveConf = tempFile.resolve("core-site.xml");
+        Files.writeString(hiveConf, """
+                <?xml version="1.0"?>
+                <configuration>
+                  <property>
+                    <name>fs.defaultFS</name>
+                    <value>hdfs://namenode:8020</value>
+                  </property>
+                </configuration>
+                """);
+
+        Map<String, String> config = Map.of(
+                "warehouse", tempFile.resolve("warehouse").toString(),
+                "hive.config.resources", hiveConf.toString());
+        Connector connector = new PaimonConnectorFactory().create("paimon", config, new TestingConnectorContext());
+
+        assertThat(connector).isNotNull();
+    }
+
+    @Test
     public void testConnectorExportsJmxStats()
             throws Exception
     {

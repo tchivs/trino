@@ -129,7 +129,8 @@ hive.config.resources=/etc/hadoop/conf/core-site.xml,/etc/hadoop/conf/hdfs-site.
   - Paimon catalog type, for example `filesystem` or `jdbc`.
   - Paimon default
 * - `uri`
-  - Catalog URI. For a JDBC catalog this is the JDBC connection URL.
+  - Catalog URI. For a JDBC catalog this is the JDBC connection URL and it is
+    required whenever `metastore` is `jdbc`.
   -
 * - `jdbc.user`
   - JDBC catalog user.
@@ -187,8 +188,9 @@ hive.config.resources=/etc/hadoop/conf/core-site.xml,/etc/hadoop/conf/hdfs-site.
 * - `format-table.enabled`
   - Expose Paimon format tables where the selected catalog supports them.
   - Paimon default
-* - `resolving-file-io.enabled`, `file-io.allow-cache`
-  - Paimon resolving FileIO selection and FileIO caching.
+* - `file-io.allow-cache`
+  - Paimon FileIO caching. The connector always reaches the warehouse through
+    Trino FileIO, so `resolving-file-io.enabled` is ignored and logged when set.
   - Paimon default
 * - `cache-enabled`, `cache.*`
   - Paimon catalog and table caches, such as `cache.expire-after-access`,
@@ -454,6 +456,19 @@ The connector publishes runtime counters to JMX under the object name
 
 ## Known limitations
 
+- The connector always reaches the Paimon warehouse through Trino FileIO, so
+  Paimon's `resolving-file-io.enabled` option has no effect. A configured
+  `resolving-file-io.enabled=true` is logged and then forced to `false`.
+- Paimon format tables are read-only in Trino. Paimon exposes a format table
+  writer, but the connector builds its writers from a `FileStoreTable`, so
+  `INSERT` into a format table fails with a `NOT_SUPPORTED` error. Set
+  `format-table.enabled` to make format tables visible for reads.
+- The session catalog cache retains one Paimon catalog per session identity and
+  evicts the least recently used entry once
+  `catalog.session-cache.maximum-size` is exceeded, closing that entry once it is
+  idle. A statement that is still using an evicted catalog fails with a
+  closed-catalog error, so keep the default cache size when many identities or
+  credentials run in parallel with a small configured cache.
 - Row-level `UPDATE`, `DELETE`, and `MERGE` do not detect a concurrent modification
   of the rows they read. The statement scans the target rows and then commits its
   result against the current table state, so a row changed after the scan can be

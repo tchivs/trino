@@ -26,12 +26,46 @@ import java.nio.file.Path;
 import java.util.Map;
 
 import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
+import static io.airlift.testing.ValidationAssertions.assertValidates;
 import static io.trino.plugin.paimon.catalog.PaimonCatalog.DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class PaimonConfigTest
 {
+    @Test
+    public void testJdbcMetastoreRequiresUri()
+    {
+        assertFailsValidation(
+                new PaimonConfig().setMetastore("jdbc").setWarehouse("/tmp/warehouse"),
+                "uriSetForJdbcMetastore",
+                "uri must be set when metastore is jdbc",
+                AssertTrue.class);
+        assertFailsValidation(
+                new PaimonConfig().setMetastore(" jdbc ").setWarehouse("/tmp/warehouse").setUri(" "),
+                "uriSetForJdbcMetastore",
+                "uri must be set when metastore is jdbc",
+                AssertTrue.class);
+
+        // A JDBC catalog with a URI, and other metastores without one, validate
+        assertValidates(new PaimonConfig().setMetastore("jdbc").setWarehouse("/tmp/warehouse")
+                .setUri("jdbc:postgresql://localhost/catalog"));
+        assertValidates(new PaimonConfig().setMetastore("filesystem").setWarehouse("/tmp/warehouse"));
+        assertValidates(new PaimonConfig().setWarehouse("/tmp/warehouse"));
+    }
+
+    @Test
+    public void testHadoopOptionsAreMergedIntoCatalogOptions()
+    {
+        Options options = new PaimonModule().provideOptions(
+                new PaimonConfig().setWarehouse("/tmp/warehouse"),
+                Map.of("hadoop.fs.defaultFS", "hdfs://namenode:8020"));
+
+        assertThat(options.toMap())
+                .containsEntry("hadoop.fs.defaultFS", "hdfs://namenode:8020")
+                .containsEntry("warehouse", "/tmp/warehouse");
+    }
+
     @Test
     public void testDefaultConfigToOptionsIsEmpty()
     {
