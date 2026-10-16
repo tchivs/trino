@@ -366,6 +366,21 @@ public class TrinoPartitioningHandleTest
     }
 
     @Test
+    public void testKeyDynamicPartitioningProviderRejectsPlannedAssignerMappingWithoutEnoughWorkers()
+            throws Exception
+    {
+        PaimonNodePartitioningProvider provider = new PaimonNodePartitioningProvider(
+                new TestingNodeManager(List.of(node("node-a", "127.0.0.1"))));
+        PaimonPartitioningHandle handle = new PaimonPartitioningHandle(
+                InstantiationUtil.serializeObject(keyDynamicSchema(Map.of())),
+                false,
+                OptionalInt.of(2));
+
+        assertThatThrownBy(() -> provider.getBucketNodeMapping(null, null, handle))
+                .hasMessage("Paimon KEY_DYNAMIC planned assigner parallelism 2 exceeds available worker nodes 1");
+    }
+
+    @Test
     public void testDynamicBucketPartitioningProviderRejectsTooFewTrinoBuckets()
             throws Exception
     {

@@ -115,14 +115,14 @@ final class PaimonDynamicBucketUtils
         return dynamicBucketAssignerNodes(workers, assignerParallelism, "KEY_DYNAMIC");
     }
 
-    static List<Node> dynamicBucketAssignerNodes(NodeManager nodeManager, int assignerParallelism)
+    static List<Node> dynamicBucketAssignerNodes(NodeManager nodeManager, int assignerParallelism, String bucketMode)
     {
         requireNonNull(nodeManager, "nodeManager is null");
         List<Node> workers = nodeManager.getRequiredWorkerNodes().stream()
                 .sorted(Comparator.comparing((Node node) -> node.getHostAndPort().toString())
                         .thenComparing(Node::getNodeIdentifier))
                 .toList();
-        return dynamicBucketAssignerNodes(workers, assignerParallelism, "HASH_DYNAMIC");
+        return dynamicBucketAssignerNodes(workers, assignerParallelism, bucketMode);
     }
 
     private static List<Node> dynamicBucketAssignerNodes(

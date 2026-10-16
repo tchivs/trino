@@ -216,7 +216,7 @@ public class PaimonFileIO
             FileEntry fileEntry = fileIterator.next();
             if (isDirectChild(location, fileEntry.location()) && !isDirectoryMarker(fileEntry.location())) {
                 fileStatusList.add(new PaimonFileStatus(fileEntry.length(), new Path(fileEntry.location().toString()),
-                        fileEntry.lastModified().getEpochSecond()));
+                        fileEntry.lastModified().toEpochMilli()));
             }
         }
         trinoFileSystem.listDirectories(location)
@@ -291,7 +291,7 @@ public class PaimonFileIO
             throws IOException
     {
         TrinoInputFile trinoInputFile = trinoFileSystem.newInputFile(location);
-        return new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().getEpochSecond());
+        return new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().toEpochMilli());
     }
 
     private Optional<FileStatus> fileStatusIfExists(Location location, Path path)
@@ -302,7 +302,7 @@ public class PaimonFileIO
             if (!trinoInputFile.exists()) {
                 return Optional.empty();
             }
-            return Optional.of(new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().getEpochSecond()));
+            return Optional.of(new PaimonFileStatus(trinoInputFile.length(), path, trinoInputFile.lastModified().toEpochMilli()));
         }
         catch (IOException e) {
             if (isObjectNotFound(e)) {
@@ -548,7 +548,22 @@ public class PaimonFileIO
         {
             this.outputFile = requireNonNull(outputFile, "outputFile is null");
             this.tempFile = Files.createTempFile("trino-paimon-object-store-overwrite-", ".tmp");
-            this.outputStream = Files.newOutputStream(tempFile);
+            OutputStream stream;
+            try {
+                stream = Files.newOutputStream(tempFile);
+            }
+            catch (Exception e) {
+                // The staging file was created before the stream failed, so remove it here: the upload
+                // cleanup below only runs for a fully constructed stream.
+                try {
+                    Files.deleteIfExists(tempFile);
+                }
+                catch (IOException cleanupFailure) {
+                    e.addSuppressed(cleanupFailure);
+                }
+                throw e;
+            }
+            this.outputStream = stream;
         }
 
         @Override

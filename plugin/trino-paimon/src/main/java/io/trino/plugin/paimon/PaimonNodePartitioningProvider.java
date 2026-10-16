@@ -62,7 +62,8 @@ public class PaimonNodePartitioningProvider
             if (paimonPartitioningHandle.dynamicBucketAssignerParallelism().isPresent()) {
                 return Optional.of(createBucketNodeMap(dynamicBucketAssignerNodes(
                         nodeManager,
-                        paimonPartitioningHandle.dynamicBucketAssignerParallelism().getAsInt())));
+                        paimonPartitioningHandle.dynamicBucketAssignerParallelism().getAsInt(),
+                        "HASH_DYNAMIC")));
             }
             return Optional.of(createBucketNodeMap(dynamicBucketAssignerNodes(
                     nodeManager,
@@ -72,7 +73,8 @@ public class PaimonNodePartitioningProvider
             if (paimonPartitioningHandle.dynamicBucketAssignerParallelism().isPresent()) {
                 return Optional.of(createBucketNodeMap(dynamicBucketAssignerNodes(
                         nodeManager,
-                        paimonPartitioningHandle.dynamicBucketAssignerParallelism().getAsInt())));
+                        paimonPartitioningHandle.dynamicBucketAssignerParallelism().getAsInt(),
+                        "KEY_DYNAMIC")));
             }
             return Optional.of(createBucketNodeMap(keyDynamicAssignerNodes(
                     nodeManager,

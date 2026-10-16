@@ -23,6 +23,7 @@ import io.trino.filesystem.TrinoOutputFile;
 import io.trino.filesystem.local.LocalFileSystem;
 import io.trino.filesystem.memory.MemoryFileSystem;
 import io.trino.memory.context.AggregatedMemoryContext;
+import org.apache.paimon.fs.FileStatus;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.TwoPhaseOutputStream;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
@@ -93,6 +94,25 @@ public class TestPaimonFileIO
         assertThat(fileIO.exists(databasePath)).isTrue();
         assertThat(fileIO.getFileStatus(databasePath).isDir()).isTrue();
         assertThat(fileIO.listStatus(databasePath)).isEmpty();
+    }
+
+    @Test
+    public void testFileStatusModificationTimeIsEpochMillis()
+            throws IOException
+    {
+        MemoryFileSystem fileSystem = new MemoryFileSystem();
+        PaimonFileIO fileIO = objectStoreFileIO(fileSystem);
+        Path path = new Path("memory:///warehouse/status/part-0.orc");
+        Location location = Location.of(path.toString());
+        fileSystem.newOutputFile(location).createOrOverwrite(new byte[] {1, 2, 3});
+        long expectedModificationTime = fileSystem.newInputFile(location).lastModified().toEpochMilli();
+
+        // Paimon FileStatus modification times are epoch milliseconds, not epoch seconds
+        assertThat(fileIO.getFileStatus(path).getModificationTime()).isEqualTo(expectedModificationTime);
+        assertThat(fileIO.listStatus(new Path("memory:///warehouse/status")))
+                .singleElement()
+                .extracting(FileStatus::getModificationTime)
+                .isEqualTo(expectedModificationTime);
     }
 
     @Test
