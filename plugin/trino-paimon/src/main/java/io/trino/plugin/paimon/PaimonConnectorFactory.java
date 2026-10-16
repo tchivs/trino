@@ -20,6 +20,7 @@ import com.google.inject.Module;
 import com.google.inject.TypeLiteral;
 import com.google.inject.name.Names;
 import io.airlift.bootstrap.Bootstrap;
+import io.airlift.bootstrap.LifeCycleManager;
 import io.airlift.event.client.EventModule;
 import io.airlift.json.JsonModule;
 import io.airlift.log.Logger;
@@ -227,25 +228,54 @@ public class PaimonConnectorFactory
 
             Injector injector = app.doNotInitializeLogging().setRequiredConfigurationProperties(config).initialize();
 
-            PaimonMetadata paimonMetadata = injector.getInstance(PaimonMetadataFactory.class).create();
-            PaimonSplitManager paimonSplitManager = injector.getInstance(PaimonSplitManager.class);
-            PaimonPageSourceProvider paimonPageSourceProvider = injector.getInstance(PaimonPageSourceProvider.class);
-            PaimonPageSinkProvider paimonPageSinkProvider = injector.getInstance(PaimonPageSinkProvider.class);
-            PaimonNodePartitioningProvider paimonNodePartitioningProvider = injector
-                    .getInstance(PaimonNodePartitioningProvider.class);
-            PaimonSessionProperties paimonSessionProperties = injector.getInstance(PaimonSessionProperties.class);
-            PaimonSchemaProperties paimonSchemaProperties = injector.getInstance(PaimonSchemaProperties.class);
-            PaimonTableOptions paimonTableOptions = injector.getInstance(PaimonTableOptions.class);
-            Set<ConnectorTableFunction> connectorTableFunctions = injector.getInstance(new Key<>() {
-            });
-            FunctionProvider functionProvider = injector.getInstance(FunctionProvider.class);
+            PaimonConnector connector;
+            try {
+                connector = createConnector(injector, classLoader);
+            }
+            catch (RuntimeException | Error e) {
+                stopLifecycle(injector, e);
+                throw e;
+            }
+            return connector;
+        }
+    }
 
-            return new PaimonConnector(new ClassLoaderSafeConnectorMetadata(paimonMetadata, classLoader),
-                    new ClassLoaderSafeConnectorSplitManager(paimonSplitManager, classLoader),
-                    new ClassLoaderSafeConnectorPageSourceProvider(paimonPageSourceProvider, classLoader),
-                    new ClassLoaderSafeConnectorPageSinkProvider(paimonPageSinkProvider, classLoader),
-                    paimonNodePartitioningProvider, paimonMetadata.catalog(), paimonSchemaProperties, paimonTableOptions,
-                    paimonSessionProperties, connectorTableFunctions, functionProvider);
+    private static PaimonConnector createConnector(Injector injector, ClassLoader classLoader)
+    {
+        PaimonMetadata paimonMetadata = injector.getInstance(PaimonMetadataFactory.class).create();
+        PaimonSplitManager paimonSplitManager = injector.getInstance(PaimonSplitManager.class);
+        PaimonPageSourceProvider paimonPageSourceProvider = injector.getInstance(PaimonPageSourceProvider.class);
+        PaimonPageSinkProvider paimonPageSinkProvider = injector.getInstance(PaimonPageSinkProvider.class);
+        PaimonNodePartitioningProvider paimonNodePartitioningProvider = injector
+                .getInstance(PaimonNodePartitioningProvider.class);
+        PaimonSessionProperties paimonSessionProperties = injector.getInstance(PaimonSessionProperties.class);
+        PaimonSchemaProperties paimonSchemaProperties = injector.getInstance(PaimonSchemaProperties.class);
+        PaimonTableOptions paimonTableOptions = injector.getInstance(PaimonTableOptions.class);
+        Set<ConnectorTableFunction> connectorTableFunctions = injector.getInstance(new Key<>() {
+        });
+        FunctionProvider functionProvider = injector.getInstance(FunctionProvider.class);
+
+        return new PaimonConnector(new ClassLoaderSafeConnectorMetadata(paimonMetadata, classLoader),
+                new ClassLoaderSafeConnectorSplitManager(paimonSplitManager, classLoader),
+                new ClassLoaderSafeConnectorPageSourceProvider(paimonPageSourceProvider, classLoader),
+                new ClassLoaderSafeConnectorPageSinkProvider(paimonPageSinkProvider, classLoader),
+                paimonNodePartitioningProvider, paimonMetadata.catalog(), paimonSchemaProperties, paimonTableOptions,
+                paimonSessionProperties, connectorTableFunctions, functionProvider);
+    }
+
+    /**
+     * The nested injector owns the catalog and every other resource that was created for this connector.
+     * The framework only stops the lifecycle of the connector that it receives, so a failure between the
+     * injector setup and the connector construction would leave an open catalog, and any client pool or
+     * cache it built, behind. Stop the lifecycle before the failure is propagated.
+     */
+    private static void stopLifecycle(Injector injector, Throwable failure)
+    {
+        try {
+            injector.getInstance(LifeCycleManager.class).stop();
+        }
+        catch (RuntimeException | Error e) {
+            failure.addSuppressed(e);
         }
     }
 

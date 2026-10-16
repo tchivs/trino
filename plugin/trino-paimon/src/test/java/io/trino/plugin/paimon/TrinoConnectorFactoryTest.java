@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import com.google.inject.Module;
 import io.trino.plugin.paimon.catalog.PaimonCatalog;
 import io.trino.spi.connector.BucketFunction;
 import io.trino.spi.connector.Connector;
@@ -28,8 +29,10 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.function.FunctionProvider;
+import io.trino.spi.function.table.ConnectorTableFunction;
 import io.trino.spi.type.Type;
 import io.trino.testing.TestingConnectorContext;
+import jakarta.annotation.PreDestroy;
 import org.apache.paimon.options.Options;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -47,6 +50,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -83,10 +87,49 @@ public class TrinoConnectorFactoryTest
 
         Map<String, String> config = Map.of(
                 "warehouse", tempFile.resolve("warehouse").toString(),
+                "hadoop.fs.defaultFS", "s3://configured-by-catalog-config",
                 "hive.config.resources", hiveConf.toString());
         Connector connector = new PaimonConnectorFactory().create("paimon", config, new TestingConnectorContext());
 
         assertThat(connector).isNotNull();
+    }
+
+    @Test
+    public void testFailedBootstrapStopsTheNestedLifecycle()
+    {
+        BootstrapLifecycleProbe.stopped.set(false);
+
+        // Fail the last step of the bootstrap, after the metadata factory created the catalog
+        Module failingModule = binder -> {
+            binder.bind(BootstrapLifecycleProbe.class).asEagerSingleton();
+            newSetBinder(binder, ConnectorTableFunction.class)
+                    .addBinding()
+                    .toProvider(() -> {
+                        throw new IllegalStateException("table function bootstrap failure");
+                    });
+        };
+
+        assertThatThrownBy(() -> new PaimonConnectorFactory().create(
+                "paimon_failed_bootstrap",
+                Map.of("warehouse", tempFile.resolve("failed-bootstrap-warehouse").toString()),
+                new TestingConnectorContext(),
+                failingModule))
+                .hasRootCauseInstanceOf(IllegalStateException.class)
+                .hasRootCauseMessage("table function bootstrap failure");
+
+        // Without stopping the nested lifecycle the catalog and the resources created for it outlive the failure
+        assertThat(BootstrapLifecycleProbe.stopped).isTrue();
+    }
+
+    public static class BootstrapLifecycleProbe
+    {
+        private static final AtomicBoolean stopped = new AtomicBoolean();
+
+        @PreDestroy
+        public void stop()
+        {
+            stopped.set(true);
+        }
     }
 
     @Test
