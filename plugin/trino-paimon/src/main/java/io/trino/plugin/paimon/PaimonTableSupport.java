@@ -21,6 +21,12 @@ import org.apache.paimon.table.Table;
 import org.apache.paimon.table.VectorSearchTable;
 import org.apache.paimon.table.iceberg.IcebergTable;
 import org.apache.paimon.table.lance.LanceTable;
+import org.apache.paimon.types.DataField;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
@@ -60,6 +66,35 @@ public final class PaimonTableSupport
                     "Paimon " + operation + " requires FileStoreTable, but got: " + supportedTable.getClass().getName());
         }
         return fileStoreTable;
+    }
+
+    /**
+     * Identity of the columns a write was planned for: the Paimon field id and logical type of each written
+     * column in the current schema. Paimon accepts data files written against an older schema, so a
+     * concurrent DROP, rename or type change would commit values that the current schema no longer shows;
+     * comparing this fingerprint before the commit turns that into a clear failure. Adding a column leaves
+     * it unchanged, and a written column missing from the current schema yields empty (no fingerprint).
+     */
+    static Optional<String> writeSchemaFingerprint(FileStoreTable table, List<PaimonColumnHandle> writeColumns)
+    {
+        requireNonNull(table, "table is null");
+        requireNonNull(writeColumns, "writeColumns is null");
+        Map<String, DataField> fieldsByName = new LinkedHashMap<>();
+        for (DataField field : table.rowType().getFields()) {
+            fieldsByName.put(FieldNameUtils.toLowerCase(field.name()), field);
+        }
+        StringBuilder fingerprint = new StringBuilder();
+        for (PaimonColumnHandle column : writeColumns) {
+            DataField field = fieldsByName.get(FieldNameUtils.toLowerCase(column.getColumnName()));
+            if (field == null) {
+                return Optional.empty();
+            }
+            fingerprint.append(FieldNameUtils.toLowerCase(field.name()))
+                    .append('#').append(field.id())
+                    .append(':').append(field.type().asSQLString())
+                    .append(';');
+        }
+        return Optional.of(fingerprint.toString());
     }
 
     public static void validateInsertOverwrite(FileStoreTable table)

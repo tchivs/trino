@@ -712,6 +712,7 @@ public final class PaimonMetadata
                 .withDynamicBucketAssignerParallelism(plannedAssignerParallelism.isPresent()
                         ? plannedAssignerParallelism
                         : dynamicBucketAssignerParallelism(storeTable));
+        insertHandle = withWriteSchemaFingerprint(insertHandle, storeTable);
         return planWriteWithKeyDynamicSlot(storeTable, insertHandle, session.getQueryId());
     }
 
@@ -786,6 +787,7 @@ public final class PaimonMetadata
         long commitStartNanos = System.nanoTime();
         try {
             fileStoreTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, "commit writes");
+            validateWriteSchemaUnchanged(tableHandle, fileStoreTable);
             FileStoreTable commitTable = fileStoreTable;
             if (insertBehavior == PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR) {
                 validateInsertTargetIsNew(sessionCatalog, fileStoreTable, tableHandle, commitMessages);
@@ -979,6 +981,35 @@ public final class PaimonMetadata
                 throw new TrinoException(PAIMON_COMMIT_ERROR, "Failed to deserialize Paimon commit fragment", e);
             }
         }).collect(toList());
+    }
+
+    /**
+     * Captures the identity of the columns this write was planned for, so the commit can detect a schema
+     * change that happened while the write was in progress. Paimon accepts data files written against an
+     * older schema, which would otherwise commit values the current schema no longer shows.
+     */
+    private static PaimonTableHandle withWriteSchemaFingerprint(PaimonTableHandle tableHandle, FileStoreTable storeTable)
+    {
+        Optional<String> fingerprint = PaimonTableSupport.writeSchemaFingerprint(
+                storeTable,
+                tableHandle.getWriteColumns().orElseThrow(() ->
+                        new IllegalStateException("Paimon write planning requires write columns")));
+        return fingerprint.map(tableHandle::withWriteSchemaFingerprint).orElse(tableHandle);
+    }
+
+    private static void validateWriteSchemaUnchanged(PaimonTableHandle tableHandle, FileStoreTable fileStoreTable)
+    {
+        Optional<String> plannedFingerprint = tableHandle.getWriteSchemaFingerprint();
+        if (plannedFingerprint.isEmpty()) {
+            return;
+        }
+        List<PaimonColumnHandle> writeColumns = tableHandle.getWriteColumns().orElseThrow(() ->
+                new IllegalStateException("Paimon write schema fingerprint requires write columns"));
+        Optional<String> currentFingerprint = PaimonTableSupport.writeSchemaFingerprint(fileStoreTable, writeColumns);
+        if (!currentFingerprint.equals(plannedFingerprint)) {
+            throw new TrinoException(PAIMON_COMMIT_ERROR,
+                    "Paimon table schema changed while the write was in progress; refusing to commit rows planned for a different column layout");
+        }
     }
 
     private static void validateInsertTargetIsNew(
@@ -1250,10 +1281,12 @@ public final class PaimonMetadata
                 .map(this::toPaimonColumnHandle)
                 .collect(toList());
         OptionalInt plannedAssignerParallelism = paimonTableHandle.getPlannedRowLevelDynamicBucketAssignerParallelism();
-        PaimonTableHandle mergeHandle = paimonTableHandle.withWriteColumns(writeColumns)
-                .withDynamicBucketAssignerParallelism(plannedAssignerParallelism.isPresent()
-                        ? plannedAssignerParallelism
-                        : dynamicBucketAssignerParallelism(storeTable));
+        PaimonTableHandle mergeHandle = withWriteSchemaFingerprint(
+                paimonTableHandle.withWriteColumns(writeColumns)
+                        .withDynamicBucketAssignerParallelism(plannedAssignerParallelism.isPresent()
+                                ? plannedAssignerParallelism
+                                : dynamicBucketAssignerParallelism(storeTable)),
+                storeTable);
         return new PaimonMergeTableHandle(planWriteWithKeyDynamicSlot(storeTable, mergeHandle, session.getQueryId()));
     }
 

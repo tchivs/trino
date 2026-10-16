@@ -546,6 +546,24 @@ public class TrinoTableHandleTest
     }
 
     @Test
+    public void testWriteSchemaFingerprintSurvivesJsonRoundTripAndCopies()
+            throws Exception
+    {
+        PaimonColumnHandle id = PaimonColumnHandle.of("id", DataTypes.INT());
+        PaimonTableHandle handle = new PaimonTableHandle("test", "user", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.of(List.of(id)), OptionalLong.empty())
+                .withWriteSchemaFingerprint("id#0:INTEGER;");
+
+        PaimonTableHandle roundTripped = codec.fromJson(codec.toJson(handle));
+
+        assertThat(roundTripped.getWriteSchemaFingerprint()).contains("id#0:INTEGER;");
+        assertThat(roundTripped).isEqualTo(handle);
+        assertThat(handle.copy(TupleDomain.all()).getWriteSchemaFingerprint()).contains("id#0:INTEGER;");
+        assertThat(handle.copy(OptionalLong.of(1)).getWriteSchemaFingerprint()).contains("id#0:INTEGER;");
+        assertThat(handle.withWriteColumns(List.of(id)).getWriteSchemaFingerprint()).contains("id#0:INTEGER;");
+    }
+
+    @Test
     public void testTableWithWriteDynamicOptionsDoesNotAddFormatOverrideForVariantWriteColumns()
             throws Exception
     {

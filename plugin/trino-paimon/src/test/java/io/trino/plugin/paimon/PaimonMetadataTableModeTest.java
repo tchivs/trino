@@ -1988,6 +1988,141 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testDdlRejectsUnparsableOptionValueBeforeCatalogMutation()
+            throws Exception
+    {
+        CapturingDdlCatalog catalog = new CapturingDdlCatalog(fileStoreTable(BucketMode.HASH_FIXED));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(
+                new SchemaTableName("schema", "table"),
+                List.of(new ColumnMetadata("id", INTEGER)),
+                Map.of("bucket", "not-an-int"));
+
+        assertTrinoError(() -> metadata.createTable(SESSION, tableMetadata,
+                        io.trino.spi.connector.SaveMode.FAIL),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Invalid value for Paimon table option 'bucket': Could not parse value 'not-an-int' for key 'bucket'.");
+        assertThat(catalog.initialized).isFalse();
+
+        assertTrinoError(() -> metadata.setTableProperties(SESSION, new PaimonTableHandle("schema", "table", Map.of()),
+                        Map.of("bucket", Optional.of("not-an-int"))),
+                INVALID_TABLE_PROPERTY.toErrorCode(),
+                "Invalid value for Paimon table option 'bucket': Could not parse value 'not-an-int' for key 'bucket'.");
+        assertThat(catalog.alterCalls).isZero();
+    }
+
+    @Test
+    public void testBeginInsertCapturesWriteSchemaFingerprint()
+            throws Exception
+    {
+        FileStoreTable table = commitFileStoreTable(new AtomicBoolean(), new AtomicBoolean());
+        PaimonMetadata metadata = new PaimonMetadata(new TestingPaimonCatalog(bucketModeTable(table)), TESTING_TYPE_MANAGER);
+
+        ConnectorInsertTableHandle insertHandle = metadata.beginInsert(SESSION,
+                new PaimonTableHandle("schema", "table", Map.of()),
+                List.of(PaimonColumnHandle.of("id", DataTypes.INT()), PaimonColumnHandle.of("pt", DataTypes.STRING())),
+                RetryMode.NO_RETRIES);
+
+        assertThat(((PaimonTableHandle) insertHandle).getWriteSchemaFingerprint()).isPresent();
+    }
+
+    @Test
+    public void testCommitRejectsWriteSchemaChangedDuringWrite()
+            throws Exception
+    {
+        AtomicBoolean committed = new AtomicBoolean();
+        FileStoreTable baseline = commitFileStoreTable(new AtomicBoolean(), committed);
+        List<PaimonColumnHandle> writeColumns = List.of(
+                PaimonColumnHandle.of("id", DataTypes.INT()),
+                PaimonColumnHandle.of("pt", DataTypes.STRING()));
+        String fingerprint = PaimonTableSupport.writeSchemaFingerprint(baseline, writeColumns).orElseThrow();
+
+        // Same column names, new field id for pt: the column was dropped and re-added while the write ran
+        org.apache.paimon.types.RowType driftedRowType = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(9, "pt", DataTypes.STRING()));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(overridingRowType(baseline, driftedRowType));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.of(writeColumns), OptionalLong.empty())
+                .withWriteSchemaFingerprint(fingerprint);
+
+        assertThatThrownBy(() -> metadata.finishInsert(SESSION, tableHandle, List.of(commitFragment()), List.of()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage(
+                            "Paimon table schema changed while the write was in progress; refusing to commit rows planned for a different column layout");
+                });
+        assertThat(committed).isFalse();
+        assertThat(catalog.stats().getWriteCommitFailures()).isEqualTo(1);
+    }
+
+    @Test
+    public void testCommitAcceptsAdditiveSchemaChangeDuringWrite()
+            throws Exception
+    {
+        AtomicBoolean committed = new AtomicBoolean();
+        FileStoreTable baseline = commitFileStoreTable(new AtomicBoolean(), committed);
+        List<PaimonColumnHandle> writeColumns = List.of(
+                PaimonColumnHandle.of("id", DataTypes.INT()),
+                PaimonColumnHandle.of("pt", DataTypes.STRING()));
+        String fingerprint = PaimonTableSupport.writeSchemaFingerprint(baseline, writeColumns).orElseThrow();
+
+        // Adding a column leaves the written columns untouched
+        org.apache.paimon.types.RowType withAddedColumn = DataTypes.ROW(
+                DataTypes.FIELD(0, "id", DataTypes.INT()),
+                DataTypes.FIELD(1, "pt", DataTypes.STRING()),
+                DataTypes.FIELD(2, "extra", DataTypes.STRING()));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(overridingRowType(baseline, withAddedColumn));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.of(writeColumns), OptionalLong.empty())
+                .withWriteSchemaFingerprint(fingerprint);
+
+        assertThat(metadata.finishInsert(SESSION, tableHandle, List.of(commitFragment()), List.of())).isEmpty();
+        assertThat(committed).isTrue();
+    }
+
+    private static FileStoreTable bucketModeTable(FileStoreTable delegate)
+    {
+        return overridingTable(delegate, (name, args) ->
+                name.equals("bucketMode") ? org.apache.paimon.table.BucketMode.HASH_FIXED : null);
+    }
+
+    private static FileStoreTable overridingRowType(FileStoreTable delegate, org.apache.paimon.types.RowType rowType)
+    {
+        return overridingTable(delegate, (name, args) -> name.equals("rowType") ? rowType : null);
+    }
+
+    /**
+     * Wraps a table so the given overrides apply to it and to the latest-schema refresh the planning and
+     * commit paths use. An override returns {@code null} when the method should be delegated.
+     */
+    private static FileStoreTable overridingTable(
+            FileStoreTable delegate,
+            java.util.function.BiFunction<String, Object[], Object> override)
+    {
+        return (FileStoreTable) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {FileStoreTable.class},
+                (proxy, method, args) -> {
+                    Object overridden = override.apply(method.getName(), args);
+                    if (overridden != null) {
+                        return overridden;
+                    }
+                    if (method.getName().equals("copyWithLatestSchema")) {
+                        return overridingTable((FileStoreTable) method.invoke(delegate, args), override);
+                    }
+                    try {
+                        return method.invoke(delegate, args);
+                    }
+                    catch (java.lang.reflect.InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+    }
+
+    @Test
     public void testMalformedCommitFragmentRecordsCommitFailure()
     {
         TestingPaimonCatalog catalog = new TestingPaimonCatalog(

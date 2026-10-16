@@ -111,6 +111,7 @@ public class PaimonTableHandle
     private final OptionalInt dynamicBucketAssignerParallelism;
     private final boolean keyDynamicBootstrapSnapshotPlanned;
     private final OptionalLong keyDynamicBootstrapSnapshot;
+    private final Optional<String> writeSchemaFingerprint;
     private final Map<String, String> dynamicOptions;
 
     private final transient Map<Catalog, Table> tablesByCatalog = Collections.synchronizedMap(new IdentityHashMap<>());
@@ -148,7 +149,7 @@ public class PaimonTableHandle
     {
         this(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns, limit,
                 deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism, false,
-                OptionalLong.empty());
+                OptionalLong.empty(), Optional.empty());
     }
 
     @JsonCreator
@@ -163,7 +164,8 @@ public class PaimonTableHandle
             @JsonProperty("createTableOperation") Optional<String> createTableOperation,
             @JsonProperty("dynamicBucketAssignerParallelism") OptionalInt dynamicBucketAssignerParallelism,
             @JsonProperty("keyDynamicBootstrapSnapshotPlanned") Boolean keyDynamicBootstrapSnapshotPlanned,
-            @JsonProperty("keyDynamicBootstrapSnapshot") OptionalLong keyDynamicBootstrapSnapshot)
+            @JsonProperty("keyDynamicBootstrapSnapshot") OptionalLong keyDynamicBootstrapSnapshot,
+            @JsonProperty("writeSchemaFingerprint") Optional<String> writeSchemaFingerprint)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         checkArgument(!this.schemaName.isBlank(), "schemaName is blank");
@@ -190,6 +192,9 @@ public class PaimonTableHandle
         this.keyDynamicBootstrapSnapshot.ifPresent(value ->
                 checkArgument(value >= 0, "keyDynamicBootstrapSnapshot must be non-negative: %s", value));
         checkArgument(this.limit.isEmpty() || this.limit.getAsLong() >= 0, "limit must be non-negative");
+        this.writeSchemaFingerprint = writeSchemaFingerprint == null ? Optional.empty() : writeSchemaFingerprint;
+        this.writeSchemaFingerprint.ifPresent(fingerprint ->
+                checkArgument(!fingerprint.isEmpty(), "writeSchemaFingerprint must not be empty"));
     }
 
     private static Map<String, String> copyDynamicOptions(Map<String, String> dynamicOptions)
@@ -835,7 +840,7 @@ public class PaimonTableHandle
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
                 limit, deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism,
-                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot, writeSchemaFingerprint);
     }
 
     public PaimonTableHandle copy(Optional<List<ColumnHandle>> projectedColumns)
@@ -843,7 +848,7 @@ public class PaimonTableHandle
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter,
                 toPaimonColumnHandles(projectedColumns), writeColumns, limit, deletePartitionSpecs,
                 createTableOperation, dynamicBucketAssignerParallelism,
-                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot, writeSchemaFingerprint);
     }
 
     public PaimonTableHandle withWriteColumns(List<ColumnHandle> writeColumns)
@@ -852,7 +857,7 @@ public class PaimonTableHandle
         checkArgument(!writeColumns.isEmpty(), "writeColumns is empty");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns,
                 Optional.of(toPaimonColumnHandles(writeColumns)), limit, deletePartitionSpecs, createTableOperation,
-                dynamicBucketAssignerParallelism, keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
+                dynamicBucketAssignerParallelism, keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot, writeSchemaFingerprint);
     }
 
     public PaimonTableHandle withCreateTableOperation(String createTableOperation)
@@ -860,7 +865,7 @@ public class PaimonTableHandle
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
                 limit, deletePartitionSpecs, Optional.of(requireNonNull(createTableOperation,
                         "createTableOperation is null")), dynamicBucketAssignerParallelism,
-                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot, writeSchemaFingerprint);
     }
 
     public PaimonTableHandle withDynamicBucketAssignerParallelism(
@@ -869,7 +874,7 @@ public class PaimonTableHandle
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
                 limit, deletePartitionSpecs, createTableOperation,
                 copyDynamicBucketAssignerParallelism(dynamicBucketAssignerParallelism),
-                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot, writeSchemaFingerprint);
     }
 
     private static Optional<List<PaimonColumnHandle>> toPaimonColumnHandles(Optional<List<ColumnHandle>> columns)
@@ -896,7 +901,22 @@ public class PaimonTableHandle
     {
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
                 limit, deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism,
-                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot, writeSchemaFingerprint);
+    }
+
+    public PaimonTableHandle withWriteSchemaFingerprint(String fingerprint)
+    {
+        requireNonNull(fingerprint, "fingerprint is null");
+        checkArgument(!fingerprint.isEmpty(), "fingerprint is empty");
+        return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
+                limit, deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism,
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot, Optional.of(fingerprint));
+    }
+
+    @JsonProperty("writeSchemaFingerprint")
+    public Optional<String> getWriteSchemaFingerprint()
+    {
+        return writeSchemaFingerprint;
     }
 
     public PaimonTableHandle withDeletePartitionSpecs(List<Map<String, String>> deletePartitionSpecs)
@@ -904,14 +924,15 @@ public class PaimonTableHandle
         requireNonNull(deletePartitionSpecs, "deletePartitionSpecs is null");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
                 limit, Optional.of(deletePartitionSpecs), createTableOperation, dynamicBucketAssignerParallelism,
-                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot);
+                keyDynamicBootstrapSnapshotPlanned, keyDynamicBootstrapSnapshot, writeSchemaFingerprint);
     }
 
     PaimonTableHandle withKeyDynamicBootstrapSnapshot(OptionalLong snapshot)
     {
         requireNonNull(snapshot, "snapshot is null");
         return new PaimonTableHandle(schemaName, tableName, dynamicOptions, filter, projectedColumns, writeColumns,
-                limit, deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism, true, snapshot);
+                limit, deletePartitionSpecs, createTableOperation, dynamicBucketAssignerParallelism, true, snapshot,
+                writeSchemaFingerprint);
     }
 
     @Override
