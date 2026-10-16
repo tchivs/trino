@@ -434,12 +434,25 @@ and the Paimon format providers are not visible from Trino, so a table with an
 unsupported column cannot be written from Trino at all. The connector rejects
 such a write when it creates the sink, before any row is read:
 
-| Column type | `file_format` `ORC` | `file_format` `PARQUET` |
-| ----------- | ------------------- | ----------------------- |
-| `TIME` | rejected | rejected |
-| `TIMESTAMP(9) WITH LOCAL TIME ZONE` | supported | rejected |
-| `TIMESTAMP(9)` | supported, except pre-epoch | supported |
-| `BLOB`, `VARIANT`, `VECTOR`, `MULTISET` | rejected | rejected |
+:::{list-table} Managed writer type support
+:widths: 40, 30, 30
+:header-rows: 1
+
+* - Column type
+  - `file_format` `ORC`
+  - `file_format` `PARQUET`
+* - `TIME`
+  - rejected
+  - rejected
+* - `TIMESTAMP(9) WITH LOCAL TIME ZONE`
+  - supported
+  - rejected
+* - `TIMESTAMP(9)`
+  - supported, except pre-epoch
+  - supported
+* - `BLOB`, `VARIANT`, `VECTOR`, `MULTISET`
+  - rejected
+  - rejected
 
 Notes:
 
