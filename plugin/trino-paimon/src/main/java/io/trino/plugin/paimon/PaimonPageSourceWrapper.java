@@ -24,6 +24,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static io.trino.plugin.paimon.PaimonLongUtils.saturatedAdd;
 import static java.util.Objects.requireNonNull;
@@ -35,18 +36,23 @@ public class PaimonPageSourceWrapper
     private final ConnectorPageSource source;
 
     private final Optional<DeletionVector> deletionVector;
+    private final long retainedDeletionVectorBytes;
     private long completedPositions;
 
-    public PaimonPageSourceWrapper(ConnectorPageSource source, Optional<DeletionVector> deletionVector)
+    public PaimonPageSourceWrapper(ConnectorPageSource source, Optional<DeletionVector> deletionVector,
+            long retainedDeletionVectorBytes)
     {
         this.source = requireNonNull(source, "source is null");
         this.deletionVector = requireNonNull(deletionVector, "deletionVector is null");
+        checkArgument(retainedDeletionVectorBytes >= 0,
+                "retainedDeletionVectorBytes must be non-negative: %s", retainedDeletionVectorBytes);
+        this.retainedDeletionVectorBytes = retainedDeletionVectorBytes;
     }
 
     public static ConnectorPageSource wrap(ConnectorPageSource connectorPageSource,
-            Optional<DeletionVector> deletionVector)
+            Optional<DeletionVector> deletionVector, long retainedDeletionVectorBytes)
     {
-        return new PaimonPageSourceWrapper(connectorPageSource, deletionVector);
+        return new PaimonPageSourceWrapper(connectorPageSource, deletionVector, retainedDeletionVectorBytes);
     }
 
     @Override
@@ -141,7 +147,9 @@ public class PaimonPageSourceWrapper
     @Override
     public long getMemoryUsage()
     {
-        return source.getMemoryUsage();
+        // The deletion vector is read eagerly and stays retained for the split lifetime, so Trino must
+        // see its bytes in addition to the wrapped source.
+        return saturatedAdd(source.getMemoryUsage(), retainedDeletionVectorBytes, "Paimon deletion vector bytes");
     }
 
     @Override

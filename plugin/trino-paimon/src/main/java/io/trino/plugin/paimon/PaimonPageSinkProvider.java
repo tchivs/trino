@@ -620,7 +620,12 @@ public class PaimonPageSinkProvider
                 }
             }
             if (keyDynamicWriter == null && keyFingerprintWriter != null) {
-                keyFingerprintWriter.abort();
+                try {
+                    keyFingerprintWriter.abort();
+                }
+                catch (Exception closeFailure) {
+                    e.addSuppressed(closeFailure);
+                }
             }
             throw e;
         }
@@ -631,9 +636,10 @@ public class PaimonPageSinkProvider
         requireNonNull(table, "table is null");
         Options options = new Options(table.options());
         long blockCacheSize = options.get(RocksDBOptions.BLOCK_CACHE_SIZE).getBytes();
-        // GlobalIndexAssigner owns a RocksDB block cache and two bootstrap buffers outside the
-        // normal Paimon writer memory pool. Reserve the configured cache plus one write-buffer
-        // budget so Trino does not undercount native/index memory during bootstrap.
+        // GlobalIndexAssigner owns a RocksDB block cache plus one HeapMemorySegmentPool of
+        // write-buffer size (Paimon's assigner allocates a single RowBuffer from it) outside the
+        // normal Paimon writer memory pool. Reserve both so Trino does not undercount native or
+        // index memory during bootstrap.
         return saturatedAdd(blockCacheSize, table.coreOptions().writeBufferSize(),
                 "Paimon KEY_DYNAMIC memory reservation");
     }

@@ -53,7 +53,14 @@ public class PaimonSessionProperties
     {
         sessionProperties = ImmutableList.<PropertyMetadata<?>>builder()
                 .add(longProperty(SCAN_TIMESTAMP, SCAN_TIMESTAMP_MILLIS.description().toString(), null, true))
-                .add(longProperty(SCAN_SNAPSHOT, SCAN_SNAPSHOT_ID.description().toString(), null, true))
+                .add(longProperty(SCAN_SNAPSHOT, SCAN_SNAPSHOT_ID.description().toString(), null,
+                        value -> {
+                            if (value != null && value < 0) {
+                                throw new TrinoException(INVALID_SESSION_PROPERTY,
+                                        format("%s must not be negative: %s", SCAN_SNAPSHOT, value));
+                            }
+                        },
+                        true))
                 .add(longProperty(SCAN_FILE_CREATION_TIME,
                         SCAN_FILE_CREATION_TIME_MILLIS.description().toString(), null, true))
                 .add(longProperty(SCAN_CREATION_TIME,

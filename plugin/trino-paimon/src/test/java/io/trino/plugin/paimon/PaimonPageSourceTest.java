@@ -3581,7 +3581,8 @@ public class PaimonPageSourceTest
     {
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(
                 new TestingPageSource(new Page(1, bigintBlock(10))),
-                Optional.empty());
+                Optional.empty(),
+                0);
 
         Page page = wrapper.getNextPage();
 
@@ -3593,7 +3594,8 @@ public class PaimonPageSourceTest
     {
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(
                 new TestingPageSource(new Page(1, bigintBlock(10))),
-                Optional.of(emptyDeletionVector()));
+                Optional.of(emptyDeletionVector()),
+                0);
 
         assertTrinoExceptionThrownBy(wrapper::getNextPage)
                 .hasErrorCode(PAIMON_CANNOT_OPEN_SPLIT)
@@ -3604,12 +3606,30 @@ public class PaimonPageSourceTest
     }
 
     @Test
+    void testDeletionVectorWrapperReportsRetainedDeletionVectorBytes()
+    {
+        long deletionVectorLength = 4096;
+        PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(
+                new TestingPageSource(new Page(1, bigintBlock(10))),
+                Optional.of(emptyDeletionVector()),
+                deletionVectorLength);
+
+        // The wrapped source reports no memory, so the wrapper reports the retained deletion vector
+        assertThat(wrapper.getMemoryUsage()).isEqualTo(deletionVectorLength);
+
+        DeletionFile deletionFile = new DeletionFile("dv", 7, deletionVectorLength, 1L);
+        assertThat(PaimonPageSourceProvider.deletionVectorBytes(deletionFile)).isEqualTo(deletionVectorLength);
+        assertThat(PaimonPageSourceProvider.deletionVectorBytes(new DeletionFile("dv", 0, -1, null))).isZero();
+    }
+
+    @Test
     void testDeletionVectorWrapperReadsStartPositionBeforePage()
     {
         PositionTrackingPageSource source = new PositionTrackingPageSource(new Page(3, bigintBlock(10, 20, 30)),
                 5);
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(source,
-                Optional.of(deletionVectorDeleting(6)));
+                Optional.of(deletionVectorDeleting(6)),
+                0);
 
         assertThat(wrapper.getCompletedPositions()).hasValue(0);
 
@@ -3629,7 +3649,8 @@ public class PaimonPageSourceTest
     {
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(
                 PaimonPageSourceProvider.emptyProjectionPageSource(3),
-                Optional.of(deletionVectorDeleting(1)));
+                Optional.of(deletionVectorDeleting(1)),
+                0);
 
         Page page = wrapper.getNextPage();
 
@@ -3647,7 +3668,8 @@ public class PaimonPageSourceTest
         PositionTrackingPageSource source = new PositionTrackingPageSource(new Page(3, bigintBlock(10, 20, 30)),
                 largeStartPosition);
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(source,
-                Optional.of(deletionVectorDeleting(largeStartPosition + 1)));
+                Optional.of(deletionVectorDeleting(largeStartPosition + 1)),
+                0);
 
         Page page = wrapper.getNextPage();
 
@@ -3664,7 +3686,8 @@ public class PaimonPageSourceTest
         PositionTrackingPageSource source = new PositionTrackingPageSource(new Page(3, bigintBlock(10, 20, 30)),
                 Long.MAX_VALUE - 1);
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(source,
-                Optional.of(emptyDeletionVector()));
+                Optional.of(emptyDeletionVector()),
+                0);
 
         assertTrinoExceptionThrownBy(wrapper::getNextPage)
                 .hasErrorCode(PAIMON_CANNOT_OPEN_SPLIT)
@@ -3683,7 +3706,8 @@ public class PaimonPageSourceTest
         PositionTrackingPageSource source = new PositionTrackingPageSource(new Page(3, bigintBlock(10, 20, 30)),
                 5);
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(source,
-                Optional.of(emptyDeletionVector()));
+                Optional.of(emptyDeletionVector()),
+                0);
         setLongField(wrapper, "completedPositions", Long.MAX_VALUE - 1);
 
         Page page = wrapper.getNextPage();
@@ -3698,7 +3722,8 @@ public class PaimonPageSourceTest
         AtomicBoolean closed = new AtomicBoolean();
         PaimonPageSourceWrapper wrapper = new PaimonPageSourceWrapper(
                 new FailingClosePageSource(new Page(1, bigintBlock(10)), closed, null),
-                Optional.of(deletionVectorDeleting(0)));
+                Optional.of(deletionVectorDeleting(0)),
+                0);
 
         assertTrinoExceptionThrownBy(wrapper::getNextPage)
                 .hasErrorCode(PAIMON_CANNOT_OPEN_SPLIT)

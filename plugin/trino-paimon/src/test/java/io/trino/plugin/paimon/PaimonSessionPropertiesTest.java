@@ -24,6 +24,7 @@ import static io.trino.plugin.paimon.PaimonSessionProperties.INSERT_EXISTING_PAR
 import static io.trino.plugin.paimon.PaimonSessionProperties.MINIMUM_SPLIT_WEIGHT;
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_CREATION_TIME;
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_FILE_CREATION_TIME;
+import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_SNAPSHOT;
 import static io.trino.plugin.paimon.PaimonSessionProperties.SCAN_TAG;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -95,6 +96,18 @@ public class PaimonSessionPropertiesTest
         assertThat(PaimonSessionProperties.getInsertExistingPartitionsBehavior(session(Map.of(
                 INSERT_EXISTING_PARTITIONS_BEHAVIOR, " error "))))
                 .isEqualTo(PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR);
+    }
+
+    @Test
+    public void testScanSnapshotIdRejectsNegativeValue()
+    {
+        assertThat(PaimonSessionProperties.getScanSnapshotId(session(Map.of(SCAN_SNAPSHOT, 0L)))).isZero();
+
+        assertThatThrownBy(() -> PaimonSessionProperties.getScanSnapshotId(session(Map.of(SCAN_SNAPSHOT, -1L))))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_SESSION_PROPERTY.toErrorCode());
+                    assertThat(exception).hasMessage("%s must not be negative: %s", SCAN_SNAPSHOT, -1L);
+                });
     }
 
     private static void assertInvalidMinimumSplitWeight(double value)

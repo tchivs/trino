@@ -1032,7 +1032,18 @@ public class PaimonPageSourceProvider
                         "Failed to read deletion vector file: " + file.path(),
                         e);
             }
-        }));
+        }), deletionVectorBytes(deletionFile.orElseThrow()));
+    }
+
+    /**
+     * Size of the retained deletion vector. Paimon's {@link DeletionVector} exposes no retained-size
+     * accessor, so the byte length of the deletion vector slice in the deletion file is used; the
+     * deserialized bitmap is proportional to it.
+     */
+    static long deletionVectorBytes(DeletionFile deletionFile)
+    {
+        requireNonNull(deletionFile, "deletionFile is null");
+        return Math.max(0, deletionFile.length());
     }
 
     static FileStoreTable fileStoreTableForDirectRead(Table table, boolean refreshToLatestSchema)

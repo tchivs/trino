@@ -231,39 +231,50 @@ created, so it is not a Paimon catalog option and is not part of this table.
 ## Catalog session properties
 
 :::{list-table} Paimon catalog session properties
-:widths: 32, 53, 15
+:widths: 30, 15, 40, 15
 :header-rows: 1
 
 * - Property name
+  - Type
   - Description
   - Default
 * - `scan_timestamp_millis`
+  - bigint
   - Read the latest snapshot committed at or before this Unix timestamp in
     milliseconds.
   -
 * - `scan_snapshot_id`
-  - Read a specific Paimon snapshot.
+  - bigint
+  - Read a specific Paimon snapshot. Must not be negative.
   -
 * - `scan_tag_name`
+  - varchar
   - Read the snapshot referenced by a Paimon tag.
   -
 * - `scan_file_creation_time_millis`
+  - bigint
   - Read the latest snapshot whose data files were created at or before this
     Unix timestamp in milliseconds.
   -
 * - `scan_creation_time_millis`
+  - bigint
   - Read the latest snapshot created at or before this Unix timestamp in
     milliseconds.
   -
 * - `insert_existing_partitions_behavior`
+  - varchar
   - Behavior for inserts into an existing partition: `ERROR`, `APPEND`, or
     `OVERWRITE`.
   - `APPEND`
 * - `minimum_split_weight`
-  - Minimum scheduling weight assigned to a split.
+  - double
+  - Minimum scheduling weight assigned to a split, greater than `0` and at most
+    `1`.
   - `0.05`
 * - `dynamic_filtering_wait_timeout`
-  - Maximum time split generation waits for dynamic filters.
+  - varchar
+  - Maximum time split generation waits for dynamic filters, for example `1s` or
+    `500ms`.
   - `0s`
 :::
 
@@ -273,9 +284,14 @@ Use the `WITH` clause of `CREATE TABLE` or `ALTER TABLE SET PROPERTIES` to
 define Paimon option properties. The connector exposes the documented Paimon 1.5
 `CoreOptions` as string-valued properties, converting periods and hyphens in a
 Paimon option name to underscores. For example, Paimon's `file.format` and
-`merge-engine` options are `file_format` and `merge_engine` in Trino. Scan and
-other runtime-only Paimon options are not table properties; use the catalog
-session properties instead.
+`merge-engine` options are `file_format` and `merge_engine` in Trino. Snapshot
+and tag selectors and the incremental-read options are runtime-only and are not
+table properties; use the catalog session properties or a table function
+instead. Paimon's scan fallback branch options
+(`scan.fallback-snapshot-branch`, `scan.fallback-delta-branch`,
+`scan.fallback-branch`, `scan.fallback-branch-read-fail-fast`, and
+`scan.primary-branch`) are table properties, because Paimon resolves the read
+branch from the table option.
 
 In addition to Paimon options, the connector provides these structural table
 properties:
@@ -382,6 +398,17 @@ SELECT * FROM paimon.sales.orders;
 The `scan_timestamp_millis`, `scan_tag_name`, `scan_file_creation_time_millis`,
 and `scan_creation_time_millis` session properties expose the corresponding
 Paimon scan options. Do not combine conflicting version selectors in one query.
+
+`FOR VERSION AS OF` on a table reads the same Paimon scan version selector:
+
+```sql
+SELECT * FROM paimon.sales.orders FOR VERSION AS OF 'tag-daily';
+SELECT * FROM paimon.sales.orders FOR VERSION AS OF 42;
+```
+
+String, character, and integer version literals are supported; other types fail
+with a `NOT_SUPPORTED` error. The table version takes precedence over a session
+selector set in the same query.
 
 ### Write behavior
 

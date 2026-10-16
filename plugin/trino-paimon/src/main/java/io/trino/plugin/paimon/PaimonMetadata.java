@@ -755,12 +755,20 @@ public final class PaimonMetadata
             return Optional.empty();
         }
 
-        List<CommitMessage> commitMessages = deserializeCommitMessages(fragmentsList);
+        PaimonConnectorStats stats = catalog.stats();
+        List<CommitMessage> commitMessages;
+        try {
+            commitMessages = deserializeCommitMessages(fragmentsList);
+        }
+        catch (RuntimeException e) {
+            // A malformed fragment is a failed commit, so it must show up in the commit failure metric.
+            stats.incrementWriteCommitFailures();
+            throw e;
+        }
         Catalog sessionCatalog = catalog.forSession(session);
         FileStoreTable fileStoreTable = null;
         PaimonKeyDynamicBootstrap.OptionalSnapshot expectedSnapshot = PaimonKeyDynamicBootstrap.snapshotFor(tableHandle);
 
-        PaimonConnectorStats stats = catalog.stats();
         long commitBytes = fragmentsList.stream().mapToLong(Slice::length).sum();
         long commitStartNanos = System.nanoTime();
         try {
@@ -1624,7 +1632,7 @@ public final class PaimonMetadata
             throw new TrinoException(SCHEMA_NOT_EMPTY, format("Schema '%s' is not empty", schemaName), e);
         }
         catch (Catalog.DatabaseNotExistException e) {
-            throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schemaName));
+            throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", schemaName), e);
         }
         catch (Exception e) {
             throw paimonMetadataException(format("Failed to drop Paimon schema '%s'", schemaName), e);
@@ -2296,7 +2304,7 @@ public final class PaimonMetadata
             sessionCatalog.createTable(identifier, schema, saveMode == io.trino.spi.connector.SaveMode.IGNORE);
         }
         catch (Catalog.DatabaseNotExistException e) {
-            throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", table.getSchemaName()));
+            throw new TrinoException(SCHEMA_NOT_FOUND, format("Schema '%s' does not exist", table.getSchemaName()), e);
         }
         catch (Catalog.TableAlreadyExistException e) {
             if (saveMode == io.trino.spi.connector.SaveMode.IGNORE) {

@@ -1985,6 +1985,25 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testMalformedCommitFragmentRecordsCommitFailure()
+    {
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(
+                commitFileStoreTable(new AtomicBoolean(), new AtomicBoolean()));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.finishInsert(SESSION, tableHandle,
+                List.of(Slices.wrappedBuffer(new byte[] {1, 2, 3})), List.of()))
+                .isInstanceOfSatisfying(TrinoException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode()));
+
+        PaimonConnectorStats stats = catalog.stats();
+        assertThat(stats.getWriteCommitFailures()).isEqualTo(1);
+        assertThat(stats.getWriteCommitCount()).isZero();
+        assertThat(stats.getWriteCommitBytes()).isZero();
+    }
+
+    @Test
     public void testCommitIgnoresSessionScanSnapshotAndHandleStartupSelections()
             throws Exception
     {
@@ -6712,6 +6731,9 @@ public class PaimonMetadataTableModeTest
         PaimonMetadata metadata = new PaimonMetadata(notExistCatalog, TESTING_TYPE_MANAGER);
         assertTrinoError(() -> metadata.dropSchema(SESSION, "missing", false),
                 SCHEMA_NOT_FOUND.toErrorCode(), "Schema 'missing' does not exist");
+        assertThatThrownBy(() -> metadata.dropSchema(SESSION, "missing", false))
+                .isInstanceOfSatisfying(TrinoException.class,
+                        exception -> assertThat(exception.getCause()).isInstanceOf(Catalog.DatabaseNotExistException.class));
 
         SchemaQueryCatalog notEmptyCatalog = new SchemaQueryCatalog() {
             @Override

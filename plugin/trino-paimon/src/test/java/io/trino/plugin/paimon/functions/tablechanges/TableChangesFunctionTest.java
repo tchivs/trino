@@ -506,6 +506,7 @@ public class TableChangesFunctionTest
                 .isInstanceOfSatisfying(TrinoException.class, exception -> {
                     assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
                     assertThat(exception).hasMessage("Table not found: schema.table");
+                    assertThat(exception.getCause()).isInstanceOf(Catalog.TableNotExistException.class);
                 });
     }
 
