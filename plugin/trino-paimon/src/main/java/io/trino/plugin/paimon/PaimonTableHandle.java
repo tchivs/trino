@@ -34,6 +34,7 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.ConfigOption;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.table.DataTable;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.Table;
@@ -457,6 +458,7 @@ public class PaimonTableHandle
             Table paimonTable = rawTable(catalog);
             Map<String, String> dynamicOptions = readDynamicOptions(session);
             validateHistoricalReadSupported(dynamicOptions);
+            validateHistoricalReadTable(paimonTable, dynamicOptions);
             return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
         }, PaimonTableHandle.class.getClassLoader());
     }
@@ -577,6 +579,7 @@ public class PaimonTableHandle
         return runWithContextClassLoader(() -> {
             validateHistoricalReadSupported(dynamicOptions);
             Table paimonTable = rawTable(catalog);
+            validateHistoricalReadTable(paimonTable, dynamicOptions);
             return requireSupportedTable(!dynamicOptions.isEmpty() ? paimonTable.copy(dynamicOptions) : paimonTable);
         }, PaimonTableHandle.class.getClassLoader());
     }
@@ -610,6 +613,21 @@ public class PaimonTableHandle
         requireNonNull(dynamicOptions, "dynamicOptions is null");
         if (hasHistoricalReadSelection(dynamicOptions) && !supportsHistoricalRead(Identifier.create(schemaName, tableName))) {
             throw new TrinoException(NOT_SUPPORTED, UNSUPPORTED_HISTORICAL_READ_MESSAGE);
+        }
+    }
+
+    /**
+     * Snapshot, tag, and timestamp selectors are resolved by Paimon's snapshot readers, which only data
+     * tables have. Paimon format and object tables accept the scan options and then ignore them, so a
+     * historical query would silently read the current files.
+     */
+    private void validateHistoricalReadTable(Table table, Map<String, String> dynamicOptions)
+    {
+        requireNonNull(table, "table is null");
+        if (hasHistoricalReadSelection(dynamicOptions) && !(table instanceof DataTable)) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon table '%s' of type %s does not support version, tag or timestamp selectors"
+                            .formatted(schemaName + "." + tableName, table.getClass().getSimpleName()));
         }
     }
 

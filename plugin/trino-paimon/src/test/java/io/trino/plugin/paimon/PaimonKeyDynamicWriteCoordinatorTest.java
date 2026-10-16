@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.paimon;
 
+import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -52,6 +53,21 @@ class PaimonKeyDynamicWriteCoordinatorTest
             executor.shutdownNow();
             assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
         }
+    }
+
+    @Test
+    void testAcquireAfterQueryCleanupFailsInsteadOfWaiting()
+    {
+        PaimonKeyDynamicWriteCoordinator coordinator = new PaimonKeyDynamicWriteCoordinator(Duration.ofMillis(50));
+        coordinator.acquire("finished-query", "db.table");
+        coordinator.releaseQuery("finished-query");
+
+        // Cleanup raced a late begin: the late acquire must not wait for a release that already happened
+        assertThatThrownBy(() -> coordinator.acquire("finished-query", "db.table"))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception).hasMessageContaining("already finished");
+                    assertThat(exception).hasMessageContaining("db.table");
+                });
     }
 
     @Test

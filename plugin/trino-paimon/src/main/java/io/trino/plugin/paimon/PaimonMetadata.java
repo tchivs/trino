@@ -992,16 +992,28 @@ public final class PaimonMetadata
         for (int start = 0; start < writtenPartitions.size(); start += MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE) {
             int end = Math.min(start + MAX_LIST_PARTITIONS_BY_NAMES_BATCH_SIZE, writtenPartitions.size());
             List<Partition> existingPartitions = catalog.listPartitionsByNames(
-                    new Identifier(
-                            tableHandle.getSchemaName(),
-                            tableHandle.getTableName(),
-                            fileStoreTable.coreOptions().branch()),
+                    branchQualifiedIdentifier(tableHandle, fileStoreTable),
                     writtenPartitions.subList(start, end));
             if (!existingPartitions.isEmpty()) {
                 throw new TrinoException(READ_ONLY_VIOLATION,
                         format("Cannot insert into an existing partition of Paimon table: %s", tableName));
             }
         }
+    }
+
+    /**
+     * Partition lookups must address the branch table. A branch read names the table with the branch
+     * suffix already ({@code t$branch_dev}), while a write handle for the main name needs the table's
+     * branch option appended; appending it in both cases would duplicate the suffix.
+     */
+    private static Identifier branchQualifiedIdentifier(PaimonTableHandle tableHandle, FileStoreTable fileStoreTable)
+    {
+        Identifier identifier = Identifier.create(tableHandle.getSchemaName(), tableHandle.getTableName());
+        if (identifier.getBranchName() != null) {
+            return identifier;
+        }
+        return new Identifier(tableHandle.getSchemaName(), identifier.getTableName(),
+                fileStoreTable.coreOptions().branch());
     }
 
     private static List<Map<String, String>> writtenPartitionSpecs(
@@ -1896,7 +1908,11 @@ public final class PaimonMetadata
             long records = rowCount.getAsLong();
             stats.nullCount().ifPresent(nullCount -> {
                 if (records == 0) {
-                    builder.setNullsFraction(Estimate.zero());
+                    // An empty table cannot have nulls, so a positive count is corrupt metadata and the
+                    // fraction stays unknown instead of being reported as a known zero.
+                    if (nullCount == 0) {
+                        builder.setNullsFraction(Estimate.zero());
+                    }
                 }
                 else if (records > 0 && nullCount >= 0 && nullCount <= records) {
                     builder.setNullsFraction(Estimate.of((double) nullCount / records));

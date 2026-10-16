@@ -86,10 +86,13 @@ import org.apache.paimon.stats.ColStats;
 import org.apache.paimon.stats.Statistics;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FormatTable;
 import org.apache.paimon.table.FullTextSearchTable;
 import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.VectorSearchTable;
+import org.apache.paimon.table.iceberg.IcebergTable;
+import org.apache.paimon.table.lance.LanceTable;
 import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessageImpl;
@@ -2510,6 +2513,104 @@ public class PaimonMetadataTableModeTest
                 READ_ONLY_VIOLATION.toErrorCode(),
                 "Cannot insert into an existing non-partitioned Paimon table: schema.table");
         assertThat(committed).isFalse();
+    }
+
+    @Test
+    public void testEmptyTableWithPositionsNullCountKeepsNullFractionUnknown()
+    {
+        org.apache.paimon.types.RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+        Statistics statistics = new Statistics(1, 0, 0L, 0L, Map.of(
+                "id", ColStats.newColStats(0, null, null, null, 1L, 4L, 4L)));
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(statisticsTable(rowType, Optional.of(statistics))), TESTING_TYPE_MANAGER);
+
+        ColumnStatistics columnStatistics = metadata.getTableStatistics(SESSION,
+                        new PaimonTableHandle("schema", "table", Map.of()))
+                .getColumnStatistics()
+                .get(PaimonColumnHandle.of("id", DataTypes.BIGINT()));
+
+        // An empty table cannot have nulls, so the corrupt count must not become a known zero fraction
+        assertThat(columnStatistics.getNullsFraction().isUnknown()).isTrue();
+        assertThat(columnStatistics.getDataSize().isUnknown()).isTrue();
+    }
+
+    @Test
+    public void testUnsupportedPaimonTableImplementationsAreRejected()
+    {
+        assertTrinoError(() -> new PaimonMetadata(new TestingPaimonCatalog(proxyTable(IcebergTable.class)),
+                        TESTING_TYPE_MANAGER)
+                        .getTableHandle(SESSION, new SchemaTableName("schema", "table"), Map.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon Iceberg tables are not supported by the Trino connector");
+        assertTrinoError(() -> new PaimonMetadata(new TestingPaimonCatalog(proxyTable(LanceTable.class)),
+                        TESTING_TYPE_MANAGER)
+                        .getTableHandle(SESSION, new SchemaTableName("schema", "table"), Map.of()),
+                NOT_SUPPORTED.toErrorCode(),
+                "Paimon Lance tables are not supported by the Trino connector");
+    }
+
+    @Test
+    public void testHistoricalSelectorRejectedForNonSnapshotTable()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                new TestingPaimonCatalog(proxyTable(FormatTable.class)), TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table",
+                Map.of(CoreOptions.SCAN_VERSION.key(), "1"));
+
+        assertThatThrownBy(() -> metadata.getTableStatistics(SESSION, tableHandle))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode());
+                    assertThat(exception).hasMessageContaining("Paimon table 'schema.table' of type");
+                    assertThat(exception).hasMessageContaining("does not support version, tag or timestamp selectors");
+                });
+    }
+
+    @Test
+    public void testInsertErrorValidatesBranchQualifiedTableOnce()
+            throws Exception
+    {
+        AtomicBoolean copiedWithLatestSchema = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        BinaryRow partition = partitionRow("p1");
+        Map<String, String> partitionSpec = Map.of("pt", "p1");
+        FileStoreTable table = commitFileStoreTable(
+                copiedWithLatestSchema,
+                committed,
+                new AtomicReference<>(),
+                null,
+                new AtomicBoolean(),
+                List.of(),
+                List.of("pt"),
+                Map.of(CoreOptions.BRANCH.key(), "feature"));
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(
+                table, List.of(new Partition(partitionSpec, 1, 1, 1, 1, 1, true)));
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        ConnectorSession errorSession = TestingConnectorSession.builder()
+                .setPropertyMetadata(new PaimonSessionProperties().getSessionProperties())
+                .setPropertyValues(Map.of(
+                        PaimonSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR,
+                        PaimonSessionProperties.InsertExistingPartitionsBehavior.ERROR.name()))
+                .build();
+        Slice fragment = commitFragment(partition);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table$branch_feature", Map.of());
+
+        assertTrinoError(() -> metadata.finishInsert(errorSession, tableHandle, List.of(fragment), List.of()),
+                READ_ONLY_VIOLATION.toErrorCode(),
+                "Cannot insert into an existing partition of Paimon table: schema.table$branch_feature");
+        // The branch suffix belongs to the table name, so the lookup identifier must not append it again
+        assertThat(catalog.listedPartitionIdentifiers)
+                .extracting(Identifier::getObjectName)
+                .containsExactly("table$branch_feature");
+    }
+
+    private static Table proxyTable(Class<?> tableInterface)
+    {
+        return (Table) Proxy.newProxyInstance(
+                PaimonMetadataTableModeTest.class.getClassLoader(),
+                new Class<?>[] {tableInterface},
+                (proxy, method, args) -> {
+                    throw new UnsupportedOperationException(method.getName());
+                });
     }
 
     @Test
@@ -9323,6 +9424,7 @@ public class PaimonMetadataTableModeTest
         private final Table table;
         private final List<Partition> partitionsByNames;
         private final List<Identifier> listedPartitionIdentifiers = new ArrayList<>();
+        private final List<Identifier> listedTableIdentifiers = new ArrayList<>();
         private final List<List<Map<String, String>>> listedPartitionsByNames = new ArrayList<>();
         private final AtomicInteger getTableCalls = new AtomicInteger();
         private boolean initialized;
@@ -9358,8 +9460,9 @@ public class PaimonMetadataTableModeTest
         public Table getTable(Identifier identifier)
         {
             assertThat(initialized).isTrue();
+            // The object name is asserted by each test through the recorded identifiers
             assertThat(identifier.getDatabaseName()).isEqualTo("schema");
-            assertThat(identifier.getObjectName()).isEqualTo("table");
+            listedTableIdentifiers.add(identifier);
             getTableCalls.incrementAndGet();
             return table;
         }
@@ -9374,7 +9477,6 @@ public class PaimonMetadataTableModeTest
         {
             assertThat(initialized).isTrue();
             assertThat(identifier.getDatabaseName()).isEqualTo("schema");
-            assertThat(identifier.getTableName()).isEqualTo("table");
             listedPartitionIdentifiers.add(identifier);
             listedPartitionsByNames.add(List.copyOf(partitions));
             return partitionsByNames.stream()

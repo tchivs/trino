@@ -259,7 +259,7 @@ public final class PaimonColumnHandle
     @Override
     public int hashCode()
     {
-        return Objects.hash(columnName, typeString);
+        return Objects.hash(columnName, typeString, trinoType);
     }
 
     @Override
@@ -273,7 +273,10 @@ public final class PaimonColumnHandle
         }
 
         PaimonColumnHandle other = (PaimonColumnHandle) obj;
-        return columnName.equals(other.columnName) && typeString.equals(other.typeString);
+        // trinoType is derived for every non-VARIANT column, and distinguishes the Trino result type of a
+        // VARIANT column, which the Paimon type alone cannot express.
+        return columnName.equals(other.columnName) && typeString.equals(other.typeString)
+                && trinoType.equals(other.trinoType);
     }
 
     @Override

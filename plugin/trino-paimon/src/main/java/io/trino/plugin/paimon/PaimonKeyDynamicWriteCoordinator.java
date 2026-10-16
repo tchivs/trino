@@ -17,7 +17,10 @@ import com.google.common.util.concurrent.Striped;
 import io.trino.spi.TrinoException;
 
 import java.time.Duration;
+import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -39,9 +42,14 @@ final class PaimonKeyDynamicWriteCoordinator
 {
     private static final int STRIPE_COUNT = 1024;
     private static final Duration DEFAULT_ACQUIRE_TIMEOUT = Duration.ofMinutes(10);
+    private static final int FINISHED_QUERY_HISTORY = 10_000;
 
     private final Striped<Semaphore> tableLocks = Striped.semaphore(STRIPE_COUNT, 1);
     private final ConcurrentHashMap<String, CopyOnWriteArrayList<Lease>> leasesByQuery = new ConcurrentHashMap<>();
+    // Query ids of finished queries. A late acquire for one of them must fail instead of waiting for a
+    // release that already happened. The marker only needs to outlive the race, so the history is bounded.
+    private final Set<String> finishedQueries = ConcurrentHashMap.newKeySet();
+    private final Queue<String> finishedQueryOrder = new ConcurrentLinkedQueue<>();
     private final Duration acquireTimeout;
 
     PaimonKeyDynamicWriteCoordinator()
@@ -62,13 +70,24 @@ final class PaimonKeyDynamicWriteCoordinator
         requireNonNull(queryId, "queryId is null");
         requireNonNull(tableName, "tableName is null");
         Lease lease = new Lease(queryId, tableName, tableLocks.get(tableName));
+        AtomicBoolean finished = new AtomicBoolean();
         leasesByQuery.compute(queryId, (ignored, leases) -> {
+            if (finishedQueries.contains(queryId)) {
+                // Cleanup already ran for this query, so nobody would ever release the lease.
+                finished.set(true);
+                return leases;
+            }
             if (leases == null) {
                 leases = new CopyOnWriteArrayList<>();
             }
             leases.add(lease);
             return leases;
         });
+        if (finished.get()) {
+            throw new TrinoException(PAIMON_METADATA_ERROR,
+                    "Paimon KEY_DYNAMIC write for table " + tableName + " was rejected because query " + queryId
+                            + " is already finished");
+        }
         try {
             lease.acquire();
             return lease;
@@ -82,9 +101,27 @@ final class PaimonKeyDynamicWriteCoordinator
     void releaseQuery(String queryId)
     {
         requireNonNull(queryId, "queryId is null");
+        // Publish the marker before removing the registry so a concurrent acquire either registers a lease
+        // that this call releases, or observes the marker and fails without waiting.
+        markQueryFinished(queryId);
         CopyOnWriteArrayList<Lease> leases = leasesByQuery.remove(queryId);
         if (leases != null) {
             leases.forEach(Lease::release);
+        }
+    }
+
+    private void markQueryFinished(String queryId)
+    {
+        if (!finishedQueries.add(queryId)) {
+            return;
+        }
+        finishedQueryOrder.add(queryId);
+        while (finishedQueries.size() > FINISHED_QUERY_HISTORY) {
+            String oldest = finishedQueryOrder.poll();
+            if (oldest == null) {
+                return;
+            }
+            finishedQueries.remove(oldest);
         }
     }
 

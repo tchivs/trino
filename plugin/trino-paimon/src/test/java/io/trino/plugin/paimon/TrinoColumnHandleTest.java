@@ -201,6 +201,25 @@ public class TrinoColumnHandleTest
     }
 
     @Test
+    public void testVariantColumnHandleEqualityIncludesTrinoType()
+    {
+        org.apache.paimon.types.RowType logicalType = DataTypes.ROW(DataTypes.FIELD(0, "f0", DataTypes.VARIANT()));
+        Type namedField = RowType.from(List.of(RowType.field("f0", JSON_TYPE)));
+        Type anonymousField = RowType.anonymous(List.of(JSON_TYPE));
+
+        // Both row shapes are valid for the Paimon row, but they describe different Trino result types
+        assertThat(PaimonColumnHandle.matchesTrinoType(logicalType, namedField)).isTrue();
+        assertThat(PaimonColumnHandle.matchesTrinoType(logicalType, anonymousField)).isTrue();
+
+        PaimonColumnHandle named = PaimonColumnHandle.of("variant_row", logicalType, namedField);
+        PaimonColumnHandle anonymous = PaimonColumnHandle.of("variant_row", logicalType, anonymousField);
+
+        assertThat(named).isNotEqualTo(anonymous);
+        assertThat(named.hashCode()).isNotEqualTo(anonymous.hashCode());
+        assertThat(PaimonColumnHandle.of("variant_row", logicalType, namedField)).isEqualTo(named);
+    }
+
+    @Test
     public void testVariantColumnHandleRequiresTypeManagerConstructor()
     {
         assertThatThrownBy(() -> PaimonColumnHandle.of("variant_value", DataTypes.VARIANT()))

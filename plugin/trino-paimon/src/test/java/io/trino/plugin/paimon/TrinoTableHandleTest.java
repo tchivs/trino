@@ -34,6 +34,7 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.FullTextQuery;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
+import org.apache.paimon.table.DataTable;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FullTextSearchTable;
 import org.apache.paimon.table.InnerTable;
@@ -1506,7 +1507,8 @@ public class TrinoTableHandleTest
     private static Table capturingTable(AtomicReference<Map<String, String>> copiedOptions)
     {
         AtomicReference<Table> tableReference = new AtomicReference<>();
-        Table table = (Table) Proxy.newProxyInstance(Table.class.getClassLoader(), new Class<?>[] {Table.class},
+        // DataTable because historical selectors require a snapshot-capable Paimon table
+        Table table = (Table) Proxy.newProxyInstance(Table.class.getClassLoader(), new Class<?>[] {DataTable.class},
                 (proxy, method, args) -> {
                     if (method.getName().equals("copy")) {
                         copiedOptions.set(Map.copyOf((Map<String, String>) args[0]));

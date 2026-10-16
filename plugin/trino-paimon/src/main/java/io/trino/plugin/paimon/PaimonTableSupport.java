@@ -19,6 +19,8 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FullTextSearchTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.VectorSearchTable;
+import org.apache.paimon.table.iceberg.IcebergTable;
+import org.apache.paimon.table.lance.LanceTable;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
@@ -38,6 +40,14 @@ public final class PaimonTableSupport
         if (table instanceof FullTextSearchTable) {
             throw new TrinoException(NOT_SUPPORTED,
                     "Paimon full-text search tables are not supported by the Trino connector");
+        }
+        if (table instanceof IcebergTable) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon Iceberg tables are not supported by the Trino connector");
+        }
+        if (table instanceof LanceTable) {
+            throw new TrinoException(NOT_SUPPORTED,
+                    "Paimon Lance tables are not supported by the Trino connector");
         }
         return table;
     }
