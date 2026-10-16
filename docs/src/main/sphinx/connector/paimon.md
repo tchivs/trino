@@ -482,6 +482,12 @@ The connector publishes runtime counters to JMX under the object name
   row, so a deleted row or the before-value of an updated row is indistinguishable
   from an inserted row. Use `$audit_log` or `$binlog` on a table with
   `changelog_producer` enabled to read change kinds.
+- The Trino-managed ORC writer (`file_format` `ORC` with the Trino no-Hadoop
+  format provider) rejects pre-epoch timestamps that carry a fractional second,
+  for example `1969-12-31 23:59:59.999`. Trino's ORC writer stores the seconds of
+  such values truncated towards zero, so the file holds a value one second away
+  from the value Trino wrote. Write those values to `PARQUET` tables or let
+  Paimon's native writer store them instead.
 - Column and field names are matched case-insensitively. A table with two
   columns that differ only by case cannot be used as a write target, and schema
   changes for such a column are rejected as ambiguous.

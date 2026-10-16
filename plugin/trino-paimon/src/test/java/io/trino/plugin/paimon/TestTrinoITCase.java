@@ -647,6 +647,30 @@ public class TestTrinoITCase
     }
 
     @Test
+    public void testRowTrackingNullRowIdPredicate()
+    {
+        String tableName = "row_id_null_predicate_values";
+        sql("DROP TABLE IF EXISTS paimon.default." + tableName);
+        sql("CREATE TABLE paimon.default." + tableName + " ("
+                + "id integer, "
+                + "name varchar) "
+                + "WITH (row_tracking_enabled = 'true')");
+        try {
+            sql("INSERT INTO paimon.default." + tableName + " VALUES (11, 'alpha'), (22, 'beta')");
+
+            // A Paimon row id is always present, so a null row id matches nothing and the table must not be read whole
+            assertThat(sql("SELECT count(*) FROM paimon.default." + tableName + " WHERE _row_id IS NULL")).isEqualTo("[[0]]");
+            assertThat(sql("SELECT id FROM paimon.default." + tableName
+                    + " WHERE _row_id IN (BIGINT '0', NULL) ORDER BY id")).isEqualTo("[[11]]");
+            assertThat(sql("SELECT id FROM paimon.default." + tableName
+                    + " WHERE _row_id IS NOT NULL ORDER BY id")).isEqualTo("[[11], [22]]");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS paimon.default." + tableName);
+        }
+    }
+
+    @Test
     public void testFilter()
     {
         assertThat(sql("SELECT a, aCa FROM paimon.default.t2 WHERE a < 4")).isEqualTo("[[1, 1], [3, 2]]");
@@ -1619,6 +1643,86 @@ public class TestTrinoITCase
         sql("INSERT INTO paimon.default.nested_field_values VALUES (3, ROW('charlie', 35, 'charlie@test.com'))");
         assertThat(sql("SELECT id, info.full_name, info.age, info.email FROM paimon.default.nested_field_values WHERE id = 3"))
                 .isEqualTo("[[3, charlie, 35, charlie@test.com]]");
+    }
+
+    @Test
+    public void testNanosecondTimestampValues()
+    {
+        String tableName = "timestamp_9_values";
+        sql("DROP TABLE IF EXISTS paimon.default." + tableName);
+        sql("CREATE TABLE paimon.default." + tableName + " ("
+                + "id integer, "
+                + "ts timestamp(9), "
+                + "ts_tz timestamp(3) with time zone)");
+        try {
+            sql("INSERT INTO paimon.default." + tableName + " VALUES "
+                    + "(1, TIMESTAMP '1969-12-31 23:59:59.999999999', TIMESTAMP '1969-12-31 23:59:59.999 UTC'), "
+                    + "(2, TIMESTAMP '1970-01-01 00:00:00.000000001', TIMESTAMP '1970-01-01 00:00:00.000 UTC'), "
+                    + "(3, TIMESTAMP '2026-10-17 12:34:56.123456789', TIMESTAMP '2026-10-17 12:34:56.123 UTC'), "
+                    + "(4, TIMESTAMP '2026-10-17 12:34:56.123456000', TIMESTAMP '2026-10-17 12:34:56.123 UTC')");
+
+            assertThat(sql("SELECT id, ts FROM paimon.default." + tableName + " ORDER BY id"))
+                    .isEqualTo("[[1, 1969-12-31T23:59:59.999999999], "
+                            + "[2, 1970-01-01T00:00:00.000000001], "
+                            + "[3, 2026-10-17T12:34:56.123456789], "
+                            + "[4, 2026-10-17T12:34:56.123456]]");
+
+            // Predicates on nanosecond values are pushed down to Paimon and must keep every matching row
+            assertThat(sql("SELECT id FROM paimon.default." + tableName
+                    + " WHERE ts = TIMESTAMP '2026-10-17 12:34:56.123456789'")).isEqualTo("[[3]]");
+            assertThat(sql("SELECT id FROM paimon.default." + tableName
+                    + " WHERE ts = TIMESTAMP '2026-10-17 12:34:56.123456'")).isEqualTo("[[4]]");
+            assertThat(sql("SELECT id FROM paimon.default." + tableName
+                    + " WHERE ts > TIMESTAMP '1970-01-01 00:00:00.000000000' ORDER BY id")).isEqualTo("[[2], [3], [4]]");
+            assertThat(sql("SELECT id FROM paimon.default." + tableName
+                    + " WHERE ts < TIMESTAMP '1970-01-01 00:00:00.000000000' ORDER BY id")).isEqualTo("[[1]]");
+            assertThat(sql("SELECT id FROM paimon.default." + tableName
+                    + " WHERE ts_tz = TIMESTAMP '1969-12-31 23:59:59.999 UTC'")).isEqualTo("[[1]]");
+            assertThat(sql("SELECT id FROM paimon.default." + tableName
+                    + " WHERE ts_tz = TIMESTAMP '2026-10-17 12:34:56.123 UTC' ORDER BY id")).isEqualTo("[[3], [4]]");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS paimon.default." + tableName);
+        }
+    }
+
+    @Test
+    public void testTrinoManagedOrcWriterRejectsPreEpochFractionalTimestamps()
+    {
+        String tableName = "orc_pre_epoch_values";
+        sql("DROP TABLE IF EXISTS paimon.default." + tableName);
+        sql("CREATE TABLE paimon.default." + tableName + " ("
+                + "id integer, "
+                + "ts3 timestamp(3), "
+                + "ts6 timestamp(6), "
+                + "ts9 timestamp(9)) "
+                + "WITH (file_format = 'ORC')");
+        try {
+            // Trino's ORC writer stores integral seconds and post-epoch values correctly
+            sql("INSERT INTO paimon.default." + tableName + " VALUES "
+                    + "(1, TIMESTAMP '1969-12-31 23:59:59.000', TIMESTAMP '1969-12-31 23:59:59.000000', TIMESTAMP '1969-12-31 23:59:59.000000000'), "
+                    + "(2, TIMESTAMP '1970-01-01 00:00:00.500', TIMESTAMP '1970-01-01 00:00:00.500000', TIMESTAMP '1970-01-01 00:00:00.500000000')");
+
+            assertThat(sql("SELECT id, ts3, ts6, ts9 FROM paimon.default." + tableName + " ORDER BY id"))
+                    .isEqualTo("[[1, 1969-12-31T23:59:59, 1969-12-31T23:59:59, 1969-12-31T23:59:59], "
+                            + "[2, 1970-01-01T00:00:00.500, 1970-01-01T00:00:00.500, 1970-01-01T00:00:00.500]]");
+
+            // A fractional pre-epoch value is written one second off by Trino's ORC writer, so it is rejected
+            assertQueryFails(
+                    "INSERT INTO paimon.default." + tableName + " VALUES (3, TIMESTAMP '1969-12-31 23:59:59.999', NULL, NULL)",
+                    ".*Trino Paimon ORC writer cannot write pre-epoch timestamp value 1969-12-31T23:59:59.999 with sub-second precision.*");
+            assertQueryFails(
+                    "INSERT INTO paimon.default." + tableName + " VALUES (3, NULL, TIMESTAMP '1969-12-31 23:59:59.999999', NULL)",
+                    ".*Trino Paimon ORC writer cannot write pre-epoch timestamp value 1969-12-31T23:59:59.999999 with sub-second precision.*");
+            assertQueryFails(
+                    "INSERT INTO paimon.default." + tableName + " VALUES (3, NULL, NULL, TIMESTAMP '1969-12-31 23:59:58.500000000')",
+                    ".*Trino Paimon ORC writer cannot write pre-epoch timestamp value .* with sub-second precision.*");
+
+            assertThat(sql("SELECT count(*) FROM paimon.default." + tableName)).isEqualTo("[[2]]");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS paimon.default." + tableName);
+        }
     }
 
     @Test

@@ -26,15 +26,20 @@ import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.paimon.PaimonPageBuilder;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.type.Type;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.format.FormatWriter;
 import org.apache.paimon.format.SimpleColStats;
 import org.apache.paimon.format.SimpleStatsCollector;
 import org.apache.paimon.fs.CloseShieldOutputStream;
 import org.apache.paimon.fs.PositionOutputStream;
+import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.InternalRowUtils;
 import org.joda.time.DateTimeZone;
 
 import java.io.Closeable;
@@ -47,6 +52,7 @@ import java.util.Optional;
 import static io.trino.orc.OrcWriteValidation.OrcWriteValidationMode.BOTH;
 import static io.trino.plugin.paimon.format.TrinoPaimonFileFormat.ORC;
 import static io.trino.plugin.paimon.format.TrinoPaimonFileFormat.PARQUET;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 
 class TrinoPaimonFormatWriter
@@ -57,6 +63,12 @@ class TrinoPaimonFormatWriter
 
     private final PaimonPageBuilder pageBuilder;
     private final SimpleStatsCollector statsCollector;
+    // Trino's ORC writer stores the seconds of a timestamp truncated towards zero, so a pre-epoch timestamp with a
+    // fractional second is written shifted by one second. Values in that range are rejected for the managed ORC
+    // writer instead of being stored in a way that readers decode differently; Parquet and the native writer are
+    // unaffected. Only populated for the ORC format.
+    private final int[] orcTimestampPositions;
+    private final DataType[] orcTimestampTypes;
     private final int writeBatchSize;
     private final WriterAdapter writer;
     private boolean closed;
@@ -76,6 +88,8 @@ class TrinoPaimonFormatWriter
     {
         this.statsCollector = new SimpleStatsCollector(requireNonNull(rowType, "rowType is null"));
         this.pageBuilder = new PaimonPageBuilder(columnTypes, logicalTypes);
+        this.orcTimestampPositions = ORC.equals(formatIdentifier) ? timestampPositions(rowType) : new int[0];
+        this.orcTimestampTypes = ORC.equals(formatIdentifier) ? timestampTypes(rowType) : new DataType[0];
         this.writeBatchSize = writeBatchSize;
         this.writer = switch (requireNonNull(formatIdentifier, "formatIdentifier is null")) {
             case PARQUET -> createParquetWriter(out, columnNames, columnTypes, writerOptions, compression);
@@ -89,6 +103,7 @@ class TrinoPaimonFormatWriter
     public void addElement(InternalRow element)
             throws IOException
     {
+        validateOrcTimestampValues(element);
         pageBuilder.appendRow(element);
         if (pageBuilder.isFull()
                 || (writeBatchSize > 0 && pageBuilder.getPositionCount() >= writeBatchSize)) {
@@ -140,6 +155,49 @@ class TrinoPaimonFormatWriter
             return null;
         }
         return new WriterMetadata(stats);
+    }
+
+    private static int[] timestampPositions(RowType rowType)
+    {
+        List<DataField> fields = rowType.getFields();
+        int[] positions = new int[fields.size()];
+        int count = 0;
+        for (int i = 0; i < fields.size(); i++) {
+            if (isTimestamp(fields.get(i))) {
+                positions[count++] = i;
+            }
+        }
+        return Arrays.copyOf(positions, count);
+    }
+
+    private static DataType[] timestampTypes(RowType rowType)
+    {
+        return Arrays.stream(timestampPositions(rowType))
+                .mapToObj(position -> rowType.getFields().get(position).type())
+                .toArray(DataType[]::new);
+    }
+
+    private static boolean isTimestamp(DataField field)
+    {
+        DataTypeRoot typeRoot = field.type().getTypeRoot();
+        return typeRoot == DataTypeRoot.TIMESTAMP_WITHOUT_TIME_ZONE || typeRoot == DataTypeRoot.TIMESTAMP_WITH_LOCAL_TIME_ZONE;
+    }
+
+    private void validateOrcTimestampValues(InternalRow element)
+    {
+        for (int i = 0; i < orcTimestampPositions.length; i++) {
+            Object value = InternalRowUtils.get(element, orcTimestampPositions[i], orcTimestampTypes[i]);
+            if (!(value instanceof Timestamp timestamp)) {
+                continue;
+            }
+            long millis = timestamp.getMillisecond();
+            if (millis < 0 && (timestamp.getNanoOfMillisecond() != 0 || millis % 1_000 != 0)) {
+                throw new TrinoException(NOT_SUPPORTED,
+                        ("Trino Paimon ORC writer cannot write pre-epoch timestamp value %s with sub-second precision because "
+                                + "Trino's ORC writer stores the seconds of such values truncated. Use file_format 'PARQUET' "
+                                + "or the Paimon native writer for pre-epoch timestamp data.").formatted(timestamp));
+            }
+        }
     }
 
     private void flush()
