@@ -568,6 +568,51 @@ public class TableChangesFunctionTest
                 });
     }
 
+    @Test
+    public void testChangelogScanModeRequiresChangelogProducer()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(table(
+                        DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
+
+        assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(
+                        INCREMENTAL_BETWEEN, "1,2",
+                        INCREMENTAL_BETWEEN_SCAN_MODE, "changelog")), new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
+                    assertThat(exception).hasMessage(INCREMENTAL_BETWEEN_SCAN_MODE
+                            + "=changelog requires a table with a changelog producer");
+                });
+
+        // A table with a changelog producer keeps the mode valid
+        TableChangesFunction withProducer = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(table(
+                        DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())),
+                        Map.of(CoreOptions.CHANGELOG_PRODUCER.key(), "input")))));
+        assertThat(withProducer.analyze(SESSION, null, arguments(Map.of(
+                        INCREMENTAL_BETWEEN, "1,2",
+                        INCREMENTAL_BETWEEN_SCAN_MODE, "changelog")), new RecordingAccessControl()))
+                .isNotNull();
+    }
+
+    @Test
+    public void testTagToSnapshotRejectsDiffScanMode()
+    {
+        TableChangesFunction function = new TableChangesFunction(
+                new TestingMetadataFactory(new TestingPaimonCatalog(table(
+                        DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.INT())), Map.of()))));
+
+        assertThatThrownBy(() -> function.analyze(SESSION, null, arguments(Map.of(
+                        INCREMENTAL_BETWEEN, "tag-a,tag-b",
+                        INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT, true,
+                        INCREMENTAL_BETWEEN_SCAN_MODE, "diff")), new RecordingAccessControl()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode());
+                    assertThat(exception).hasMessage(INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT
+                            + " does not support " + INCREMENTAL_BETWEEN_SCAN_MODE + "=diff");
+                });
+    }
+
     private static Map<String, Argument> arguments(Map<String, ?> overrides)
     {
         Map<String, Argument> arguments = new HashMap<>();
@@ -610,6 +655,7 @@ public class TableChangesFunctionTest
                 (proxy, method, args) -> switch (method.getName()) {
                     case "copy", "copyWithLatestSchema" -> proxy;
                     case "options" -> options;
+                    case "coreOptions" -> new CoreOptions(options);
                     case "rowType" -> rowType;
                     case "toString" -> "testing-file-store-table";
                     default -> throw new UnsupportedOperationException(method.getName());

@@ -42,7 +42,7 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.table.Table;
+import org.apache.paimon.table.FileStoreTable;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -208,6 +208,9 @@ public class TableChangesFunction
         return normalizedValue;
     }
 
+    private static final String SCAN_MODE_DIFF = "diff";
+    private static final String SCAN_MODE_CHANGELOG = "changelog";
+
     private static void validateIncrementalBetweenScanMode(String value)
     {
         try {
@@ -267,10 +270,24 @@ public class TableChangesFunction
         try {
             PaimonCatalog catalog = trinoMetadata.catalog();
             Catalog sessionCatalog = catalog.forSession(session);
-            Table paimonTable = PaimonTableSupport.requireFileStoreTable(
+            FileStoreTable paimonTable = PaimonTableSupport.requireFileStoreTable(
                     sessionCatalog.getTable(Identifier.create(schema, table)),
                     "system.table_changes")
                     .copyWithLatestSchema();
+            if (incrementalBetweenTagToSnapshot
+                    && incrementalBetweenScanMode.filter(mode -> mode.equalsIgnoreCase(SCAN_MODE_DIFF)).isPresent()) {
+                throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
+                        INCREMENTAL_BETWEEN_TAG_TO_SNAPSHOT + " does not support "
+                                + INCREMENTAL_BETWEEN_SCAN_MODE + "=" + SCAN_MODE_DIFF);
+            }
+            if (incrementalBetweenScanMode.filter(mode -> mode.equalsIgnoreCase(SCAN_MODE_CHANGELOG)).isPresent()
+                    && paimonTable.coreOptions().changelogProducer() == CoreOptions.ChangelogProducer.NONE) {
+                // Paimon reads the changelog manifest list for this mode; a table without a changelog
+                // producer has none, and the scan would silently return an empty result.
+                throw new TrinoException(INVALID_FUNCTION_ARGUMENT,
+                        INCREMENTAL_BETWEEN_SCAN_MODE + "=" + SCAN_MODE_CHANGELOG
+                                + " requires a table with a changelog producer");
+            }
             Map<String, String> options = new HashMap<>();
             if (normalizedIncrementalBetweenValue.isPresent()) {
                 options.put(CoreOptions.INCREMENTAL_BETWEEN.key(), normalizedIncrementalBetweenValue.orElseThrow());

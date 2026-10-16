@@ -173,7 +173,7 @@ public class PaimonSplitManager
             List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
             double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
             List<PaimonSplit> paimonSplits = toPaimonSplits(splits, minimumSplitWeight);
-            PaimonSplitSource splitSource = new PaimonSplitSource(paimonSplits, tableHandle.getLimit());
+            PaimonSplitSource splitSource = new PaimonSplitSource(paimonSplits, splitSourceLimit(tableHandle));
             recordSplitStats(stats, paimonSplits);
             return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
         }
@@ -253,10 +253,26 @@ public class PaimonSplitManager
     static void pushLimit(ReadBuilder readBuilder, PaimonTableHandle tableHandle)
     {
         requireNonNull(readBuilder, "readBuilder is null");
-        OptionalLong limit = requireNonNull(tableHandle, "tableHandle is null").getLimit();
+        requireNonNull(tableHandle, "tableHandle is null");
+        if (tableHandle.hasIncrementalReadMode()) {
+            // An incremental scan reports physical rows per split, not the logical changes it returns, so a
+            // pushed LIMIT can cut off changes that belong to the window. Trino applies the LIMIT itself.
+            return;
+        }
+        OptionalLong limit = tableHandle.getLimit();
         if (limit.isPresent() && limit.getAsLong() <= Integer.MAX_VALUE) {
             readBuilder.withLimit(toIntExact(limit.getAsLong()));
         }
+    }
+
+    /**
+     * Split-source limit for a read. Incremental splits count physical rows, while the reader returns the
+     * logical changes of the window, so the connector must not stop split delivery on that estimate.
+     */
+    static OptionalLong splitSourceLimit(PaimonTableHandle tableHandle)
+    {
+        requireNonNull(tableHandle, "tableHandle is null");
+        return tableHandle.hasIncrementalReadMode() ? OptionalLong.empty() : tableHandle.getLimit();
     }
 
     static void pushPredicate(ReadBuilder readBuilder, Table table, TupleDomain<PaimonColumnHandle> predicate)
@@ -350,7 +366,7 @@ public class PaimonSplitManager
     static PaimonSplitSource emptySplitSource(PaimonTableHandle tableHandle)
     {
         requireNonNull(tableHandle, "tableHandle is null");
-        return new PaimonSplitSource(List.of(), tableHandle.getLimit());
+        return new PaimonSplitSource(List.of(), splitSourceLimit(tableHandle));
     }
 
     static boolean isEmptySplit(TupleDomain<PaimonColumnHandle> predicate, PaimonTableHandle tableHandle)

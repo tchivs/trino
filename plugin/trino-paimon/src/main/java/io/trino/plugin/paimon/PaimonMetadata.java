@@ -400,17 +400,19 @@ public final class PaimonMetadata
             PaimonKeyDynamicBootstrap.validateAtomicCommitCapability(storeTable);
             PaimonTableHandle planned = tableHandle.withKeyDynamicBootstrapSnapshot(
                     PaimonKeyDynamicBootstrap.latestSnapshot(storeTable));
-            PaimonKeyDynamicBootstrap.prepare(
-                    storeTable,
-                    queryId,
-                    PaimonKeyDynamicBootstrap.snapshotFor(planned),
-                    planned.getDynamicBucketAssignerParallelism().orElseThrow());
+            // Register the cleanup before generating artifacts: a failed prepare can leave a partial root
+            // behind, and cleanup tolerates a missing root.
             bootstrapCleanups.computeIfAbsent(queryId, ignored -> new CopyOnWriteArrayList<>())
                     .add(new BootstrapCleanup(
                             queryId,
                             storeTable,
                             PaimonKeyDynamicBootstrap.snapshotFor(planned),
                             planned.getDynamicBucketAssignerParallelism().orElseThrow()));
+            PaimonKeyDynamicBootstrap.prepare(
+                    storeTable,
+                    queryId,
+                    PaimonKeyDynamicBootstrap.snapshotFor(planned),
+                    planned.getDynamicBucketAssignerParallelism().orElseThrow());
             return planned;
         }
         catch (Exception e) {
@@ -454,7 +456,8 @@ public final class PaimonMetadata
     private static PaimonTableHandle pinKeyDynamicBootstrapSnapshot(
             Table table,
             PaimonTableHandle tableHandle,
-            boolean keyDynamic)
+            boolean keyDynamic,
+            boolean replace)
     {
         requireNonNull(table, "table is null");
         requireNonNull(tableHandle, "tableHandle is null");
@@ -465,6 +468,12 @@ public final class PaimonMetadata
             return tableHandle;
         }
 
+        if (replace) {
+            // CREATE OR REPLACE replaced the table, which leaves an overwrite snapshot behind. The
+            // replacement write must validate against that state; pinning the empty CTAS state would
+            // reject the commit after the previous table was already gone.
+            return tableHandle.withKeyDynamicBootstrapSnapshot(PaimonKeyDynamicBootstrap.latestSnapshot(storeTable));
+        }
         // CTAS has just created an empty table, so there is no existing routing state to read.
         // Pin the empty snapshot explicitly so the commit path cannot silently skip the
         // KEY_DYNAMIC validator when a storage implementation does not expose a snapshot yet.
@@ -552,7 +561,7 @@ public final class PaimonMetadata
                     .withDynamicBucketAssignerParallelism(dynamicBucketAssignerParallelism(layout));
             // CTAS starts with an empty table, so workers do not need a bootstrap artifact. The initial
             // snapshot is still pinned so a concurrent write cannot race this query's first commit.
-            return pinKeyDynamicBootstrapSnapshot(table, outputHandle, keyDynamic);
+            return pinKeyDynamicBootstrapSnapshot(table, outputHandle, keyDynamic, replace);
         }
         catch (RuntimeException e) {
             keyDynamicWriteCoordinator.releaseQuery(session.getQueryId());

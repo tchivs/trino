@@ -23,6 +23,7 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
@@ -333,6 +334,29 @@ public class TrinoSplitTest
 
         assertThat(pushedLimits).containsExactly(42);
         assertThat(stats.getSplitCount()).isEqualTo(2);
+    }
+
+    @Test
+    public void testIncrementalReadIgnoresPhysicalRowCountForLimit()
+            throws Exception
+    {
+        List<Integer> pushedLimits = new ArrayList<>();
+        List<Split> plannedSplits = List.of(new TestingSplit(100), new TestingSplit(100));
+        RecordingCatalog catalog = new RecordingCatalog(false, limitRecordingTable(pushedLimits, plannedSplits));
+        PaimonSplitManager splitManager = splitManager(catalog, new PaimonConnectorStats());
+
+        // An incremental scan reports physical rows per split, not the logical changes of the window
+        PaimonTableHandle incrementalHandle = new PaimonTableHandle("schema", "table",
+                Map.of(CoreOptions.INCREMENTAL_BETWEEN.key(), "1,2"),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.of(5));
+
+        ConnectorSplitSource.ConnectorSplitBatch batch = splitManager
+                .getSplits(null, SESSION, incrementalHandle, DynamicFilter.EMPTY, Constraint.alwaysTrue())
+                .getNextBatch(100)
+                .get();
+
+        assertThat(pushedLimits).isEmpty();
+        assertThat(batch.getSplits()).hasSize(2);
     }
 
     @Test

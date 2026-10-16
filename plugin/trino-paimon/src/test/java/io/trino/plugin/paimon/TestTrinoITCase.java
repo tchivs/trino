@@ -1260,6 +1260,36 @@ public class TestTrinoITCase
     }
 
     @Test
+    public void testKeyDynamicCreateOrReplaceTableAsSelect()
+    {
+        String tableName = "key_dynamic_replace_ctas_" + UUID.randomUUID().toString().replace('-', '_');
+        String table = "paimon.default." + tableName;
+        try {
+            sql("CREATE TABLE " + table + " WITH ("
+                    + "partitioned_by = ARRAY['dt'], primary_key = ARRAY['id'], bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2', dynamic_bucket_initial_buckets = '2') AS "
+                    + "SELECT * FROM (VALUES (101, 1001, 'one'), (102, 1002, 'two')) "
+                    + "AS source(dt, id, name)");
+            assertThat(sql("SELECT dt, id, name FROM " + table + " ORDER BY id"))
+                    .isEqualTo("[[101, 1001, one], [102, 1002, two]]");
+
+            // CREATE OR REPLACE replaces the table, which leaves an overwrite snapshot behind; the
+            // replacement write must validate against that snapshot instead of the empty CTAS state.
+            sql("CREATE OR REPLACE TABLE " + table + " WITH ("
+                    + "partitioned_by = ARRAY['dt'], primary_key = ARRAY['id'], bucket = '-1', "
+                    + "dynamic_bucket_assigner_parallelism = '2', dynamic_bucket_initial_buckets = '2') AS "
+                    + "SELECT * FROM (VALUES (201, 2001, 'three'), (202, 2002, 'four')) "
+                    + "AS source(dt, id, name)");
+
+            assertThat(sql("SELECT dt, id, name FROM " + table + " ORDER BY id"))
+                    .isEqualTo("[[201, 2001, three], [202, 2002, four]]");
+        }
+        finally {
+            sql("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
     public void testHashDynamicInsertOverwrite()
     {
         sql("CREATE TABLE paimon.default.hash_dynamic_overwrite ("
