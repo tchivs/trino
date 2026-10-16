@@ -1908,6 +1908,51 @@ public class PaimonMetadataTableModeTest
     }
 
     @Test
+    public void testCommitRecordsWriteStats()
+            throws Exception
+    {
+        AtomicBoolean committed = new AtomicBoolean();
+        FileStoreTable table = commitFileStoreTable(new AtomicBoolean(), committed);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+        Slice fragment = commitFragment();
+
+        assertThat(metadata.finishInsert(SESSION, tableHandle, List.of(fragment), List.of())).isEmpty();
+
+        PaimonConnectorStats stats = catalog.stats();
+        assertThat(committed).isTrue();
+        assertThat(stats.getWriteCommitCount()).isEqualTo(1);
+        assertThat(stats.getWriteCommitBytes()).isEqualTo(fragment.length());
+        assertThat(stats.getWriteCommitFailures()).isZero();
+        assertThat(stats.getWriteBytesPerCommit().getAllTime().getCount()).isEqualTo(1);
+        assertThat(stats.getWriteCommitTimeNanos().getAllTime().getCount()).isEqualTo(1);
+    }
+
+    @Test
+    public void testFailedCommitRecordsWriteStats()
+            throws Exception
+    {
+        RuntimeException commitFailure = new RuntimeException("commit failed");
+        FileStoreTable table = commitFileStoreTable(new AtomicBoolean(), new AtomicBoolean(), new AtomicReference<>(),
+                commitFailure);
+        TestingPaimonCatalog catalog = new TestingPaimonCatalog(table);
+        PaimonMetadata metadata = new PaimonMetadata(catalog, TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertThatThrownBy(() -> metadata.finishInsert(SESSION, tableHandle, List.of(commitFragment()), List.of()))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(PAIMON_COMMIT_ERROR.toErrorCode());
+                    assertThat(exception).hasMessage("Failed to commit Paimon write fragments");
+                });
+
+        PaimonConnectorStats stats = catalog.stats();
+        assertThat(stats.getWriteCommitFailures()).isEqualTo(1);
+        assertThat(stats.getWriteCommitCount()).isZero();
+        assertThat(stats.getWriteCommitBytes()).isZero();
+    }
+
+    @Test
     public void testCommitIgnoresSessionScanSnapshotAndHandleStartupSelections()
             throws Exception
     {

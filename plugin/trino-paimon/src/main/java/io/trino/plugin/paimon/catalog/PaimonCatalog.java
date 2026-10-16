@@ -17,6 +17,7 @@ import io.airlift.log.Logger;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.paimon.ClassLoaderUtils;
+import io.trino.plugin.paimon.PaimonConnectorStats;
 import io.trino.plugin.paimon.fileio.PaimonFileIOLoader;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
@@ -91,6 +92,8 @@ public class PaimonCatalog
 
     private final java.util.function.Function<ConnectorSession, Catalog> sessionCatalogFactory;
 
+    private final PaimonConnectorStats stats;
+
     private final Map<SessionCatalogKey, SessionCatalogEntry> catalogs = new LinkedHashMap<>(16, 0.75f, true);
     private final ThreadLocal<Catalog> currentCatalog = new ThreadLocal<>();
     private volatile boolean closed;
@@ -103,12 +106,27 @@ public class PaimonCatalog
     public PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory,
             int sessionCatalogCacheMaximumSize)
     {
-        this(options, paimonFileSystemFactory, sessionCatalogCacheMaximumSize, null);
+        this(options, paimonFileSystemFactory, sessionCatalogCacheMaximumSize, new PaimonConnectorStats());
+    }
+
+    public PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory,
+            int sessionCatalogCacheMaximumSize, PaimonConnectorStats stats)
+    {
+        this(options, paimonFileSystemFactory, sessionCatalogCacheMaximumSize, null, stats);
     }
 
     PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory,
             int sessionCatalogCacheMaximumSize,
             @Nullable java.util.function.Function<ConnectorSession, Catalog> sessionCatalogFactory)
+    {
+        this(options, paimonFileSystemFactory, sessionCatalogCacheMaximumSize, sessionCatalogFactory,
+                new PaimonConnectorStats());
+    }
+
+    PaimonCatalog(Options options, TrinoFileSystemFactory paimonFileSystemFactory,
+            int sessionCatalogCacheMaximumSize,
+            @Nullable java.util.function.Function<ConnectorSession, Catalog> sessionCatalogFactory,
+            PaimonConnectorStats stats)
     {
         this.options = requireNonNull(options, "options is null");
         this.paimonFileSystemFactory = requireNonNull(paimonFileSystemFactory, "paimonFileSystemFactory is null");
@@ -117,6 +135,12 @@ public class PaimonCatalog
                 sessionCatalogCacheMaximumSize);
         this.sessionCatalogCacheMaximumSize = sessionCatalogCacheMaximumSize;
         this.sessionCatalogFactory = sessionCatalogFactory == null ? this::createCatalog : sessionCatalogFactory;
+        this.stats = requireNonNull(stats, "stats is null");
+    }
+
+    public PaimonConnectorStats stats()
+    {
+        return stats;
     }
 
     public void initSession(ConnectorSession connectorSession)
@@ -133,9 +157,11 @@ public class PaimonCatalog
             checkState(!closed, "Paimon catalog is already closed");
             SessionCatalogEntry entry = catalogs.get(key);
             if (entry != null) {
+                stats.incrementCatalogCacheHits();
                 return entry.proxy();
             }
         }
+        stats.incrementCatalogCacheMisses();
 
         SessionCatalogEntry createdEntry = new SessionCatalogEntry(requireNonNull(
                 sessionCatalogFactory.apply(connectorSession), "session catalog is null"));

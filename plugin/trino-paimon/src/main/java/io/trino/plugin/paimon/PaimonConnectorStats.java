@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Collects runtime metrics for the Paimon connector. Exposed via JMX as
- * {@code paimon.trino.<catalog>.type=PaimonConnectorStats}.
+ * {@code trino.plugin.paimon:type=PaimonConnectorStats,name=<catalog>}.
  */
 public class PaimonConnectorStats
 {
@@ -43,9 +43,9 @@ public class PaimonConnectorStats
         return splitCount.get();
     }
 
-    public void incrementSplitCount()
+    public void addSplitCount(long count)
     {
-        splitCount.incrementAndGet();
+        splitCount.addAndGet(count);
     }
 
     @Managed

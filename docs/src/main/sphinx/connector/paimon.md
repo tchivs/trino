@@ -362,6 +362,16 @@ optimizer. Paimon column NDV statistics are required for join-output estimates;
 without them Trino intentionally keeps the join output unknown while retaining
 the exact input cardinalities.
 
+## Monitoring
+
+The connector publishes runtime counters to JMX under the object name
+`trino.plugin.paimon:type=PaimonConnectorStats,name=<catalog-name>`:
+
+- `SplitCount`, `SplitWeight`, `SplitRowCount`: splits planned for reads.
+- `WriteCommitCount`, `WriteCommitBytes`, `WriteCommitFailures`,
+  `WriteCommitTimeNanos`, `WriteBytesPerCommit`: Paimon write commits.
+- `CatalogCacheHits`, `CatalogCacheMisses`: session catalog cache lookups.
+
 ## Known limitations
 
 - `ALTER SCHEMA RENAME` is not supported. Paimon's catalog API does not expose a

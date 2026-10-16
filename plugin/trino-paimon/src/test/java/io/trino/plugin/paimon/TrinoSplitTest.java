@@ -39,6 +39,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -305,6 +306,33 @@ public class TrinoSplitTest
         assertThat(batch.getSplits()).isEmpty();
         assertThat(batch.isNoMoreSplits()).isTrue();
         assertThat(splitSource.isFinished()).isTrue();
+    }
+
+    @Test
+    public void testSplitPlanningPushesLimitToPaimonReadBuilder()
+            throws Exception
+    {
+        List<Integer> pushedLimits = new ArrayList<>();
+        List<Split> plannedSplits = List.of(new TestingSplit(100));
+        RecordingCatalog catalog = new RecordingCatalog(false, limitRecordingTable(pushedLimits, plannedSplits));
+        PaimonConnectorStats stats = new PaimonConnectorStats();
+        PaimonSplitManager splitManager = splitManager(catalog, stats);
+
+        PaimonTableHandle unlimitedHandle = new PaimonTableHandle("schema", "table", Map.of());
+        splitManager.getSplits(null, SESSION, unlimitedHandle, DynamicFilter.EMPTY, Constraint.alwaysTrue())
+                .getNextBatch(100).get();
+        assertThat(pushedLimits).isEmpty();
+        assertThat(stats.getSplitCount()).isEqualTo(1);
+        assertThat(stats.getSplitRowCount().getAllTime().getCount()).isEqualTo(1);
+        assertThat(stats.getSplitRowCount().getAllTime().getMax()).isEqualTo(100);
+
+        PaimonTableHandle limitedHandle = new PaimonTableHandle("schema", "table", Map.of(),
+                TupleDomain.all(), Optional.empty(), Optional.empty(), OptionalLong.of(42));
+        splitManager.getSplits(null, SESSION, limitedHandle, DynamicFilter.EMPTY, Constraint.alwaysTrue())
+                .getNextBatch(100).get();
+
+        assertThat(pushedLimits).containsExactly(42);
+        assertThat(stats.getSplitCount()).isEqualTo(2);
     }
 
     @Test
@@ -1031,6 +1059,11 @@ public class TrinoSplitTest
 
     private static PaimonSplitManager splitManager(RecordingCatalog catalog)
     {
+        return splitManager(catalog, new PaimonConnectorStats());
+    }
+
+    private static PaimonSplitManager splitManager(RecordingCatalog catalog, PaimonConnectorStats stats)
+    {
         return new PaimonSplitManager(new PaimonMetadataFactory(new Options(),
                 session -> {
                     throw new AssertionError("filesystem should not be used by split planning test");
@@ -1045,7 +1078,41 @@ public class TrinoSplitTest
                 }
                 return super.create();
             }
-        }, new PaimonConnectorStats());
+        }, stats);
+    }
+
+    private static Table limitRecordingTable(List<Integer> pushedLimits, List<Split> splits)
+    {
+        RowType rowType = DataTypes.ROW(DataTypes.FIELD(0, "id", DataTypes.BIGINT()));
+        return (Table) Proxy.newProxyInstance(
+                TrinoSplitTest.class.getClassLoader(),
+                new Class<?>[] {Table.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "copy" -> proxy;
+                    case "newReadBuilder" -> limitRecordingReadBuilder(rowType, pushedLimits, splits);
+                    case "rowType" -> rowType;
+                    case "toString" -> "limit-recording-table";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static ReadBuilder limitRecordingReadBuilder(RowType rowType, List<Integer> pushedLimits, List<Split> splits)
+    {
+        return (ReadBuilder) Proxy.newProxyInstance(
+                TrinoSplitTest.class.getClassLoader(),
+                new Class<?>[] {ReadBuilder.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "dropStats", "withFilter" -> proxy;
+                    case "withLimit" -> {
+                        pushedLimits.add((Integer) args[0]);
+                        yield proxy;
+                    }
+                    case "newScan" -> tableScan(splits);
+                    case "readType" -> rowType;
+                    case "tableName" -> "limit-recording-table";
+                    case "toString" -> "limit-recording-read-builder";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
     }
 
     private static Table table()
@@ -1112,11 +1179,16 @@ public class TrinoSplitTest
 
     private static TableScan tableScan()
     {
+        return tableScan(List.of());
+    }
+
+    private static TableScan tableScan(List<Split> splits)
+    {
         return (TableScan) Proxy.newProxyInstance(
                 TrinoSplitTest.class.getClassLoader(),
                 new Class<?>[] {TableScan.class},
                 (proxy, method, args) -> switch (method.getName()) {
-                    case "plan" -> (TableScan.Plan) () -> List.of();
+                    case "plan" -> (TableScan.Plan) () -> splits;
                     case "toString" -> "testing-table-scan";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });

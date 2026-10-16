@@ -157,6 +157,29 @@ public class PaimonCatalogTest
     }
 
     @Test
+    public void testCatalogRecordsSessionCacheStats()
+            throws Exception
+    {
+        RecordingFileSystemFactory fileSystemFactory = new RecordingFileSystemFactory(root);
+        PaimonCatalog catalog = catalog(fileSystemFactory);
+        TestingConnectorSession alice = session("alice");
+        TestingConnectorSession bob = session("bob");
+
+        catalog.initSession(alice);
+        assertThat(catalog.stats().getCatalogCacheMisses()).isEqualTo(1);
+        assertThat(catalog.stats().getCatalogCacheHits()).isZero();
+
+        catalog.initSession(alice);
+        assertThat(catalog.stats().getCatalogCacheMisses()).isEqualTo(1);
+        assertThat(catalog.stats().getCatalogCacheHits()).isEqualTo(1);
+
+        catalog.initSession(bob);
+        assertThat(catalog.stats().getCatalogCacheMisses()).isEqualTo(2);
+        assertThat(catalog.stats().getCatalogCacheHits()).isEqualTo(1);
+        assertThat(fileSystemFactory.createCalls()).hasValue(2);
+    }
+
+    @Test
     public void testCatalogSeparatesDelegatesForDifferentIdentities()
             throws Exception
     {

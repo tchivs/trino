@@ -205,7 +205,9 @@ public class DynamicFilteringTrinoSplitSource
 
             double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
 
-            return new PaimonSplitSource(PaimonSplitManager.toPaimonSplits(splits, minimumSplitWeight), tableHandle.getLimit());
+            List<PaimonSplit> paimonSplits = PaimonSplitManager.toPaimonSplits(splits, minimumSplitWeight);
+            PaimonSplitManager.recordSplitStats(paimonCatalog.stats(), paimonSplits);
+            return new PaimonSplitSource(paimonSplits, tableHandle.getLimit());
         }
         catch (UnsupportedOperationException e) {
             throw PaimonSplitManager.unsupportedReadOperation(tableHandle, e);

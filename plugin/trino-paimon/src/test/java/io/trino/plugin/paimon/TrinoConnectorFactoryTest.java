@@ -34,7 +34,11 @@ import org.apache.paimon.options.Options;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
+
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -60,6 +64,26 @@ public class TrinoConnectorFactoryTest
         ConnectorFactory factory = new PaimonConnectorFactory();
         Connector connector = factory.create("paimon", config, new TestingConnectorContext());
         assertThat(connector).isNotNull();
+    }
+
+    @Test
+    public void testConnectorExportsJmxStats()
+            throws Exception
+    {
+        Map<String, String> config = Map.of("warehouse", tempFile.toString());
+        Connector connector = new PaimonConnectorFactory().create("paimon", config, new TestingConnectorContext());
+
+        // Create the split manager so the stats bean is instantiated and exported
+        connector.getSplitManager();
+
+        MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
+        ObjectName objectName = new ObjectName("trino.plugin.paimon:type=PaimonConnectorStats,name=paimon");
+        assertThat(mBeanServer.queryNames(objectName, null)).containsExactly(objectName);
+        // Another connector instance created earlier in this JVM can still own the same object name,
+        // so only registration and readable attributes are asserted here.
+        assertThat(mBeanServer.getAttribute(objectName, "SplitCount")).isInstanceOf(Long.class);
+        assertThat(mBeanServer.getAttribute(objectName, "WriteCommitFailures")).isInstanceOf(Long.class);
+        assertThat(mBeanServer.getAttribute(objectName, "CatalogCacheMisses")).isInstanceOf(Long.class);
     }
 
     @Test

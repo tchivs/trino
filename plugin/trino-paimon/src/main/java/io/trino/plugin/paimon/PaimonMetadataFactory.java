@@ -33,28 +33,30 @@ public class PaimonMetadataFactory
 
     @Inject
     public PaimonMetadataFactory(Options options, TrinoFileSystemFactory fileSystemFactory, TypeManager typeManager,
-            PaimonConfig config, NodeManager nodeManager)
+            PaimonConfig config, NodeManager nodeManager, PaimonConnectorStats stats)
     {
         this(options, fileSystemFactory, typeManager,
                 requireNonNull(config, "config is null").getCatalogSessionCacheMaximumSize(),
                 () -> requireNonNull(nodeManager, "nodeManager is null")
                         .getRequiredWorkerNodes()
-                        .size());
+                        .size(),
+                requireNonNull(stats, "stats is null"));
     }
 
     public PaimonMetadataFactory(Options options, TrinoFileSystemFactory fileSystemFactory, TypeManager typeManager)
     {
         this(options, fileSystemFactory, typeManager, PaimonCatalog.DEFAULT_SESSION_CATALOG_CACHE_MAXIMUM_SIZE,
-                () -> 1);
+                () -> 1, new PaimonConnectorStats());
     }
 
     private PaimonMetadataFactory(Options options, TrinoFileSystemFactory fileSystemFactory, TypeManager typeManager,
-            int sessionCatalogCacheMaximumSize, IntSupplier dynamicBucketWorkerCountSupplier)
+            int sessionCatalogCacheMaximumSize, IntSupplier dynamicBucketWorkerCountSupplier, PaimonConnectorStats stats)
     {
         this.catalog = new PaimonCatalog(
                 requireNonNull(options, "options is null"),
                 requireNonNull(fileSystemFactory, "fileSystemFactory is null"),
-                sessionCatalogCacheMaximumSize);
+                sessionCatalogCacheMaximumSize,
+                requireNonNull(stats, "stats is null"));
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.dynamicBucketWorkerCountSupplier = requireNonNull(dynamicBucketWorkerCountSupplier,
                 "dynamicBucketWorkerCountSupplier is null");

@@ -194,7 +194,7 @@ public class PaimonConnectorFactory
         verifyTrinoFormatFactories(classLoader);
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             Bootstrap app = new Bootstrap(new EventModule(), new MBeanModule(),
-                    new ConnectorObjectNameGeneratorModule("org.apache.paimon.trino", "paimon.trino"), new JsonModule(),
+                    new ConnectorObjectNameGeneratorModule("io.trino.plugin.paimon", "trino.plugin.paimon"), new JsonModule(),
                     new TypeDeserializerModule(context.getTypeManager()), new PaimonModule(), new MBeanServerModule(),
                     new FileSystemModule(catalogName, context.getNodeManager(), context.getOpenTelemetry()), binder -> {
                         binder.bind(OpenTelemetry.class).toInstance(context.getOpenTelemetry());

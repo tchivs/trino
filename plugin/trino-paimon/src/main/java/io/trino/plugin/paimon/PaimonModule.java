@@ -32,6 +32,7 @@ import org.apache.paimon.options.Options;
 import static com.google.inject.Scopes.SINGLETON;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
 public class PaimonModule
         implements
@@ -45,6 +46,7 @@ public class PaimonModule
         binder.bind(PaimonPageSourceProvider.class).in(SINGLETON);
         binder.bind(PaimonPageSinkProvider.class).in(SINGLETON);
         binder.bind(PaimonConnectorStats.class).in(SINGLETON);
+        newExporter(binder).export(PaimonConnectorStats.class).withGeneratedName();
         binder.bind(PaimonNodePartitioningProvider.class).in(SINGLETON);
         binder.bind(PaimonSessionProperties.class).in(SINGLETON);
         binder.bind(PaimonSchemaProperties.class).in(SINGLETON);

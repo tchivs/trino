@@ -169,18 +169,12 @@ public class PaimonSplitManager
                     !tableHandle.usesHistoricalReadSchema(session));
             ReadBuilder readBuilder = table.newReadBuilder();
             pushPredicate(readBuilder, table, predicate);
+            pushLimit(readBuilder, tableHandle);
             List<Split> splits = readBuilder.dropStats().newScan().plan().splits();
             double minimumSplitWeight = PaimonSessionProperties.getMinimumSplitWeight(session);
             List<PaimonSplit> paimonSplits = toPaimonSplits(splits, minimumSplitWeight);
             PaimonSplitSource splitSource = new PaimonSplitSource(paimonSplits, tableHandle.getLimit());
-
-            stats.incrementSplitCount();
-            for (PaimonSplit paimonSplit : paimonSplits) {
-                stats.addSplitRowCount(paimonSplit.rowCount() != null ? paimonSplit.rowCount() : 0);
-                if (paimonSplit.weight() != null) {
-                    stats.addSplitWeight(paimonSplit.weight());
-                }
-            }
+            recordSplitStats(stats, paimonSplits);
             return new ClassLoaderSafeConnectorSplitSource(splitSource, PaimonSplitManager.class.getClassLoader());
         }
         catch (UnsupportedOperationException e) {
@@ -293,6 +287,22 @@ public class PaimonSplitManager
             return minimumSplitWeight;
         }
         return Math.min(Math.max((double) rowCount / maxRowCount, minimumSplitWeight), 1.0);
+    }
+
+    static void recordSplitStats(PaimonConnectorStats stats, List<PaimonSplit> splits)
+    {
+        requireNonNull(stats, "stats is null");
+        requireNonNull(splits, "splits is null");
+        stats.addSplitCount(splits.size());
+        for (PaimonSplit split : splits) {
+            requireNonNull(split, "splits contains null split");
+            if (split.rowCount() != null) {
+                stats.addSplitRowCount(split.rowCount());
+            }
+            if (split.weight() != null) {
+                stats.addSplitWeight(split.weight());
+            }
+        }
     }
 
     static List<PaimonSplit> toPaimonSplits(List<Split> splits, double minimumSplitWeight)

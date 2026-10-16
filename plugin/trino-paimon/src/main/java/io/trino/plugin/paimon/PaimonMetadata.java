@@ -731,6 +731,9 @@ public final class PaimonMetadata
         FileStoreTable fileStoreTable = null;
         PaimonKeyDynamicBootstrap.OptionalSnapshot expectedSnapshot = PaimonKeyDynamicBootstrap.snapshotFor(tableHandle);
 
+        PaimonConnectorStats stats = catalog.stats();
+        long commitBytes = fragmentsList.stream().mapToLong(Slice::length).sum();
+        long commitStartNanos = System.nanoTime();
         try {
             fileStoreTable = latestWriteFileStoreTable(tableHandle, sessionCatalog, "commit writes");
             FileStoreTable commitTable = fileStoreTable;
@@ -775,8 +778,13 @@ public final class PaimonMetadata
                 }
                 commit.commit(commitMessages);
             }
+            stats.incrementWriteCommitCount();
+            stats.addWriteCommitBytes(commitBytes);
+            stats.addWriteBytesPerCommit(commitBytes);
+            stats.addWriteCommitTimeNanos(System.nanoTime() - commitStartNanos);
         }
         catch (Exception e) {
+            stats.incrementWriteCommitFailures();
             Throwable commitFailure = firstRecognizedCommitFailure(e);
             if (commitFailure instanceof TrinoException trinoException) {
                 throw trinoException;
