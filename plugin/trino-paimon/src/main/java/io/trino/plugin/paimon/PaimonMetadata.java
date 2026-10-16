@@ -52,10 +52,15 @@ import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.statistics.DoubleRange;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
+import io.trino.spi.type.BigintType;
+import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
+import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
+import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
@@ -1659,13 +1664,7 @@ public final class PaimonMetadata
                     break;
                 }
                 case TARGET_ID : {
-                    String versionValue;
-                    if (versionType instanceof VarcharType) {
-                        versionValue = BinaryString.fromBytes(((Slice) version.getVersion()).getBytes()).toString();
-                    }
-                    else {
-                        versionValue = version.getVersion().toString();
-                    }
+                    String versionValue = targetIdVersionValue(versionType, version.getVersion());
                     if (versionValue.isBlank()) {
                         throw new TrinoException(INVALID_ARGUMENTS, "Paimon table version may not be blank");
                     }
@@ -1675,6 +1674,25 @@ public final class PaimonMetadata
             }
         }
         return getTableHandle(session, tableName, dynamicOptions);
+    }
+
+    /**
+     * Snapshot, tag, and branch selectors reach Paimon as a string. Character and variable character
+     * versions are Slice-backed, while numeric versions are already in their literal form; any other
+     * type cannot name a Paimon version and is rejected instead of being stringified.
+     */
+    private static String targetIdVersionValue(Type versionType, Object version)
+    {
+        if (versionType instanceof VarcharType || versionType instanceof CharType) {
+            return BinaryString.fromBytes(((Slice) version).getBytes()).toString();
+        }
+        if (versionType instanceof TinyintType
+                || versionType instanceof SmallintType
+                || versionType instanceof IntegerType
+                || versionType instanceof BigintType) {
+            return version.toString();
+        }
+        throw new TrinoException(NOT_SUPPORTED, "Unsupported type for table version: " + versionType.getDisplayName());
     }
 
     @Deprecated
@@ -2558,9 +2576,21 @@ public final class PaimonMetadata
 
     private static boolean isColumnAlreadyExistsException(Exception exception)
     {
-        return exception instanceof Catalog.ColumnAlreadyExistException
-                || (exception instanceof TrinoException trinoException
-                && trinoException.getErrorCode().equals(COLUMN_ALREADY_EXISTS.toErrorCode()));
+        // Paimon catalogs and catalog proxies can wrap the duplicate-column failure, so inspect the whole
+        // cause chain. Only COLUMN_ALREADY_EXISTS is suppressed; every other failure still surfaces.
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = exception;
+        while (current != null && visited.add(current)) {
+            if (current instanceof Catalog.ColumnAlreadyExistException) {
+                return true;
+            }
+            if (current instanceof TrinoException trinoException
+                    && trinoException.getErrorCode().equals(COLUMN_ALREADY_EXISTS.toErrorCode())) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private static SchemaTableName schemaTableName(PaimonTableHandle tableHandle)

@@ -4694,6 +4694,17 @@ public class PaimonMetadataTableModeTest
                         Map.of(CoreOptions.SCAN_VERSION.key(), "tag-1")));
         assertThat(versionedTableHandleCatalog.initialized).isTrue();
 
+        assertThat(versionedTableHandleMetadata.getTableHandle(SESSION, tableName,
+                Optional.empty(), Optional.of(new ConnectorTableVersion(PointerType.TARGET_ID, io.trino.spi.type.CharType.createCharType(5),
+                        Slices.utf8Slice("tag-1")))))
+                .isEqualTo(new PaimonTableHandle("schema", "table",
+                        Map.of(CoreOptions.SCAN_VERSION.key(), "tag-1")));
+
+        assertTrinoError(() -> versionedTableHandleMetadata.getTableHandle(SESSION, tableName,
+                        Optional.empty(), Optional.of(new ConnectorTableVersion(PointerType.TARGET_ID, DATE, 1L))),
+                NOT_SUPPORTED.toErrorCode(),
+                "Unsupported type for table version: date");
+
         assertThatThrownBy(() -> directTableHandleMetadata.getTableHandle(null, tableName, Map.of()))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("session is null");
@@ -7929,6 +7940,65 @@ public class PaimonMetadataTableModeTest
 
         // Should not throw when ignoreExisting=true
         metadata.addField(SESSION, tableHandle, List.of("address"), "street", VARCHAR, true);
+    }
+
+    @Test
+    public void testAddFieldIgnoreExistingHandlesWrappedDuplicateColumnFailure()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                failingAlterCatalog(new RuntimeException(new Catalog.ColumnAlreadyExistException(
+                        Identifier.create("schema", "table"), "street"))),
+                TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        // Paimon catalogs and catalog proxies can wrap the duplicate-column failure
+        metadata.addField(SESSION, tableHandle, List.of("address"), "street", VARCHAR, true);
+    }
+
+    @Test
+    public void testAddFieldIgnoreExistingDoesNotSuppressOtherWrappedFailures()
+    {
+        PaimonMetadata metadata = new PaimonMetadata(
+                failingAlterCatalog(new RuntimeException(new Catalog.TableNotExistException(
+                        Identifier.create("schema", "table")))),
+                TESTING_TYPE_MANAGER);
+        PaimonTableHandle tableHandle = new PaimonTableHandle("schema", "table", Map.of());
+
+        assertTrinoError(() -> metadata.addField(SESSION, tableHandle, List.of("address"), "street", VARCHAR, true),
+                TABLE_NOT_FOUND.toErrorCode(),
+                "Table 'schema.table' does not exist");
+    }
+
+    private static PaimonCatalog failingAlterCatalog(RuntimeException failure)
+    {
+        return new PaimonCatalog(new Options(), unsupportedFileSystemFactory())
+        {
+            @Override
+            public void initSession(ConnectorSession connectorSession) {}
+
+            @Override
+            public Catalog forSession(ConnectorSession connectorSession)
+            {
+                return this;
+            }
+
+            @Override
+            public Table getTable(Identifier identifier)
+            {
+                // No top-level 'street' field, so the duplicate check runs against the Paimon alter failure
+                org.apache.paimon.types.RowType rowType = DataTypes.ROW(
+                        DataTypes.FIELD(0, "address", DataTypes.ROW(
+                                DataTypes.FIELD(1, "city", DataTypes.STRING()))));
+                return fileStoreTable(BucketMode.HASH_FIXED, new AtomicBoolean(), rowType, rowType, List.of(),
+                        List.of(), "");
+            }
+
+            @Override
+            public void alterTable(Identifier identifier, List<SchemaChange> changes, boolean ignoreIfNotExists)
+            {
+                throw failure;
+            }
+        };
     }
 
     @Test

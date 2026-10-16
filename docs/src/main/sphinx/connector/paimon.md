@@ -427,6 +427,19 @@ The connector publishes runtime counters to JMX under the object name
 
 ## Known limitations
 
+- Row-level `UPDATE`, `DELETE`, and `MERGE` do not detect a concurrent modification
+  of the rows they read. The statement scans the target rows and then commits its
+  result against the current table state, so a row changed after the scan can be
+  overwritten or removed. Do not run row-level mutations concurrently with writes
+  to the same rows.
+- The metadata-delete fallback used by `DELETE` on bucket-unaware and fixed-bucket
+  tables verifies only the visible row count of the affected scope before
+  truncating it. A concurrent delete and insert that leaves the row count of that
+  scope unchanged is not detected.
+- `system.table_changes` returns table columns only, without the change kind of each
+  row, so a deleted row or the before-value of an updated row is indistinguishable
+  from an inserted row. Use `$audit_log` or `$binlog` on a table with
+  `changelog_producer` enabled to read change kinds.
 - Column and field names are matched case-insensitively. A table with two
   columns that differ only by case cannot be used as a write target, and schema
   changes for such a column are rejected as ambiguous.
